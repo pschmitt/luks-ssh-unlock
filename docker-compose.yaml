@@ -1,0 +1,54 @@
+---
+version: "3.8"
+
+services:
+  nasteanas:
+    image: pschmitt/luks-ssh-unlock:latest
+    build: .
+    deploy:
+      placement:
+        constraints:
+          - node.hostname != nasteanas
+    volumes:
+      - "./events:/events"
+    secrets:
+      - ssh_key
+      - password_ntn
+    environment:
+      # - "DEBUG=1"
+      - 'LUKS_TYPE=direct'
+      - 'SSH_HOST=10.7.0.215'
+      - 'SSH_KEY=/run/secrets/ssh_key'
+      - 'LUKS_PASSWORD_FILE=/run/secrets/password_ntn'
+      - 'EVENT_FILE=/events/ntn'
+      - 'SLEEP_INTERVAL=30'
+
+  fnuc:
+    image: pschmitt/luks-ssh-unlock:latest
+    build: .
+    deploy:
+      placement:
+        constraints:
+          - node.hostname != fnuc
+    volumes:
+      - "./events:/events"
+    secrets:
+      - ssh_key
+      - password_fnuc
+    environment:
+      # - "DEBUG=1"
+      - "HEALTHCHECK_PORT=9090"
+      - 'LUKS_TYPE=dracut'
+      - 'SSH_HOST=10.7.0.200'
+      - 'SSH_KEY=/run/secrets/ssh_key'
+      - 'LUKS_PASSWORD_FILE=/run/secrets/password_fnuc'
+      - 'EVENT_FILE=/events/fnuc'
+      - 'SLEEP_INTERVAL=30'
+
+secrets:
+  ssh_key:
+    file: ./secrets/id_docker_rsa
+  password_ntn:
+    file: ./secrets/password.ntn
+  password_fnuc:
+    file: ./secrets/password.fnuc
