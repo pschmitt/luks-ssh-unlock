@@ -7,7 +7,7 @@ SSH_USER="${SSH_USER:-root}"
 
 LUKS_PASSWORD="${LUKS_PASSWORD}"
 LUKS_PASSWORD_FILE="${LUKS_PASSWORD_FILE=-/run/secrets/luks_password_${SSH_HOST}}"
-LUKS_TYPE="direct"
+LUKS_TYPE="${LUKS_TYPE:-direct}"
 
 EVENT_FILE="${EVENT_FILE}"
 SLEEP_INTERVAL="${SLEEP_INTERVAL:-5}"
@@ -94,7 +94,7 @@ then
   chmod 400 "$SSH_KEY"
 fi
 
-if [[ -n "$LUKS_PASSWORD_FILE" ]]
+if [[ -z "$LUKS_PASSWORD" ]] && [[ -n "$LUKS_PASSWORD_FILE" ]]
 then
   if [[ ! -r "$LUKS_PASSWORD_FILE" ]]
   then
@@ -131,32 +131,40 @@ do
 
     case "$LUKS_TYPE" in
       direct)
-        if timeout 5 sh -c \
-          "echo '$LUKS_PASSWORD' | \
-           ssh -F /dev/null \
-             -o UserKnownHostsFile=/dev/null \
-             -o StrictHostKeyChecking=no \
-             -t \
-             -i '$SSH_KEY' \
-             -l '$SSH_USER' \
-             '$SSH_HOST'" && [[ -n "$EVENT_FILE" ]]
+        if echo "$LUKS_PASSWORD" | \
+             ssh -F /dev/null \
+               -o ConnectTimeout=5 \
+               -o UserKnownHostsFile=/dev/null \
+               -o StrictHostKeyChecking=no \
+               -t \
+               -i "$SSH_KEY" \
+               -l "$SSH_USER" \
+               "$SSH_HOST" && [[ -n "$EVENTS_FILE" ]]
         then
-          mkdir -p "$(dirname "$EVENT_FILE")"
-          echo "$(date -Iseconds): LUKS unlocked host at $SSH_HOST" >> "$EVENT_FILE"
+          mkdir -p "$(dirname "$EVENTS_FILE")"
+          log "LUKS unlocked host at $SSH_HOST" >> "$EVENTS_FILE"
+        else
+          log "Failed to unlock $SSH_HOST"
         fi
         ;;
       # TODO test
       # https://github.com/gsauthof/dracut-sshd/issues/32
       dracut-systemd|dracut-sshd|dracut|alt)
-        timeout 5 sh -c \
-          "echo '$LUKS_PASSWORD' | \
-           ssh -F /dev/null \
-             -o UserKnownHostsFile=/dev/null \
-             -o StrictHostKeyChecking=no \
-             -t \
-             -i '$SSH_KEY' \
-             -l '$SSH_USER' \
-             '$SSH_HOST' systemd-tty-ask-password-agent"
+          if echo "$LUKS_PASSWORD" | \
+               ssh -F /dev/null \
+                 -o ConnectTimeout=5 \
+                 -o UserKnownHostsFile=/dev/null \
+                 -o StrictHostKeyChecking=no \
+                 -t \
+                 -i "$SSH_KEY" \
+                 -l "$SSH_USER" \
+                 "$SSH_HOST" systemd-tty-ask-password-agent && [[ -n "$EVENTS_FILE" ]]
+        then
+          mkdir -p "$(dirname "$EVENTS_FILE")"
+          log "LUKS unlocked host at $SSH_HOST" >> "$EVENTS_FILE"
+        else
+          log "Failed to unlock $SSH_HOST"
+        fi
         ;;
     esac
   else
