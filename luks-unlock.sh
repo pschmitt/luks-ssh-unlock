@@ -9,7 +9,7 @@ LUKS_PASSWORD="${LUKS_PASSWORD}"
 LUKS_PASSWORD_FILE="${LUKS_PASSWORD_FILE=-/run/secrets/luks_password_${SSH_HOST}}"
 LUKS_TYPE="${LUKS_TYPE:-direct}"
 
-EVENT_FILE="${EVENT_FILE}"
+EVENTS_FILE="${EVENTS_FILE}"
 SLEEP_INTERVAL="${SLEEP_INTERVAL:-5}"
 
 HEALTHCHECK_PORT="${HEALTHCHECK_PORT}"
@@ -60,7 +60,7 @@ then
         shift 2
         ;;
       --event-file|--event|-e)
-        EVENT_FILE="$2"
+        EVENTS_FILE="$2"
         shift 2
         ;;
       *)
