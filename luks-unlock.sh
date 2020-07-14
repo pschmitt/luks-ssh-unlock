@@ -120,9 +120,9 @@ do
     if nc -z -w 2 "$SSH_HOST" "$HEALTHCHECK_PORT"
     then
       log "Healthcheck result OK"
+      sleep "$SLEEP_INTERVAL"
+      continue
     fi
-    sleep "$SLEEP_INTERVAL"
-    continue
   fi
 
   if nc -z -w 2 "$SSH_HOST" "$SSH_PORT"
