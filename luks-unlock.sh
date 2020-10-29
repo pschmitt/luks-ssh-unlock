@@ -169,7 +169,10 @@ do
   then
     if nc -z -w 2 "$SSH_HOST" "$HEALTHCHECK_PORT"
     then
-      log "Healthcheck result OK"
+      if [[ -n "$DEBUG" ]]
+      then
+        log "Healthcheck result OK"
+      fi
       sleep "$SLEEP_INTERVAL"
       continue
     fi
