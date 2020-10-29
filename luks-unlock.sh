@@ -27,23 +27,22 @@ log() {
 }
 
 log-notify() {
-  local log_event
-  log_event="$(log "$@")"
+  local event="$*"
 
   # Stdout
-  echo "$log_event"
+  log "$event"
 
   # Events file
   if [[ -n "$EVENTS_FILE" ]]
   then
     mkdir -p "$(dirname "$EVENTS_FILE")"
-    echo "$log_event" >> "$EVENTS_FILE"
+    echo "$event" >> "$EVENTS_FILE"
   fi
 
   # Apprise
   if [[ -n "$APPRISE_URL" ]]
   then
-    local jdata='{"body": "'"${log_event}"'"}'
+    local jdata='{"body": "'"${event}"'"}'
 
     if [[ -n "$APPRISE_TAG" ]]
     then
