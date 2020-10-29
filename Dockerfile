@@ -17,7 +17,7 @@ ENV SSH_HOST=example.com \
     HEALTHCHECK_PORT= \
     APPRISE_URL= \
     APPRISE_TAG= \
-    APPRISE_TITLE
+    APPRISE_TITLE=
 
 VOLUME /data/events
 
