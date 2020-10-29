@@ -14,12 +14,50 @@ SLEEP_INTERVAL="${SLEEP_INTERVAL:-5}"
 
 HEALTHCHECK_PORT="${HEALTHCHECK_PORT}"
 
+APPRISE_URL="${APPRISE_URL}"
+APPRISE_TAG="${APPRISE_TAG}"
+APPRISE_TITLE="${APPRISE_TITLE}"
+
 usage() {
   echo "Usage: $(basename "$0") --type LUKS_TYPE --host HOST --port PORT --username USER -- --sleep SLEEP --luks-password PASSWD"
 }
 
 log() {
   echo "$(date -Iseconds) $*"
+}
+
+log-notify() {
+  local log_event
+  log_event="$(log "$@")"
+
+  # Stdout
+  echo "$log_event"
+
+  # Events file
+  if [[ -n "$EVENTS_FILE" ]]
+  then
+    mkdir -p "$(dirname "$EVENTS_FILE")"
+    echo "$log_event" >> "$EVENTS_FILE"
+  fi
+
+  # Apprise
+  if [[ -n "$APPRISE_URL" ]]
+  then
+    local jdata='{"body": "'"${log_event}"'"}'
+
+    if [[ -n "$APPRISE_TAG" ]]
+    then
+      jdata="$(jq '. + {"tag": "'"${APPRISE_TAG}"'"}' <<< "$jdata")"
+    fi
+
+    if [[ -n "$APPRISE_TITLE" ]]
+    then
+      jdata="$(jq '. + {"title": "'"${APPRISE_TITLE}"'"}' <<< "$jdata")"
+    fi
+
+    curl -X POST -H "Content-Type: application/json" \
+      -d "$jdata" "$APPRISE_URL"
+  fi
 }
 
 if [[ -n "$*" ]]
@@ -61,6 +99,18 @@ then
         ;;
       --event-file|--event|-e)
         EVENTS_FILE="$2"
+        shift 2
+        ;;
+      --apprise-url|--apprise|-a)
+        APPRISE_URL="$2"
+        shift 2
+        ;;
+      --apprise-tag|--tag)
+        APPRISE_TAG="$2"
+        shift 2
+        ;;
+      --apprise-title|--title)
+        APPRISE_TITLE="$2"
         shift 2
         ;;
       *)
@@ -139,12 +189,11 @@ do
                -t \
                -i "$SSH_KEY" \
                -l "$SSH_USER" \
-               "$SSH_HOST" && [[ -n "$EVENTS_FILE" ]]
+               "$SSH_HOST"
         then
-          mkdir -p "$(dirname "$EVENTS_FILE")"
-          log "LUKS unlocked host at $SSH_HOST" >> "$EVENTS_FILE"
+          log-notify "LUKS unlocked host at $SSH_HOST"
         else
-          log "Failed to unlock $SSH_HOST"
+          log-notify "Failed to unlock $SSH_HOST" >&2
         fi
         ;;
       # TODO test
@@ -158,12 +207,11 @@ do
                  -t \
                  -i "$SSH_KEY" \
                  -l "$SSH_USER" \
-                 "$SSH_HOST" systemd-tty-ask-password-agent && [[ -n "$EVENTS_FILE" ]]
+                 "$SSH_HOST" systemd-tty-ask-password-agent
         then
-          mkdir -p "$(dirname "$EVENTS_FILE")"
-          log "LUKS unlocked host at $SSH_HOST" >> "$EVENTS_FILE"
+          log-notify "LUKS unlocked host at $SSH_HOST"
         else
-          log "Failed to unlock $SSH_HOST"
+          log-notify "Failed to unlock $SSH_HOST" >&2
         fi
         ;;
     esac

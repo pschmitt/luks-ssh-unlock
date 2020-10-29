@@ -1,6 +1,6 @@
 FROM alpine:latest
 
-RUN apk add --no-cache bash openssh-client
+RUN apk add --no-cache bash curl jq openssh-client
 
 COPY ./entrypoint.sh /entrypoint.sh
 COPY ./luks-unlock.sh /luks-unlock.sh
@@ -14,7 +14,10 @@ ENV SSH_HOST=example.com \
     LUKS_TYPE=direct \
     EVENTS_FILE= \
     SLEEP_INTERVAL=5 \
-    HEALTHCHECK_PORT=
+    HEALTHCHECK_PORT= \
+    APPRISE_URL= \
+    APPRISE_TAG= \
+    APPRISE_TITLE
 
 VOLUME /data/events
 
