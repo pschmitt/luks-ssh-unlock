@@ -27,6 +27,30 @@ log() {
 }
 
 log-notify() {
+  local type
+
+  case "$1" in
+    -i|--info)
+      type=info
+      shift
+      ;;
+    -s|--success)
+      type=success
+      shift
+      ;;
+    -w|--warning)
+      type=warning
+      shift
+      ;;
+    -f|--failure|-e|--error)
+      type=failure
+      shift
+      ;;
+    *)
+      type=info
+      ;;
+  esac
+
   local event="$*"
 
   # Stdout
@@ -42,7 +66,7 @@ log-notify() {
   # Apprise
   if [[ -n "$APPRISE_URL" ]]
   then
-    local jdata='{"body": "'"${event}"'"}'
+    local jdata='{"body": "'"${event}"'", "type": "'"${type}"'"}'
 
     if [[ -n "$APPRISE_TAG" ]]
     then
@@ -55,8 +79,36 @@ log-notify() {
     fi
 
     curl -X POST -H "Content-Type: application/json" \
-      -d "$jdata" "$APPRISE_URL"
+      -d "$(jq -c <<< "$jdata")" "$APPRISE_URL"
   fi
+}
+
+luks_unlock() {
+  case "$LUKS_TYPE" in
+    direct)
+      echo "$LUKS_PASSWORD" | \
+        ssh -F /dev/null \
+          -o ConnectTimeout=5 \
+          -o UserKnownHostsFile=/dev/null \
+          -o StrictHostKeyChecking=no \
+          -t \
+          -i "$SSH_KEY" \
+          -l "$SSH_USER" \
+          "$SSH_HOST"
+      ;;
+    # https://github.com/gsauthof/dracut-sshd/issues/32
+    dracut-systemd|dracut-sshd|dracut|alt)
+      echo "$LUKS_PASSWORD" | \
+        ssh -F /dev/null \
+          -o ConnectTimeout=5 \
+          -o UserKnownHostsFile=/dev/null \
+          -o StrictHostKeyChecking=no \
+          -t \
+          -i "$SSH_KEY" \
+          -l "$SSH_USER" \
+          "$SSH_HOST" systemd-tty-ask-password-agent
+      ;;
+  esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
@@ -172,7 +224,7 @@ then
       then
         if [[ -n "$DEBUG" ]]
         then
-          log "Healthcheck result OK"
+          log "Healthcheck result OK" >&2
         fi
         sleep "$SLEEP_INTERVAL"
         continue
@@ -182,45 +234,14 @@ then
     if nc -z -w 2 "$SSH_HOST" "$SSH_PORT"
     then
       log "Trying to unlock remotely ${SSH_HOST}"
-
-      case "$LUKS_TYPE" in
-        direct)
-          if echo "$LUKS_PASSWORD" | \
-               ssh -F /dev/null \
-                 -o ConnectTimeout=5 \
-                 -o UserKnownHostsFile=/dev/null \
-                 -o StrictHostKeyChecking=no \
-                 -t \
-                 -i "$SSH_KEY" \
-                 -l "$SSH_USER" \
-                 "$SSH_HOST"
-          then
-            log-notify "LUKS unlocked host at $SSH_HOST"
-          else
-            log-notify "Failed to unlock $SSH_HOST" >&2
-          fi
-          ;;
-        # TODO test
-        # https://github.com/gsauthof/dracut-sshd/issues/32
-        dracut-systemd|dracut-sshd|dracut|alt)
-            if echo "$LUKS_PASSWORD" | \
-                 ssh -F /dev/null \
-                   -o ConnectTimeout=5 \
-                   -o UserKnownHostsFile=/dev/null \
-                   -o StrictHostKeyChecking=no \
-                   -t \
-                   -i "$SSH_KEY" \
-                   -l "$SSH_USER" \
-                   "$SSH_HOST" systemd-tty-ask-password-agent
-          then
-            log-notify "LUKS unlocked host at $SSH_HOST"
-          else
-            log-notify "Failed to unlock $SSH_HOST" >&2
-          fi
-          ;;
-      esac
+      if luks_unlock
+      then
+        log-notify -s "LUKS unlocked host at $SSH_HOST"
+      else
+        log-notify -f "Failed to unlock $SSH_HOST" >&2
+      fi
     else
-      log "$SSH_HOST is not reachable on port $SSH_PORT"
+      log "$SSH_HOST is not reachable on port $SSH_PORT" >&2
     fi
 
     sleep "$SLEEP_INTERVAL"
