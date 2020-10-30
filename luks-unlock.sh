@@ -91,7 +91,7 @@ luks_unlock() {
           -o ConnectTimeout=5 \
           -o UserKnownHostsFile=/dev/null \
           -o StrictHostKeyChecking=no \
-          -t \
+          -tt \
           -i "$SSH_KEY" \
           -l "$SSH_USER" \
           "$SSH_HOST"
@@ -103,7 +103,7 @@ luks_unlock() {
           -o ConnectTimeout=5 \
           -o UserKnownHostsFile=/dev/null \
           -o StrictHostKeyChecking=no \
-          -t \
+          -tt \
           -i "$SSH_KEY" \
           -l "$SSH_USER" \
           "$SSH_HOST" systemd-tty-ask-password-agent
