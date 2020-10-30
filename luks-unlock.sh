@@ -78,7 +78,7 @@ log-notify() {
       jdata="$(jq '. + {"title": "'"${APPRISE_TITLE}"'"}' <<< "$jdata")"
     fi
 
-    curl -X POST -H "Content-Type: application/json" \
+    curl -fsSL -X POST -H "Content-Type: application/json" \
       -d "$(jq -c <<< "$jdata")" "$APPRISE_URL"
   fi
 }
