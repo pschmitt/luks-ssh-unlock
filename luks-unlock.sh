@@ -83,6 +83,17 @@ log-notify() {
   fi
 }
 
+_ssh() {
+  ssh -F /dev/null \
+    -o ConnectTimeout=5 \
+    -o UserKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=no \
+    -i "$SSH_KEY" \
+    -l "$SSH_USER" \
+    "$SSH_HOST" \
+    "$@"
+}
+
 luks_unlock() {
   case "$LUKS_TYPE" in
     direct)
@@ -95,6 +106,38 @@ luks_unlock() {
           -i "$SSH_KEY" \
           -l "$SSH_USER" \
           "$SSH_HOST"
+      ;;
+    systemd-tool|arch)
+      local disk
+      local mapper
+
+      mapper=$(_ssh \
+        systemctl --no-pager list-unit-files | \
+        sed -nr 's/^systemd-cryptsetup@(.+).service.*/\1/p')
+
+      if [[ -z "$mapper" ]]
+      then
+        echo "Failed to determine root mapper name" >&2
+        return 1
+      fi
+
+      disk=$(_ssh \
+        systemctl cat --no-pager "systemd-cryptsetup@${mapper}" | \
+        sed -nr "s;ExecStart=(.+)(/dev/disk/by-uuid/[^ '\"]+).*;\2;p")
+
+      if [[ -z "$disk" ]]
+      then
+        echo "Failed to determine root disk path" >&2
+        return 1
+      fi
+
+      if ! _ssh cryptsetup luksOpen "$disk" "$mapper" - <<< "$LUKS_PASSWORD"
+      then
+        echo "Failed to unlock disk $disk" >&2
+        return 1
+      fi
+
+      _ssh systemctl restart "systemd-cryptsetup@${mapper}"
       ;;
     # https://github.com/gsauthof/dracut-sshd/issues/32
     dracut-systemd|dracut-sshd|dracut|alt)
