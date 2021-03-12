@@ -13,6 +13,7 @@ EVENTS_FILE="${EVENTS_FILE}"
 SLEEP_INTERVAL="${SLEEP_INTERVAL:-5}"
 
 HEALTHCHECK_PORT="${HEALTHCHECK_PORT}"
+HEALTHCHECK_REMOTE_CMD="${HEALTHCHECK_REMOTE_CMD}"
 
 APPRISE_URL="${APPRISE_URL}"
 APPRISE_TAG="${APPRISE_TAG}"
@@ -252,6 +253,19 @@ then
         if [[ -n "$DEBUG" ]]
         then
           log "Healthcheck result OK" >&2
+        fi
+        sleep "$SLEEP_INTERVAL"
+        continue
+      fi
+    fi
+
+    if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
+    then
+      if _ssh "$HEALTHCHECK_REMOTE_CMD"
+      then
+        if [[ -n "$DEBUG" ]]
+        then
+          log "Healthcheck (remote cmd) result OK" >&2
         fi
         sleep "$SLEEP_INTERVAL"
         continue
