@@ -97,15 +97,7 @@ _ssh() {
 luks_unlock() {
   case "$LUKS_TYPE" in
     direct)
-      echo "$LUKS_PASSWORD" | \
-        ssh -F /dev/null \
-          -o ConnectTimeout=5 \
-          -o UserKnownHostsFile=/dev/null \
-          -o StrictHostKeyChecking=no \
-          -tt \
-          -i "$SSH_KEY" \
-          -l "$SSH_USER" \
-          "$SSH_HOST"
+      _ssh <<< "$LUKS_PASSWORD"
       ;;
     systemd-tool|arch)
       local disk
@@ -141,15 +133,7 @@ luks_unlock() {
       ;;
     # https://github.com/gsauthof/dracut-sshd/issues/32
     dracut-systemd|dracut-sshd|dracut|alt)
-      echo "$LUKS_PASSWORD" | \
-        ssh -F /dev/null \
-          -o ConnectTimeout=5 \
-          -o UserKnownHostsFile=/dev/null \
-          -o StrictHostKeyChecking=no \
-          -tt \
-          -i "$SSH_KEY" \
-          -l "$SSH_USER" \
-          "$SSH_HOST" systemd-tty-ask-password-agent
+      _ssh systemd-tty-ask-password-agent <<< "$LUKS_PASSWORD"
       ;;
   esac
 }
