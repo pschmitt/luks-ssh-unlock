@@ -17,7 +17,7 @@ services:
     environment:
       # - "DEBUG=1"
       - 'LUKS_TYPE=direct'
-      - 'SSH_HOST=10.7.0.215'
+      - 'SSH_HOSTNAME=10.7.0.215'
       - 'SSH_KEY=/run/secrets/ssh_key'
       - 'LUKS_PASSWORD_FILE=/run/secrets/password_ntn'
       - 'EVENT_FILE=/events/ntn'
@@ -39,7 +39,7 @@ services:
       # - "DEBUG=1"
       - "HEALTHCHECK_PORT=9090"
       - 'LUKS_TYPE=dracut'
-      - 'SSH_HOST=10.7.0.200'
+      - 'SSH_HOSTNAME=10.7.0.200'
       - 'SSH_KEY=/run/secrets/ssh_key'
       - 'LUKS_PASSWORD_FILE=/run/secrets/password_fnuc'
       - 'EVENT_FILE=/events/fnuc'
