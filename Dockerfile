@@ -8,6 +8,10 @@ COPY ./luks-unlock.sh /luks-unlock.sh
 ENV SSH_HOST=example.com \
     SSH_KEY=/run/secrets/ssh_key \
     SSH_PORT=22 \
+    SSH_JUMPHOST= \
+    SSH_JUMPHOST_USERNAME= \
+    SSH_JUMPHOST_PORT= \
+    SSH_JUMPHOST_KEY= \
     SSH_USER=root \
     LUKS_PASSWORD= \
     LUKS_PASSWORD_FILE= \

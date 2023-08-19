@@ -4,6 +4,10 @@ SSH_HOSTNAME="${SSH_HOSTNAME:-example.com}"
 SSH_KEY="${SSH_KEY:-/run/secrets/ssh_key}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_USERNAME="${SSH_USERNAME:-root}"
+SSH_JUMPHOST="${SSH_JUMPHOST:-}"
+SSH_JUMPHOST_USERNAME="${SSH_JUMPHOST_USERNAME:-root}"
+SSH_JUMPHOST_PORT="${SSH_JUMPHOST_PORT:-${SSH_PORT}}"
+SSH_JUMPHOST_KEY="${SSH_JUMPHOST_KEY:-${SSH_KEY}}"
 
 LUKS_PASSWORD="${LUKS_PASSWORD}"
 LUKS_PASSWORD_FILE="${LUKS_PASSWORD_FILE=-/run/secrets/luks_password_${SSH_HOSTNAME}}"
@@ -85,12 +89,26 @@ log-notify() {
 }
 
 _ssh() {
+  local extra_args=()
+  local ssh_opts=(
+    -o UserKnownHostsFile=/dev/null
+    -o StrictHostKeyChecking=no
+    -o ControlMaster=no
+  )
+
+  if [[ -n "$SSH_JUMPHOST" ]]
+  then
+    # We can't use JumpHost here since it does not inherit the
+    # StrictHostKeyChecking settings etc
+    extra_args=(-o "ProxyCommand=ssh ${ssh_opts[*]} -W %h:%p -p '${SSH_JUMPHOST_PORT}' -i '${SSH_JUMPHOST_KEY}' '${SSH_JUMPHOST_USERNAME}@${SSH_JUMPHOST}'")
+  fi
+
   ssh -F /dev/null \
     -o ConnectTimeout=5 \
-    -o UserKnownHostsFile=/dev/null \
-    -o StrictHostKeyChecking=no \
+    "${ssh_opts[@]}" \
     -i "$SSH_KEY" \
     -l "$SSH_USERNAME" \
+    "${extra_args[@]}" \
     "$SSH_HOSTNAME" \
     "$@"
 }
@@ -172,6 +190,22 @@ then
         ;;
       --ssh-key|--key|--private-key|--pkey|-k)
         SSH_KEY="$2"
+        shift 2
+        ;;
+      --ssh-jumphost|--jumphost|-J)
+        SSH_JUMPHOST="$2"
+        shift 2
+        ;;
+      --ssh-jumphost-username|--jusername|--ju|-U)
+        SSH_JUMPHOST_USERNAME="$2"
+        shift 2
+        ;;
+      --ssh-jumphost-port|--jport|--jp)
+        SSH_JUMPHOST_PORT="$2"
+        shift 2
+        ;;
+      --ssh-jumphost-key|--jkey|--jk|-K)
+        SSH_JUMPHOST_KEY="$2"
         shift 2
         ;;
       --sleep-interval|--sleep|-s|--interval|-i)
