@@ -316,7 +316,7 @@ then
     then
       if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
          SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
-        _ssh "$HEALTHCHECK_REMOTE_CMD"
+        _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
       then
         if [[ -n "$DEBUG" ]]
         then
