@@ -113,6 +113,33 @@ _ssh() {
     "$@"
 }
 
+_ssh_jumphost() {
+  local ssh_opts=(
+    -o UserKnownHostsFile=/dev/null
+    -o StrictHostKeyChecking=no
+    -o ControlMaster=no
+  )
+
+  ssh -F /dev/null \
+    -o ConnectTimeout=5 \
+    "${ssh_opts[@]}" \
+    -i "$SSH_JUMPHOST_KEY" \
+    -l "$SSH_JUMPHOST_USERNAME" \
+    "$SSH_JUMPHOST" \
+    "$@"
+}
+
+check_ssh_port() {
+  if [[ -n "$SSH_JUMPHOST" ]]
+  then
+    echo | _ssh_jumphost nc "${SSH_HOSTNAME}" "${SSH_PORT}" 2>&1 | \
+      grep -iE "^SSH-"
+    return "$?"
+  fi
+
+  nc -z -w 2 "$SSH_HOSTNAME" "$SSH_PORT"
+}
+
 luks_unlock() {
   case "$LUKS_TYPE" in
     direct)
@@ -327,7 +354,7 @@ then
       fi
     fi
 
-    if nc -z -w 2 "$SSH_HOSTNAME" "$SSH_PORT"
+    if check_ssh_port
     then
       log "Trying to unlock remotely ${SSH_HOSTNAME}"
       if luks_unlock
