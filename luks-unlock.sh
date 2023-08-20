@@ -180,7 +180,7 @@ luks_unlock() {
 
     # https://github.com/gsauthof/dracut-sshd/issues/32
     dracut-systemd|dracut-sshd|dracut|alt)
-      _ssh systemd-tty-ask-password-agent <<< "$LUKS_PASSWORD"
+      _ssh -tt systemd-tty-ask-password-agent <<< "$LUKS_PASSWORD"
       ;;
 
     # https://github.com/pschmitt/luks-mount.sh
