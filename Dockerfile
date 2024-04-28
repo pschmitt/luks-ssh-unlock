@@ -8,6 +8,8 @@ COPY ./luks-ssh-unlock.sh /luks-ssh-unlock.sh
 ENV SSH_HOST=example.com \
     SSH_KEY=/run/secrets/ssh_key \
     SSH_PORT=22 \
+    SSH_FORCE_IPV4= \
+    SSH_FORCE_IPV6= \
     SSH_JUMPHOST= \
     SSH_JUMPHOST_USERNAME= \
     SSH_JUMPHOST_PORT= \
@@ -20,6 +22,7 @@ ENV SSH_HOST=example.com \
     SLEEP_INTERVAL=5 \
     HEALTHCHECK_PORT= \
     HEALTHCHECK_REMOTE_HOSTNAME= \
+    HEALTHCHECK_REMOTE_USERNAME= \
     HEALTHCHECK_REMOTE_CMD= \
     APPRISE_URL= \
     APPRISE_TAG= \

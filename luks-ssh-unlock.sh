@@ -4,6 +4,9 @@ SSH_HOSTNAME="${SSH_HOSTNAME:-example.com}"
 SSH_KEY="${SSH_KEY:-/run/secrets/ssh_key}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_USERNAME="${SSH_USERNAME:-root}"
+SSH_FORCE_IPV4="${SSH_FORCE_IPV4:-}"
+SSH_FORCE_IPV6="${SSH_FORCE_IPV6:-}"
+
 SSH_JUMPHOST="${SSH_JUMPHOST:-}"
 SSH_JUMPHOST_USERNAME="${SSH_JUMPHOST_USERNAME:-root}"
 SSH_JUMPHOST_PORT="${SSH_JUMPHOST_PORT:-${SSH_PORT}}"
@@ -18,6 +21,8 @@ SLEEP_INTERVAL="${SLEEP_INTERVAL:-10}"
 
 HEALTHCHECK_PORT="${HEALTHCHECK_PORT:-}"
 HEALTHCHECK_REMOTE_CMD="${HEALTHCHECK_REMOTE_CMD:-}"
+HEALTHCHECK_REMOTE_HOSTNAME="${HEALTHCHECK_REMOTE_HOSTNAME:-}"
+HEALTHCHECK_REMOTE_USERNAME="${HEALTHCHECK_REMOTE_USERNAME:-}"
 
 APPRISE_URL="${APPRISE_URL:-}"
 APPRISE_TAG="${APPRISE_TAG:-}"
@@ -95,6 +100,14 @@ _ssh() {
     -o StrictHostKeyChecking=no
     -o ControlMaster=no
   )
+
+  if [[ -n "$SSH_FORCE_IPV4" ]]
+  then
+    ssh_opts+=(-4)
+  elif [[ -n "$SSH_FORCE_IPV6" ]]
+  then
+    ssh_opts+=(-6)
+  fi
 
   if [[ -n "$SSH_JUMPHOST" ]]
   then
@@ -218,6 +231,14 @@ then
       --ssh-key|--key|--private-key|--pkey|-k)
         SSH_KEY="$2"
         shift 2
+        ;;
+      --force-ipv4|--ipv4|-4)
+        SSH_FORCE_IPV4=1
+        shift
+        ;;
+      --force-ipv6|--ipv6|-6)
+        SSH_FORCE_IPV6=1
+        shift
         ;;
       --ssh-jumphost|--jumphost|-J)
         SSH_JUMPHOST="$2"
