@@ -3,7 +3,7 @@ FROM alpine:latest
 RUN apk add --no-cache bash curl jq openssh-client
 
 COPY ./entrypoint.sh /entrypoint.sh
-COPY ./luks-unlock.sh /luks-unlock.sh
+COPY ./luks-ssh-unlock.sh /luks-ssh-unlock.sh
 
 ENV SSH_HOST=example.com \
     SSH_KEY=/run/secrets/ssh_key \

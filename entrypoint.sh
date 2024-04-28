@@ -7,4 +7,4 @@ then
   EXTRA_ARGS+=(-x)
 fi
 
-exec bash "${EXTRA_ARGS[@]}" /luks-unlock.sh "$@"
+exec bash "${EXTRA_ARGS[@]}" /luks-ssh-unlock.sh "$@"
