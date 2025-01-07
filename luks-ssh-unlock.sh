@@ -16,7 +16,9 @@ LUKS_PASSWORD="${LUKS_PASSWORD:-}"
 LUKS_PASSWORD_FILE="${LUKS_PASSWORD_FILE=-/run/secrets/luks_password_${SSH_HOSTNAME}}"
 LUKS_TYPE="${LUKS_TYPE:-direct}"
 
+DEBUG="${DEBUG:-}"
 EVENTS_FILE="${EVENTS_FILE:-}"
+SKIP_SSH_PORT_CHECK="${SKIP_SSH_PORT_CHECK:-}"
 SLEEP_INTERVAL="${SLEEP_INTERVAL:-10}"
 
 HEALTHCHECK_PORT="${HEALTHCHECK_PORT:-}"
@@ -29,7 +31,87 @@ APPRISE_TAG="${APPRISE_TAG:-}"
 APPRISE_TITLE="${APPRISE_TITLE:-}"
 
 usage() {
-  echo "Usage: $(basename "$0") --type LUKS_TYPE --host HOST --port PORT --username USER -- --sleep SLEEP --luks-password PASSWD"
+  echo "Usage: $(basename "$0") OPTIONS"
+  echo
+  echo "Options:"
+  echo "  --help, -h     Display this help message"
+  echo "  --debug, -D    Enable debug mode"
+  echo "                 Env var: DEBUG"
+  echo
+
+  echo "  --host, --ssh-host, -H HOSTNAME"
+  echo "                 SSH hostname to connect to"
+  echo "                 Env var: SSH_HOSTNAME"
+  echo "  --port, --ssh-port PORT"
+  echo "                 SSH port to connect to"
+  echo "                 Env var: SSH_PORT"
+  echo "  --username, --user, -u USERNAME"
+  echo "                 SSH username to connect with"
+  echo "                 Env var: SSH_USERNAME"
+  echo "  --ssh-key, --key, --private-key, --pkey KEY"
+  echo "                 SSH private key to use"
+  echo "                 Env var: SSH_KEY"
+  echo "  --force-ipv4, --ipv4, -4"
+  echo "                 Force IPv4"
+  echo "                 Env var: SSH_FORCE_IPV4"
+  echo "  --force-ipv6, --ipv6, -6"
+  echo "                 Force IPv6"
+  echo "                 Env var: SSH_FORCE_IPV6"
+  echo
+
+  echo "  --ssh-jumphost, --jumphost, -J JUMPHOST"
+  echo "                 SSH jumphost to connect through"
+  echo "                 Env var: SSH_JUMPHOST"
+  echo "  --ssh-jumphost-username, --jusername, --ju, -U USERNAME"
+  echo "                 SSH jumphost username to connect with"
+  echo "                 Env var: SSH_JUMPHOST_USERNAME"
+  echo "  --ssh-jumphost-port, --jport, --jp PORT"
+  echo "                 SSH jumphost port to connect to"
+  echo "                 Env var: SSH_JUMPHOST_PORT"
+  echo "  --ssh-jumphost-key, --jkey, --jk, -K KEY"
+  echo "                 SSH jumphost private key to use"
+  echo "                 Env var: SSH_JUMPHOST_KEY"
+  echo
+
+  echo "  --event-file, --event, -e FILE"
+  echo "                 File to write events to"
+  echo "                 Env var: EVENTS_FILE"
+  echo "  --sleep-interval, --sleep, --interval, -i SECONDS"
+  echo "                 Sleep interval between attempts"
+  echo "                 Env var: SLEEP_INTERVAL"
+  echo "  --skip-ssh-port-check, --skip-port-check"
+  echo "                 Skip SSH port check"
+  echo "                 Env var: SKIP_SSH_PORT_CHECK"
+  echo
+
+  echo "  --luks-type, --type, -t TYPE"
+  echo "                 LUKS type to use (direct, systemd-tool, arch, dracut-systemd, dracut-sshd, dracut, alt)"
+  echo "                 Env var: LUKS_TYPE"
+  echo "  --luks-password, --password, -p PASSWORD"
+  echo "                 LUKS password to use"
+  echo "                 Env var: LUKS_PASSWORD"
+  echo
+
+  echo "  --remote-check, --healthcheck-remote-cmd, --remote-command, --remote-cmd, --rcmd CMD"
+  echo "                 Remote command to check if the host is reachable"
+  echo "                 Env var: HEALTHCHECK_REMOTE_CMD"
+  echo "  --healthcheck-host, --hc-host HOSTNAME"
+  echo "                 Remote hostname to check if the host is reachable"
+  echo "                 Env var: HEALTHCHECK_REMOTE_HOSTNAME"
+  echo "  --healthcheck-user, --hc-user USERNAME"
+  echo "                 Remote username to check if the host is reachable"
+  echo "                 Env var: HEALTHCHECK_REMOTE_USERNAME"
+  echo
+
+  echo "  --apprise-url, --apprise, -a URL"
+  echo "                 Apprise URL to send notifications to"
+  echo "                 Env var: APPRISE_URL"
+  echo "  --apprise-tag, --tag TAG"
+  echo "                 Apprise tag to use"
+  echo "                 Env var: APPRISE_TAG"
+  echo "  --apprise-title, --title TITLE"
+  echo "                 Apprise title to use"
+  echo "                 Env var: APPRISE_TITLE"
 }
 
 log() {
@@ -150,6 +232,7 @@ check_ssh_port() {
     return "$?"
   fi
 
+  # FIXME busybox nc has no -4 flag, and might therefore resolve to ipv6 addrs
   nc -z -w 2 "$SSH_HOSTNAME" "$SSH_PORT"
 }
 
@@ -259,6 +342,10 @@ then
       --sleep-interval|--sleep|-s|--interval|-i)
         SLEEP_INTERVAL="$2"
         shift 2
+        ;;
+      --skip-ssh-port-check|--skip-port-check)
+        SKIP_SSH_PORT_CHECK=1
+        shift
         ;;
       --luks-type|--type|-t)
         LUKS_TYPE="$2"
@@ -374,17 +461,18 @@ then
       fi
     fi
 
-    if check_ssh_port
+    if [[ -z "$SKIP_SSH_PORT_CHECK" ]] && ! check_ssh_port
     then
+      log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
+    else
       log "Trying to unlock remotely ${SSH_HOSTNAME}"
+
       if luks_unlock
       then
         log-notify -s "LUKS unlocked host at $SSH_HOSTNAME"
       else
         log-notify -f "Failed to unlock $SSH_HOSTNAME" >&2
       fi
-    else
-      log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
     fi
 
     sleep "$SLEEP_INTERVAL"
