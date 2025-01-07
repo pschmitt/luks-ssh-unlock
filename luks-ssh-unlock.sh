@@ -14,9 +14,9 @@ SSH_JUMPHOST_USERNAME="${SSH_JUMPHOST_USERNAME:-root}"
 SSH_JUMPHOST_PORT="${SSH_JUMPHOST_PORT:-${SSH_PORT}}"
 SSH_JUMPHOST_KEY="${SSH_JUMPHOST_KEY:-${SSH_KEY}}"
 
-LUKS_PASSWORD="${LUKS_PASSWORD:-}"
-LUKS_PASSWORD_FILE="${LUKS_PASSWORD_FILE=-/run/secrets/luks_password_${SSH_HOSTNAME}}"
-LUKS_TYPE="${LUKS_TYPE:-direct}"
+LUKS_PASSPHRASE="${LUKS_PASSPHRASE:-}"
+LUKS_PASSPHRASE_FILE="${LUKS_PASSPHRASE_FILE=-/run/secrets/luks_password_${SSH_HOSTNAME}}"
+LUKS_TYPE="${LUKS_TYPE:-raw}"
 
 DEBUG="${DEBUG:-}"
 EVENTS_FILE="${EVENTS_FILE:-}"
@@ -92,11 +92,14 @@ usage() {
   echo
 
   echo "  --luks-type, --type, -t TYPE"
-  echo "                 LUKS type to use (direct, systemd-tool, arch, dracut-systemd, dracut-sshd, dracut, alt)"
+  echo "                 LUKS type to use (raw, systemd, systemd-tool, luks-mount)"
   echo "                 Env var: LUKS_TYPE"
-  echo "  --luks-password, --password, -p PASSWORD"
+  echo "  --luks-passphrase, --luks-password, --password, -p PASSWORD"
   echo "                 LUKS password to use"
-  echo "                 Env var: LUKS_PASSWORD"
+  echo "                 Env var: LUKS_PASSPHRASE"
+  echo "  --luks-passphrase-file, --luks-password-file, -F FILE"
+  echo "                 LUKS password file to use"
+  echo "                 Env var: LUKS_PASSPHRASE_FILE"
   echo
 
   echo "  --remote-check, --healthcheck-remote-cmd, --remote-command, --remote-cmd, --rcmd CMD"
@@ -153,7 +156,7 @@ template-msg() {
   msg=${msg//#luks_type/${LUKS_TYPE}}
   if [[ -n "$DEBUG" ]]
   then
-    msg=${msg//#luks_password/${LUKS_PASSWORD}}
+    msg=${msg//#luks_password/${LUKS_PASSPHRASE}}
   fi
 
   msg=${msg//#remote_cmd/${HEALTHCHECK_REMOTE_CMD}}
@@ -379,8 +382,8 @@ check_ssh_port() {
 
 luks_unlock() {
   case "$LUKS_TYPE" in
-    direct)
-      _ssh <<< "$LUKS_PASSWORD"
+    raw|direct)
+      _ssh <<< "$LUKS_PASSPHRASE"
       ;;
     systemd-tool|arch)
       local disk
@@ -406,7 +409,7 @@ luks_unlock() {
         return 1
       fi
 
-      if ! _ssh cryptsetup luksOpen "$disk" "$mapper" - <<< "$LUKS_PASSWORD"
+      if ! _ssh cryptsetup luksOpen "$disk" "$mapper" - <<< "$LUKS_PASSPHRASE"
       then
         echo "Failed to unlock disk $disk" >&2
         return 1
@@ -416,13 +419,13 @@ luks_unlock() {
       ;;
 
     # https://github.com/gsauthof/dracut-sshd/issues/32
-    dracut-systemd|dracut-sshd|dracut|alt)
-      _ssh -tt systemd-tty-ask-password-agent <<< "$LUKS_PASSWORD"
+    systemd|dracut-systemd|dracut-sshd|dracut|alt)
+      _ssh -tt systemd-tty-ask-password-agent <<< "$LUKS_PASSPHRASE"
       ;;
 
     # https://github.com/pschmitt/luks-mount.sh
     luks-mount)
-      _ssh luks-mount <<< "$LUKS_PASSWORD"
+      _ssh luks-mount <<< "$LUKS_PASSPHRASE"
       ;;
   esac
 }
@@ -492,8 +495,12 @@ then
         LUKS_TYPE="$2"
         shift 2
         ;;
-      --luks-password|--password|-p)
-        LUKS_PASSWORD="$2"
+      --luks-passphrase|--luks-password|--password|-p)
+        LUKS_PASSPHRASE="$2"
+        shift 2
+        ;;
+      --luks-passphrase-file|--luks-password-file|-F)
+        LUKS_PASSPHRASE_FILE="$2"
         shift 2
         ;;
       --remote-check|--healthcheck-remote-cmd|--remote-command|--remote-cmd|--rcmd)
@@ -546,7 +553,7 @@ then
   if [[ -n "$DEBUG" ]]
   then
     {
-      echo "DEBUG: Secrets"
+      echo "DEBUG: Secrets (/run/secrets)"
       ls -l /run/secrets
     } >&2
   fi
@@ -565,20 +572,20 @@ then
     chmod 400 "$SSH_KEY"
   fi
 
-  if [[ -z "$LUKS_PASSWORD" ]] && [[ -n "$LUKS_PASSWORD_FILE" ]]
+  if [[ -z "$LUKS_PASSPHRASE" ]] && [[ -n "$LUKS_PASSPHRASE_FILE" ]]
   then
-    if [[ ! -r "$LUKS_PASSWORD_FILE" ]]
+    if [[ ! -r "$LUKS_PASSPHRASE_FILE" ]]
     then
-      echo "$LUKS_PASSWORD_FILE: No such file or directory" >&2
+      echo "$LUKS_PASSPHRASE_FILE: No such file or directory" >&2
       exit 3
     fi
 
-    LUKS_PASSWORD="$(cat "$LUKS_PASSWORD_FILE")"
+    LUKS_PASSPHRASE="$(cat "$LUKS_PASSPHRASE_FILE")"
   fi
 
-  if [[ -z "$LUKS_PASSWORD" ]]
+  if [[ -z "$LUKS_PASSPHRASE" ]]
   then
-    echo "LUKS_PASSWORD is not set." >&2
+    echo "LUKS_PASSPHRASE is not set." >&2
     exit 2
   fi
 
