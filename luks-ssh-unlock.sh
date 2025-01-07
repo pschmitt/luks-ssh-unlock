@@ -370,6 +370,7 @@ check_ssh_port() {
   # that some implementations of nc do not support the -4 and -6 flags.
   local resolved_hostname
   resolved_hostname=$(resolve-hostname)
+  log "Resolved $SSH_HOSTNAME to $resolved_hostname"
 
   if [[ -n "$SSH_JUMPHOST" ]]
   then
