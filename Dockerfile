@@ -1,6 +1,8 @@
+# hadolint ignore=DL3007
 FROM alpine:latest
 
-RUN apk add --no-cache bash curl jq openssh-client
+# hadolint ignore=DL3018
+RUN apk add --no-cache bash curl bind-tools jq openssh-client
 
 COPY ./entrypoint.sh /entrypoint.sh
 COPY ./luks-ssh-unlock.sh /luks-ssh-unlock.sh
@@ -8,16 +10,16 @@ COPY ./luks-ssh-unlock.sh /luks-ssh-unlock.sh
 ENV SSH_HOST=example.com \
     SSH_KEY=/run/secrets/ssh_key \
     SSH_PORT=22 \
-    SSH_FORCE_IPV4= \
-    SSH_FORCE_IPV6= \
+    FORCE_IPV4= \
+    FORCE_IPV6= \
     SSH_JUMPHOST= \
     SSH_JUMPHOST_USERNAME= \
     SSH_JUMPHOST_PORT= \
     SSH_JUMPHOST_KEY= \
     SSH_USER=root \
-    LUKS_PASSWORD= \
-    LUKS_PASSWORD_FILE= \
-    LUKS_TYPE=direct \
+    LUKS_PASSPHRASE= \
+    LUKS_PASSPHRASE_FILE= \
+    LUKS_TYPE=raw \
     EVENTS_FILE= \
     SLEEP_INTERVAL=5 \
     HEALTHCHECK_PORT= \
@@ -26,7 +28,10 @@ ENV SSH_HOST=example.com \
     HEALTHCHECK_REMOTE_CMD= \
     APPRISE_URL= \
     APPRISE_TAG= \
-    APPRISE_TITLE=
+    APPRISE_TITLE= \
+    EMAIL_FROM= \
+    EMAIL_RECIPIENT= \
+    EMAIL_SUBJECT=
 
 VOLUME /data/events
 
