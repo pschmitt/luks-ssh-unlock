@@ -30,10 +30,15 @@ APPRISE_URL="${APPRISE_URL:-}"
 APPRISE_TAG="${APPRISE_TAG:-}"
 APPRISE_TITLE="${APPRISE_TITLE:-}"
 
+EMAIL_RECIPIENT="${EMAIL_RECIPIENT:-}"
+EMAIL_FROM="${EMAIL_FROM:-}"
+EMAIL_SUBJECT="${EMAIL_SUBJECT:-}"
+
 usage() {
   echo "Usage: $(basename "$0") OPTIONS"
   echo
   echo "Options:"
+  echo
   echo "  --help, -h     Display this help message"
   echo "  --debug, -D    Enable debug mode"
   echo "                 Env var: DEBUG"
@@ -112,34 +117,69 @@ usage() {
   echo "  --apprise-title, --title TITLE"
   echo "                 Apprise title to use"
   echo "                 Env var: APPRISE_TITLE"
+  echo "  --email-recipient, --email-to EMAIL"
+  echo "                 Email address to send notifications to"
+  echo "                 Env var: EMAIL_RECIPIENT"
+  echo "  --email-from, --email-sender EMAIL"
+  echo "                 Email sender address (FROM)"
+  echo "                 Env var: EMAIL_FROM"
+  echo "  --email-subject SUBJECT"
+  echo "                 Email subject to use"
+  echo "                 Env var: EMAIL_SUBJECT"
 }
 
 log() {
   echo "$(date -Iseconds) $*"
 }
 
+template-msg() {
+  local msg="$*"
+
+  msg=${msg//#self/$(basename "$0")}
+  msg=${msg//#event_type/${event_type}}
+  msg=${msg//#event/${event}}
+  msg=${msg//#sleep_interval/${SLEEP_INTERVAL}}
+
+  msg=${msg//#hostname/${SSH_HOSTNAME}}
+  msg=${msg//#username/${SSH_USERNAME}}
+  msg=${msg//#port/${SSH_PORT}}
+
+  msg=${msg//#jumphost/${SSH_JUMPHOST}}
+  msg=${msg//#jusername/${SSH_JUMPHOST_USERNAME}}
+  msg=${msg//#jport/${SSH_JUMPHOST_PORT}}
+
+  msg=${msg//#luks_type/${LUKS_TYPE}}
+  # msg=${msg//#luks_password/${LUKS_PASSWORD}}
+  #
+  msg=${msg//#remote_cmd/${HEALTHCHECK_REMOTE_CMD}}
+  msg=${msg//#remote_hostname/${HEALTHCHECK_REMOTE_HOSTNAME}}
+  msg=${msg//#remote_username/${HEALTHCHECK_REMOTE_USERNAME}}
+
+  echo -n "$msg"
+}
+
 log-notify() {
-  local type
+  local event_type
 
   case "$1" in
     -i|--info)
-      type=info
+      event_type=info
       shift
       ;;
     -s|--success)
-      type=success
+      event_type=success
       shift
       ;;
     -w|--warning)
-      type=warning
+      event_type=warning
       shift
       ;;
     -f|--failure|-e|--error)
-      type=failure
+      event_type=failure
       shift
       ;;
     *)
-      type=info
+      event_type=info
       ;;
   esac
 
@@ -158,20 +198,54 @@ log-notify() {
   # Apprise
   if [[ -n "$APPRISE_URL" ]]
   then
-    local jdata='{"body": "'"${event}"'", "type": "'"${type}"'"}'
+    local jdata
+    jdata=$(jq -Mcn \
+      --arg event "$event" \
+      --arg event_type "$event_type" \
+      --arg tag "$APPRISE_TAG" \
+      --arg title "$(template-msg "$APPRISE_TITLE")" '
+        {
+          body: $event,
+          type: $event_type
+        }
+        | if $tag != "" then .tag = $tag else . end
+        | if $title != "" then .title = $title else . end
+      ')
 
-    if [[ -n "$APPRISE_TAG" ]]
+    curl -fsSL -X POST \
+      -H "Content-Type: application/json" \
+      -d "$jdata" "$APPRISE_URL"
+    return "$?"
+  fi
+
+  # email
+  if [[ -n "$EMAIL_RECIPIENT" ]]
+  then
+    if ! command -v sendmail &>/dev/null
     then
-      jdata="$(jq '. + {"tag": "'"${APPRISE_TAG}"'"}' <<< "$jdata")"
+      echo "sendmail is not available" >&2
+      return 1
     fi
 
-    if [[ -n "$APPRISE_TITLE" ]]
-    then
-      jdata="$(jq '. + {"title": "'"${APPRISE_TITLE}"'"}' <<< "$jdata")"
-    fi
+    {
+      if [[ -n "$EMAIL_FROM" ]]
+      then
+        echo "From: $EMAIL_FROM"
+      fi
 
-    curl -fsSL -X POST -H "Content-Type: application/json" \
-      -d "$(jq -c <<< "$jdata")" "$APPRISE_URL"
+      echo "To: $EMAIL_RECIPIENT"
+
+      if [[ -n "$EMAIL_SUBJECT" ]]
+      then
+        echo "Subject: $(template-msg "$EMAIL_SUBJECT")"
+      fi
+
+      # body
+      echo "Event type: ${event_type^^}"  # uppercase
+      echo
+      echo "$event"
+
+    } | sendmail "$EMAIL_RECIPIENT"
   fi
 }
 
@@ -381,6 +455,18 @@ then
         ;;
       --apprise-title|--title)
         APPRISE_TITLE="$2"
+        shift 2
+        ;;
+      --email-recipient|--email-to)
+        EMAIL_RECIPIENT="$2"
+        shift 2
+        ;;
+      --email-from|--email-sender)
+        EMAIL_FROM="$2"
+        shift 2
+        ;;
+      --email-subject)
+        EMAIL_SUBJECT="$2"
         shift 2
         ;;
       *)
