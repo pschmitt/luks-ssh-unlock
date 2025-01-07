@@ -22,6 +22,7 @@ DEBUG="${DEBUG:-}"
 EVENTS_FILE="${EVENTS_FILE:-}"
 SKIP_SSH_PORT_CHECK="${SKIP_SSH_PORT_CHECK:-}"
 SLEEP_INTERVAL="${SLEEP_INTERVAL:-10}"
+TMPDIR="${TMPDIR:-/tmp}"
 
 HEALTHCHECK_PORT="${HEALTHCHECK_PORT:-}"
 HEALTHCHECK_REMOTE_CMD="${HEALTHCHECK_REMOTE_CMD:-}"
@@ -430,8 +431,7 @@ luks_unlock() {
   esac
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
-then
+main() {
   while [[ -n "$*" ]]
   do
     case "$1" in
@@ -567,8 +567,8 @@ then
   # Copy file locally and correct mode
   if [[ "$(stat -c "%a" "$SSH_KEY")" != "400" ]]
   then
-    cp "$SSH_KEY" /tmp
-    SSH_KEY="/tmp/$(basename "$SSH_KEY")"
+    cp "$SSH_KEY" "$TMPDIR"
+    SSH_KEY="${TMPDIR}/$(basename "$SSH_KEY")"
     chmod 400 "$SSH_KEY"
   fi
 
@@ -589,7 +589,12 @@ then
     exit 2
   fi
 
-  log "LUKS rigmarole started. I'll be trying to unlock ${SSH_HOSTNAME}"
+  local msg="LUKS rigmarole started (type: $LUKS_TYPE). I'll be trying to unlock ${SSH_HOSTNAME}"
+  if [[ -n "$SSH_JUMPHOST" ]]
+  then
+    msg+=" through ${SSH_JUMPHOST}"
+  fi
+  log "$msg"
 
   while true
   do
@@ -638,4 +643,9 @@ then
 
     sleep "$SLEEP_INTERVAL"
   done
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  main "$@"
 fi
