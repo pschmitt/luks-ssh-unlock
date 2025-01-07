@@ -150,8 +150,11 @@ template-msg() {
   msg=${msg//#jport/${SSH_JUMPHOST_PORT}}
 
   msg=${msg//#luks_type/${LUKS_TYPE}}
-  # msg=${msg//#luks_password/${LUKS_PASSWORD}}
-  #
+  if [[ -n "$DEBUG" ]]
+  then
+    msg=${msg//#luks_password/${LUKS_PASSWORD}}
+  fi
+
   msg=${msg//#remote_cmd/${HEALTHCHECK_REMOTE_CMD}}
   msg=${msg//#remote_hostname/${HEALTHCHECK_REMOTE_HOSTNAME}}
   msg=${msg//#remote_username/${HEALTHCHECK_REMOTE_USERNAME}}
@@ -245,6 +248,14 @@ log-notify() {
       echo "Event type: ${event_type^^}"  # uppercase
       echo
       echo "$event"
+
+      if [[ -n "$DEBUG" ]]
+      then
+        echo
+        echo "Script: $0"
+        echo "Env:"
+        printenv
+      fi
 
     } | sendmail "$EMAIL_RECIPIENT"
   fi
