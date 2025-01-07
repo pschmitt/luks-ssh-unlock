@@ -299,16 +299,70 @@ _ssh_jumphost() {
     "$@"
 }
 
-check_ssh_port() {
+is-an-ip-address() {
+  local n="$1"
+
+  if [[ -z "$n" && ! -t 0 ]]
+  then
+    n="$(cat)"
+  fi
+
+  # ipv4
+  if [[ "$n" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  then
+    return 0
+  fi
+
+  # ipv6
+  if [[ "$n" =~ ^[0-9a-fA-F:]+$ ]]
+  then
+    return 0
+  fi
+
+  return 1
+}
+
+resolve-hostname() {
+  if is-an-ip-address "$SSH_HOSTNAME"
+  then
+    echo "$SSH_HOSTNAME"
+    return 0
+  fi
+
+  local cmd=(dig +short)
+
+  if [[ -n "$SSH_FORCE_IPV4" ]]
+  then
+    cmd+=(A)
+  elif [[ -n "$SSH_FORCE_IPV6" ]]
+  then
+    cmd+=(AAAA)
+  fi
+
+  cmd+=("$SSH_HOSTNAME")
+
   if [[ -n "$SSH_JUMPHOST" ]]
   then
-    echo | _ssh_jumphost nc "${SSH_HOSTNAME}" "${SSH_PORT}" 2>&1 | \
+    cmd=(_ssh_jumphost "${cmd[@]}")
+  fi
+
+  "${cmd[@]}" | head -1
+}
+
+check_ssh_port() {
+  # NOTE We resolve the hostname of the target ssh host to work around the fact
+  # that some implementations of nc do not support the -4 and -6 flags.
+  local resolved_hostname
+  resolved_hostname=$(resolve-hostname)
+
+  if [[ -n "$SSH_JUMPHOST" ]]
+  then
+    echo | _ssh_jumphost nc "$resolved_hostname" "$SSH_PORT" 2>&1 | \
       grep -iE "^SSH-"
     return "$?"
   fi
 
-  # FIXME busybox nc has no -4 flag, and might therefore resolve to ipv6 addrs
-  nc -z -w 2 "$SSH_HOSTNAME" "$SSH_PORT"
+  nc -z -w 2 "$resolved_hostname" "$SSH_PORT"
 }
 
 luks_unlock() {
