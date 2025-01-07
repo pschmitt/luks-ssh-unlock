@@ -4,9 +4,10 @@ SSH_HOSTNAME="${SSH_HOSTNAME:-example.com}"
 SSH_KEY="${SSH_KEY:-/run/secrets/ssh_key}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_USERNAME="${SSH_USERNAME:-root}"
-SSH_FORCE_IPV4="${SSH_FORCE_IPV4:-}"
-SSH_FORCE_IPV6="${SSH_FORCE_IPV6:-}"
 SSH_CONNECTION_TIMEOUT="${SSH_CONNECTION_TIMEOUT:-5}"
+
+FORCE_IPV4="${FORCE_IPV4:-}"
+FORCE_IPV6="${FORCE_IPV6:-}"
 
 SSH_JUMPHOST="${SSH_JUMPHOST:-}"
 SSH_JUMPHOST_USERNAME="${SSH_JUMPHOST_USERNAME:-root}"
@@ -27,12 +28,12 @@ HEALTHCHECK_REMOTE_CMD="${HEALTHCHECK_REMOTE_CMD:-}"
 HEALTHCHECK_REMOTE_HOSTNAME="${HEALTHCHECK_REMOTE_HOSTNAME:-}"
 HEALTHCHECK_REMOTE_USERNAME="${HEALTHCHECK_REMOTE_USERNAME:-}"
 
-APPRISE_URL="${APPRISE_URL:-}"
 APPRISE_TAG="${APPRISE_TAG:-}"
 APPRISE_TITLE="${APPRISE_TITLE:-}"
+APPRISE_URL="${APPRISE_URL:-}"
 
-EMAIL_RECIPIENT="${EMAIL_RECIPIENT:-}"
 EMAIL_FROM="${EMAIL_FROM:-}"
+EMAIL_RECIPIENT="${EMAIL_RECIPIENT:-}"
 EMAIL_SUBJECT="${EMAIL_SUBJECT:-}"
 
 usage() {
@@ -59,10 +60,10 @@ usage() {
   echo "                 Env var: SSH_KEY"
   echo "  --force-ipv4, --ipv4, -4"
   echo "                 Force IPv4"
-  echo "                 Env var: SSH_FORCE_IPV4"
+  echo "                 Env var: FORCE_IPV4"
   echo "  --force-ipv6, --ipv6, -6"
   echo "                 Force IPv6"
-  echo "                 Env var: SSH_FORCE_IPV6"
+  echo "                 Env var: FORCE_IPV6"
   echo
 
   echo "  --ssh-jumphost, --jumphost, -J JUMPHOST"
@@ -269,10 +270,10 @@ _ssh() {
     -o ControlMaster=no
   )
 
-  if [[ -n "$SSH_FORCE_IPV4" ]]
+  if [[ -n "$FORCE_IPV4" ]]
   then
     ssh_opts+=(-4)
-  elif [[ -n "$SSH_FORCE_IPV6" ]]
+  elif [[ -n "$FORCE_IPV6" ]]
   then
     ssh_opts+=(-6)
   fi
@@ -342,10 +343,10 @@ resolve-hostname() {
 
   local cmd=(dig +short)
 
-  if [[ -n "$SSH_FORCE_IPV4" ]]
+  if [[ -n "$FORCE_IPV4" ]]
   then
     cmd+=(A)
-  elif [[ -n "$SSH_FORCE_IPV6" ]]
+  elif [[ -n "$FORCE_IPV6" ]]
   then
     cmd+=(AAAA)
   fi
@@ -456,11 +457,11 @@ then
         shift 2
         ;;
       --force-ipv4|--ipv4|-4)
-        SSH_FORCE_IPV4=1
+        FORCE_IPV4=1
         shift
         ;;
       --force-ipv6|--ipv6|-6)
-        SSH_FORCE_IPV6=1
+        FORCE_IPV6=1
         shift
         ;;
       --ssh-jumphost|--jumphost|-J)
