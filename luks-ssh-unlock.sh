@@ -6,6 +6,7 @@ SSH_PORT="${SSH_PORT:-22}"
 SSH_USERNAME="${SSH_USERNAME:-root}"
 SSH_FORCE_IPV4="${SSH_FORCE_IPV4:-}"
 SSH_FORCE_IPV6="${SSH_FORCE_IPV6:-}"
+SSH_CONNECTION_TIMEOUT="${SSH_CONNECTION_TIMEOUT:-5}"
 
 SSH_JUMPHOST="${SSH_JUMPHOST:-}"
 SSH_JUMPHOST_USERNAME="${SSH_JUMPHOST_USERNAME:-root}"
@@ -273,7 +274,7 @@ _ssh() {
   fi
 
   ssh -F /dev/null \
-    -o ConnectTimeout=5 \
+    -o ConnectTimeout="$SSH_CONNECTION_TIMEOUT" \
     "${ssh_opts[@]}" \
     -i "$SSH_KEY" \
     -l "$SSH_USERNAME" \
@@ -290,7 +291,7 @@ _ssh_jumphost() {
   )
 
   ssh -F /dev/null \
-    -o ConnectTimeout=5 \
+    -o ConnectTimeout="$SSH_CONNECTION_TIMEOUT" \
     "${ssh_opts[@]}" \
     -i "$SSH_JUMPHOST_KEY" \
     -l "$SSH_JUMPHOST_USERNAME" \
@@ -505,6 +506,7 @@ then
       echo "$LUKS_PASSWORD_FILE: No such file or directory" >&2
       exit 3
     fi
+
     LUKS_PASSWORD="$(cat "$LUKS_PASSWORD_FILE")"
   fi
 
