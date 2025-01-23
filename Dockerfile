@@ -34,6 +34,7 @@ ENV SSH_HOST=example.com \
     EMAIL_SUBJECT= \
     MSMTPRC=/config/msmtprc
 
+VOLUME /config
 VOLUME /data/events
 
 ENTRYPOINT ["/entrypoint.sh"]
