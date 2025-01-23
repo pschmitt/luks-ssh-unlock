@@ -31,7 +31,8 @@ ENV SSH_HOST=example.com \
     APPRISE_TITLE= \
     EMAIL_FROM= \
     EMAIL_RECIPIENT= \
-    EMAIL_SUBJECT=
+    EMAIL_SUBJECT= \
+    MSMTPRC=/config/msmtprc
 
 VOLUME /data/events
 
