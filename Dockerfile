@@ -2,7 +2,8 @@
 FROM alpine:latest
 
 # hadolint ignore=DL3018
-RUN apk add --no-cache bash curl bind-tools jq msmtp openssh-client
+RUN apk add --no-cache bash curl bind-tools jq msmtp openssh-client && \
+  ln -sfv /usr/bin/msmtp /usr/sbin/sendmail
 
 COPY ./entrypoint.sh /entrypoint.sh
 COPY ./luks-ssh-unlock.sh /luks-ssh-unlock.sh
