@@ -36,6 +36,7 @@ APPRISE_URL="${APPRISE_URL:-}"
 EMAIL_FROM="${EMAIL_FROM:-}"
 EMAIL_RECIPIENT="${EMAIL_RECIPIENT:-}"
 EMAIL_SUBJECT="${EMAIL_SUBJECT:-}"
+MSMTP_ACCOUNT="${MSMTP_ACCOUNT:-}"
 
 usage() {
   echo "Usage: $(basename "$0") OPTIONS"
@@ -123,6 +124,11 @@ usage() {
   echo "  --apprise-title, --title TITLE"
   echo "                 Apprise title to use"
   echo "                 Env var: APPRISE_TITLE"
+  echo
+
+  echo "  --msmtp-email-account, --email-account ACCOUNT"
+  echo "                 msmtp account to use for sending emails"
+  echo "                 Env var: MSMTP_ACCOUNT"
   echo "  --email-recipient, --email-to EMAIL"
   echo "                 Email address to send notifications to"
   echo "                 Env var: EMAIL_RECIPIENT"
@@ -262,7 +268,14 @@ log-notify() {
         printenv
       fi
 
-    } | sendmail "$EMAIL_RECIPIENT"
+    } | {
+      if [[ -n "$MSMTP_ACCOUNT" ]]
+      then
+        msmtp -a "$MSMTP_ACCOUNT" "$EMAIL_RECIPIENT"
+      else
+        sendmail "$EMAIL_RECIPIENT"
+      fi
+    }
   fi
 }
 
@@ -530,6 +543,10 @@ main() {
         ;;
       --apprise-title|--title)
         APPRISE_TITLE="$2"
+        shift 2
+        ;;
+      --msmtp-email-account|--email-account)
+        MSMTP_ACCOUNT="$2"
         shift 2
         ;;
       --email-recipient|--email-to)
