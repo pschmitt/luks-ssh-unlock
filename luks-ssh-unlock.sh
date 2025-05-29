@@ -57,7 +57,7 @@ usage() {
   echo "  --username, --user, -u USERNAME"
   echo "                 SSH username to connect with"
   echo "                 Env var: SSH_USERNAME"
-  echo "  --ssh-key, --key, --private-key, --pkey KEY"
+  echo "  --ssh-key, --key, --private-key, --pkey, -i KEY"
   echo "                 SSH private key to use"
   echo "                 Env var: SSH_KEY"
   echo "  --force-ipv4, --ipv4, -4"
@@ -85,7 +85,7 @@ usage() {
   echo "  --event-file, --event, -e FILE"
   echo "                 File to write events to"
   echo "                 Env var: EVENTS_FILE"
-  echo "  --sleep-interval, --sleep, --interval, -i SECONDS"
+  echo "  --sleep-interval, --sleep, --interval, -I SECONDS"
   echo "                 Sleep interval between attempts"
   echo "                 Env var: SLEEP_INTERVAL"
   echo "  --skip-ssh-port-check, --skip-port-check"
@@ -445,7 +445,52 @@ luks_unlock() {
   esac
 }
 
+unlock() {
+  # Perform Healthcheck if required
+  if [[ -n "$HEALTHCHECK_PORT" ]]
+  then
+    if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
+    then
+      if [[ -n "$DEBUG" ]]
+      then
+        log "Healthcheck result OK" >&2
+      fi
+      return 0
+    fi
+  fi
+
+  if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
+  then
+    if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
+        SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
+      _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
+    then
+      if [[ -n "$DEBUG" ]]
+      then
+        log "Healthcheck (remote cmd) result OK" >&2
+      fi
+      return 0
+    fi
+  fi
+
+  if [[ -z "$SKIP_SSH_PORT_CHECK" ]] && ! check_ssh_port
+  then
+    log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
+  else
+    log "Trying to unlock remotely ${SSH_HOSTNAME}"
+
+    if luks_unlock
+    then
+      log-notify -s "LUKS unlocked host at $SSH_HOSTNAME"
+    else
+      log-notify -f "Failed to unlock $SSH_HOSTNAME" >&2
+    fi
+  fi
+}
+
 main() {
+  local orig_args=("$@")
+
   while [[ -n "$*" ]]
   do
     case "$1" in
@@ -455,6 +500,10 @@ main() {
         ;;
       --debug|-D)
         DEBUG=1
+        shift
+        ;;
+      --run-once|--once|-1)
+        ONCE=1
         shift
         ;;
       --host|-H|--ssh-host*)
@@ -469,7 +518,7 @@ main() {
         SSH_USERNAME="$2"
         shift 2
         ;;
-      --ssh-key|--key|--private-key|--pkey|-k)
+      --ssh-key|--key|--private-key|--pkey|-k|-i)
         SSH_KEY="$2"
         shift 2
         ;;
@@ -497,7 +546,7 @@ main() {
         SSH_JUMPHOST_KEY="$2"
         shift 2
         ;;
-      --sleep-interval|--sleep|-s|--interval|-i)
+      --sleep-interval|--sleep|-s|--interval|-I)
         SLEEP_INTERVAL="$2"
         shift 2
         ;;
@@ -585,7 +634,7 @@ main() {
   # Copy file locally and correct mode
   if [[ "$(stat -c "%a" "$SSH_KEY")" != "400" ]]
   then
-    cp "$SSH_KEY" "$TMPDIR"
+    cp -f "$SSH_KEY" "$TMPDIR"
     SSH_KEY="${TMPDIR}/$(basename "$SSH_KEY")"
     chmod 400 "$SSH_KEY"
   fi
@@ -607,58 +656,28 @@ main() {
     exit 2
   fi
 
-  local msg="LUKS rigmarole started (type: $LUKS_TYPE). I'll be trying to unlock ${SSH_HOSTNAME}"
   if [[ -n "$SSH_JUMPHOST" ]]
   then
     msg+=" through ${SSH_JUMPHOST}"
   fi
   log "$msg"
 
+  # if we’re in once-mode, just do one unlock() and exit
+  if [[ -n "$ONCE" ]]
+  then
+    unlock
+    exit $?
+  fi
+
+  log "LUKS rigmarole started (type: $LUKS_TYPE). I'll be trying to unlock ${SSH_HOSTNAME}"
+
   while true
   do
-    # Perform Healthcheck if required
-    if [[ -n "$HEALTHCHECK_PORT" ]]
+    if ! timeout --foreground $(( SLEEP_INTERVAL * 2 ))s "$0" --run-once "${orig_args[@]}"
     then
-      if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
-      then
-        if [[ -n "$DEBUG" ]]
-        then
-          log "Healthcheck result OK" >&2
-        fi
-        sleep "$SLEEP_INTERVAL"
-        continue
-      fi
+      log "Unlock failed."
     fi
-
-    if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
-    then
-      if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
-         SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
-        _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
-      then
-        if [[ -n "$DEBUG" ]]
-        then
-          log "Healthcheck (remote cmd) result OK" >&2
-        fi
-        sleep "$SLEEP_INTERVAL"
-        continue
-      fi
-    fi
-
-    if [[ -z "$SKIP_SSH_PORT_CHECK" ]] && ! check_ssh_port
-    then
-      log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
-    else
-      log "Trying to unlock remotely ${SSH_HOSTNAME}"
-
-      if luks_unlock
-      then
-        log-notify -s "LUKS unlocked host at $SSH_HOSTNAME"
-      else
-        log-notify -f "Failed to unlock $SSH_HOSTNAME" >&2
-      fi
-    fi
-
+    log "Sleeping for $SLEEP_INTERVAL seconds before next attempt"
     sleep "$SLEEP_INTERVAL"
   done
 }
