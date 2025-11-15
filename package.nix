@@ -11,7 +11,7 @@
   openssh,
 }:
 
-stdenv.mkDerivation rec {
+stdenv.mkDerivation {
   pname = "luks-ssh-unlock";
   version = "0.1.0";
 

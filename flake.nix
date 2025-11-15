@@ -6,16 +6,22 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         luks-ssh-unlock = pkgs.callPackage ./package.nix { };
       in
       {
         packages = {
+          inherit luks-ssh-unlock;
           default = luks-ssh-unlock;
-          luks-ssh-unlock = luks-ssh-unlock;
         };
 
         devShells.default = pkgs.mkShell {
@@ -30,7 +36,8 @@
           ];
         };
       }
-    ) // {
+    )
+    // {
       # NixOS module
       nixosModules = {
         default = ./module.nix;
