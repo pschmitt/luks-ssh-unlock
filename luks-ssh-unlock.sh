@@ -299,31 +299,20 @@ _known_hosts_path() {
   local type="${1:-default}"
   local hosts_var
   local file_var
-  local cache_var
   local tmp_suffix
 
   case "$type" in
     initrd)
       hosts_var="SSH_INITRD_SSH_KNOWN_HOSTS"
       file_var="SSH_INITRD_SSH_KNOWN_HOSTS_FILE"
-      cache_var="SSH_INITRD_SSH_KNOWN_HOSTS_TMP"
       tmp_suffix="ssh_initrd_known_hosts"
       ;;
     *)
       hosts_var="SSH_KNOWN_HOSTS"
       file_var="SSH_KNOWN_HOSTS_FILE"
-      cache_var="SSH_KNOWN_HOSTS_TMP"
       tmp_suffix="ssh_known_hosts"
       ;;
   esac
-
-  local cached="${!cache_var}"
-
-  if [[ -n "$cached" ]]
-  then
-    echo "$cached"
-    return 0
-  fi
 
   local inline_hosts="${!hosts_var}"
 
@@ -332,7 +321,6 @@ _known_hosts_path() {
     local known_hosts_path="${TMPDIR%/}/${tmp_suffix}"
     printf "%s\n" "$inline_hosts" > "$known_hosts_path"
     chmod 600 "$known_hosts_path"
-    printf -v "$cache_var" "%s" "$known_hosts_path"
     echo "$known_hosts_path"
     return 0
   fi
@@ -347,7 +335,6 @@ _known_hosts_path() {
       return 2
     fi
 
-    printf -v "$cache_var" "%s" "$known_hosts_file"
     echo "$known_hosts_file"
     return 0
   fi
@@ -356,6 +343,11 @@ _known_hosts_path() {
 }
 
 _ssh() {
+  local ssh_opts=(
+    -o "UserKnownHostsFile=${known_hosts_file}"
+    -o ControlMaster=no
+  )
+
   local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
 
   local known_hosts_file
@@ -365,9 +357,6 @@ _ssh() {
   then
     known_hosts_file=/dev/null
   fi
-
-  local ssh_opts=()
-  ssh_opts+=(-o "UserKnownHostsFile=${known_hosts_file}" -o ControlMaster=no)
 
   if [[ "$known_hosts_file" == /dev/null ]]
   then
@@ -403,10 +392,10 @@ _ssh() {
 }
 
 _ssh_jumphost() {
-  local ssh_opts=()
+  local ssh_opts=(-o ControlMaster=no)
   local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
-  local known_hosts_file
 
+  local known_hosts_file
   known_hosts_file=$(_known_hosts_path "$known_hosts_type") || return 2
 
   if [[ -z "$known_hosts_file" ]]
@@ -414,9 +403,9 @@ _ssh_jumphost() {
     known_hosts_file=/dev/null
   fi
 
-  ssh_opts+=(-o "UserKnownHostsFile=${known_hosts_file}" -o ControlMaster=no)
+  ssh_opts+=(-o "UserKnownHostsFile=${known_hosts_file}")
 
-  if [[ "$known_hosts_file" = /dev/null ]]
+  if [[ "$known_hosts_file" == /dev/null ]]
   then
     ssh_opts+=(-o StrictHostKeyChecking=no)
   else
