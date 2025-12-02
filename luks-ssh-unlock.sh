@@ -7,7 +7,8 @@ SSH_USERNAME="${SSH_USERNAME:-root}"
 SSH_CONNECTION_TIMEOUT="${SSH_CONNECTION_TIMEOUT:-5}"
 SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-}"
 SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-}"
-SSH_KNOWN_HOSTS_PATH=""
+SSH_INITRD_SSH_KNOWN_HOSTS="${SSH_INITRD_SSH_KNOWN_HOSTS:-}"
+SSH_INITRD_SSH_KNOWN_HOSTS_FILE="${SSH_INITRD_SSH_KNOWN_HOSTS_FILE:-}"
 
 FORCE_IPV4="${FORCE_IPV4:-}"
 FORCE_IPV6="${FORCE_IPV6:-}"
@@ -69,6 +70,12 @@ usage() {
   echo "  --ssh-known-hosts-file FILE"
   echo "                 Known hosts file to enforce server host keys"
   echo "                 Env var: SSH_KNOWN_HOSTS_FILE"
+  echo "  --ssh-initrd-known-hosts HOSTS"
+  echo "                 Expected known_hosts content for unlock (initrd) SSH host keys only"
+  echo "                 Env var: SSH_INITRD_SSH_KNOWN_HOSTS"
+  echo "  --ssh-initrd-known-hosts-file FILE"
+  echo "                 Known hosts file for unlock (initrd) SSH host keys only"
+  echo "                 Env var: SSH_INITRD_SSH_KNOWN_HOSTS_FILE"
   echo "  --force-ipv4, --ipv4, -4"
   echo "                 Force IPv4"
   echo "                 Env var: FORCE_IPV4"
@@ -288,50 +295,81 @@ log-notify() {
   fi
 }
 
-prepare_known_hosts_path() {
-  if [[ -n "$SSH_KNOWN_HOSTS_PATH" ]]
+_known_hosts_path() {
+  local type="${1:-default}"
+  local hosts_var
+  local file_var
+  local cache_var
+  local tmp_suffix
+
+  case "$type" in
+    initrd)
+      hosts_var="SSH_INITRD_SSH_KNOWN_HOSTS"
+      file_var="SSH_INITRD_SSH_KNOWN_HOSTS_FILE"
+      cache_var="SSH_INITRD_SSH_KNOWN_HOSTS_TMP"
+      tmp_suffix="ssh_initrd_known_hosts"
+      ;;
+    *)
+      hosts_var="SSH_KNOWN_HOSTS"
+      file_var="SSH_KNOWN_HOSTS_FILE"
+      cache_var="SSH_KNOWN_HOSTS_TMP"
+      tmp_suffix="ssh_known_hosts"
+      ;;
+  esac
+
+  local cached="${!cache_var}"
+
+  if [[ -n "$cached" ]]
   then
+    echo "$cached"
     return 0
   fi
 
-  if [[ -n "$SSH_KNOWN_HOSTS" ]]
+  local inline_hosts="${!hosts_var}"
+
+  if [[ -n "$inline_hosts" ]]
   then
-    local known_hosts_path
-    known_hosts_path="${TMPDIR%/}/ssh_known_hosts"
-    printf "%s\n" "$SSH_KNOWN_HOSTS" > "$known_hosts_path"
+    local known_hosts_path="${TMPDIR%/}/${tmp_suffix}"
+    printf "%s\n" "$inline_hosts" > "$known_hosts_path"
     chmod 600 "$known_hosts_path"
-    SSH_KNOWN_HOSTS_PATH="$known_hosts_path"
+    printf -v "$cache_var" "%s" "$known_hosts_path"
+    echo "$known_hosts_path"
     return 0
   fi
 
-  if [[ -n "$SSH_KNOWN_HOSTS_FILE" ]]
+  local known_hosts_file="${!file_var}"
+
+  if [[ -n "$known_hosts_file" ]]
   then
-    if [[ ! -r "$SSH_KNOWN_HOSTS_FILE" ]]
+    if [[ ! -r "$known_hosts_file" ]]
     then
-      echo "SSH_KNOWN_HOSTS_FILE at $SSH_KNOWN_HOSTS_FILE is not readable." >&2
+      echo "${file_var} at $known_hosts_file is not readable." >&2
       return 2
     fi
 
-    SSH_KNOWN_HOSTS_PATH="$SSH_KNOWN_HOSTS_FILE"
+    printf -v "$cache_var" "%s" "$known_hosts_file"
+    echo "$known_hosts_file"
     return 0
   fi
 
-  SSH_KNOWN_HOSTS_PATH=/dev/null
+  echo /dev/null
 }
 
 _ssh() {
-  local extra_args=()
-  local ssh_opts=()
-  local known_hosts_file="$SSH_KNOWN_HOSTS_PATH"
+  local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
+
+  local known_hosts_file
+  known_hosts_file=$(_known_hosts_path "$known_hosts_type") || return 2
 
   if [[ -z "$known_hosts_file" ]]
   then
     known_hosts_file=/dev/null
   fi
 
+  local ssh_opts=()
   ssh_opts+=(-o "UserKnownHostsFile=${known_hosts_file}" -o ControlMaster=no)
 
-  if [[ "$known_hosts_file" = /dev/null ]]
+  if [[ "$known_hosts_file" == /dev/null ]]
   then
     ssh_opts+=(-o StrictHostKeyChecking=no)
   else
@@ -346,6 +384,7 @@ _ssh() {
     ssh_opts+=(-6)
   fi
 
+  local extra_args=()
   if [[ -n "$SSH_JUMPHOST" ]]
   then
     # We can't use JumpHost here since it does not inherit the
@@ -365,7 +404,10 @@ _ssh() {
 
 _ssh_jumphost() {
   local ssh_opts=()
-  local known_hosts_file="$SSH_KNOWN_HOSTS_PATH"
+  local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
+  local known_hosts_file
+
+  known_hosts_file=$(_known_hosts_path "$known_hosts_type") || return 2
 
   if [[ -z "$known_hosts_file" ]]
   then
@@ -458,6 +500,8 @@ check_ssh_port() {
 }
 
 luks_unlock() {
+  local SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd
+
   case "$LUKS_TYPE" in
     raw|direct)
       _ssh <<< "$LUKS_PASSPHRASE"
@@ -541,6 +585,14 @@ main() {
         ;;
       --ssh-known-hosts-file)
         SSH_KNOWN_HOSTS_FILE="$2"
+        shift 2
+        ;;
+      --ssh-initrd-known-hosts)
+        SSH_INITRD_SSH_KNOWN_HOSTS="$2"
+        shift 2
+        ;;
+      --ssh-initrd-known-hosts-file)
+        SSH_INITRD_SSH_KNOWN_HOSTS_FILE="$2"
         shift 2
         ;;
       --force-ipv4|--ipv4|-4)
@@ -658,11 +710,6 @@ main() {
     cp "$SSH_KEY" "$TMPDIR"
     SSH_KEY="${TMPDIR}/$(basename "$SSH_KEY")"
     chmod 400 "$SSH_KEY"
-  fi
-
-  if ! prepare_known_hosts_path
-  then
-    exit 2
   fi
 
   if [[ -z "$LUKS_PASSPHRASE" ]] && [[ -n "$LUKS_PASSPHRASE_FILE" ]]
