@@ -41,12 +41,12 @@ in
               default = null;
               description = "Path to a known hosts file to validate host keys.";
             };
-            initrdSshKnownHosts = mkOption {
+            initrdKnownHosts = mkOption {
               type = types.str;
               default = "";
               description = "Known hosts entries for initrd unlock SSH host keys.";
             };
-            initrdSshKnownHostsFile = mkOption {
+            initrdKnownHostsFile = mkOption {
               type = types.nullOr types.path;
               default = null;
               description = "Path to a known hosts file for initrd unlock SSH host keys.";
@@ -200,10 +200,10 @@ in
                 else
                   "";
               initrdKnownHostsPath =
-                if initrdSshKnownHosts != "" then
+                if initrdKnownHosts != "" then
                   "/etc/luks-ssh-unlock/${name}.initrd_known_hosts"
-                else if initrdSshKnownHostsFile != null then
-                  initrdSshKnownHostsFile
+                else if initrdKnownHostsFile != null then
+                  initrdKnownHostsFile
                 else
                   "";
             in
@@ -223,7 +223,7 @@ in
                 SSH_KNOWN_HOSTS_FILE=${knownHostsPath}
               ''}
               ${optionalString (initrdKnownHostsPath != "") ''
-                SSH_INITRD_SSH_KNOWN_HOSTS_FILE=${initrdKnownHostsPath}
+                SSH_INITRD_KNOWN_HOSTS_FILE=${initrdKnownHostsPath}
               ''}
 
               ${optionalString instance.jumpHost.enable ''
@@ -260,8 +260,8 @@ in
       ) (filterAttrs (_: instance: instance.sshKnownHosts != "") cfg.instances))
       // (mapAttrs' (
         name: instance:
-        nameValuePair "luks-ssh-unlock/${name}.initrd_known_hosts" { text = instance.initrdSshKnownHosts; }
-      ) (filterAttrs (_: instance: instance.initrdSshKnownHosts != "") cfg.instances));
+        nameValuePair "luks-ssh-unlock/${name}.initrd_known_hosts" { text = instance.initrdKnownHosts; }
+      ) (filterAttrs (_: instance: instance.initrdKnownHosts != "") cfg.instances));
 
     assertions =
       (mapAttrsToList (name: instance: {
@@ -269,8 +269,8 @@ in
         message = ''services.luks-ssh-unlocker.instances.${name} cannot set both sshKnownHosts and sshKnownHostsFile'';
       }) cfg.instances)
       ++ (mapAttrsToList (name: instance: {
-        assertion = !(instance.initrdSshKnownHosts != "" && instance.initrdSshKnownHostsFile != null);
-        message = ''services.luks-ssh-unlocker.instances.${name} cannot set both initrdSshKnownHosts and initrdSshKnownHostsFile'';
+        assertion = !(instance.initrdKnownHosts != "" && instance.initrdKnownHostsFile != null);
+        message = ''services.luks-ssh-unlocker.instances.${name} cannot set both initrdKnownHosts and initrdKnownHostsFile'';
       }) cfg.instances);
 
     systemd.services = mapAttrs' (

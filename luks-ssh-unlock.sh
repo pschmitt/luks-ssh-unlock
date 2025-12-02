@@ -7,8 +7,8 @@ SSH_USERNAME="${SSH_USERNAME:-root}"
 SSH_CONNECTION_TIMEOUT="${SSH_CONNECTION_TIMEOUT:-5}"
 SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-}"
 SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-}"
-SSH_INITRD_SSH_KNOWN_HOSTS="${SSH_INITRD_SSH_KNOWN_HOSTS:-}"
-SSH_INITRD_SSH_KNOWN_HOSTS_FILE="${SSH_INITRD_SSH_KNOWN_HOSTS_FILE:-}"
+SSH_INITRD_KNOWN_HOSTS="${SSH_INITRD_KNOWN_HOSTS:-}"
+SSH_INITRD_KNOWN_HOSTS_FILE="${SSH_INITRD_KNOWN_HOSTS_FILE:-}"
 
 FORCE_IPV4="${FORCE_IPV4:-}"
 FORCE_IPV6="${FORCE_IPV6:-}"
@@ -73,10 +73,10 @@ usage() {
   echo "                 Env var: SSH_KNOWN_HOSTS_FILE"
   echo "  --ssh-initrd-known-hosts HOSTS"
   echo "                 Expected known_hosts content for unlock (initrd) SSH host keys only"
-  echo "                 Env var: SSH_INITRD_SSH_KNOWN_HOSTS"
+  echo "                 Env var: SSH_INITRD_KNOWN_HOSTS"
   echo "  --ssh-initrd-known-hosts-file FILE"
   echo "                 Known hosts file for unlock (initrd) SSH host keys only"
-  echo "                 Env var: SSH_INITRD_SSH_KNOWN_HOSTS_FILE"
+  echo "                 Env var: SSH_INITRD_KNOWN_HOSTS_FILE"
   echo "  --force-ipv4, --ipv4, -4"
   echo "                 Force IPv4"
   echo "                 Env var: FORCE_IPV4"
@@ -307,8 +307,8 @@ _known_hosts_path() {
 
   case "$type" in
     initrd)
-      hosts_var="SSH_INITRD_SSH_KNOWN_HOSTS"
-      file_var="SSH_INITRD_SSH_KNOWN_HOSTS_FILE"
+      hosts_var="SSH_INITRD_KNOWN_HOSTS"
+      file_var="SSH_INITRD_KNOWN_HOSTS_FILE"
       tmp_suffix="ssh_initrd_known_hosts"
       ;;
     *)
@@ -592,11 +592,11 @@ main() {
         shift 2
         ;;
       --ssh-initrd-known-hosts)
-        SSH_INITRD_SSH_KNOWN_HOSTS="$2"
+        SSH_INITRD_KNOWN_HOSTS="$2"
         shift 2
         ;;
       --ssh-initrd-known-hosts-file)
-        SSH_INITRD_SSH_KNOWN_HOSTS_FILE="$2"
+        SSH_INITRD_KNOWN_HOSTS_FILE="$2"
         shift 2
         ;;
       --force-ipv4|--ipv4|-4)
