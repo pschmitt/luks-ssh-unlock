@@ -325,6 +325,10 @@ _known_hosts_path() {
     local known_hosts_path="${TMPDIR%/}/${tmp_suffix}"
     printf "%s\n" "$inline_hosts" > "$known_hosts_path"
     chmod 600 "$known_hosts_path"
+    if [[ -n "$DEBUG" ]]
+    then
+      log "Using known_hosts (type: $type, source: inline) at $known_hosts_path"
+    fi
     echo "$known_hosts_path"
     return 0
   fi
@@ -339,8 +343,17 @@ _known_hosts_path() {
       return 2
     fi
 
+    if [[ -n "$DEBUG" ]]
+    then
+      log "Using known_hosts (type: $type, source: file) at $known_hosts_file"
+    fi
     echo "$known_hosts_file"
     return 0
+  fi
+
+  if [[ -n "$DEBUG" ]]
+  then
+    log "Using known_hosts (type: $type, source: none) at /dev/null"
   fi
 
   echo /dev/null
