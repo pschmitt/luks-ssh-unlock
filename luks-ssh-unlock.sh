@@ -32,6 +32,7 @@ HEALTHCHECK_PORT="${HEALTHCHECK_PORT:-}"
 HEALTHCHECK_REMOTE_CMD="${HEALTHCHECK_REMOTE_CMD:-}"
 HEALTHCHECK_REMOTE_HOSTNAME="${HEALTHCHECK_REMOTE_HOSTNAME:-}"
 HEALTHCHECK_REMOTE_USERNAME="${HEALTHCHECK_REMOTE_USERNAME:-}"
+SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE="${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default}"
 
 APPRISE_TAG="${APPRISE_TAG:-}"
 APPRISE_TITLE="${APPRISE_TITLE:-}"
@@ -129,6 +130,9 @@ usage() {
   echo "  --healthcheck-user, --hc-user USERNAME"
   echo "                 Remote username to check if the host is reachable"
   echo "                 Env var: HEALTHCHECK_REMOTE_USERNAME"
+  echo "  --healthcheck-known-hosts-type TYPE"
+  echo "                 Which known_hosts set to use for healthcheck SSH (default|initrd)"
+  echo "                 Env var: SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE"
   echo
 
   echo "  --apprise-url, --apprise, -a URL"
@@ -638,6 +642,10 @@ main() {
         HEALTHCHECK_REMOTE_USERNAME="$2"
         shift 2
         ;;
+      --healthcheck-known-hosts-type)
+        SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE="$2"
+        shift 2
+        ;;
       --event-file|--event|-e)
         EVENTS_FILE="$2"
         shift 2
@@ -743,6 +751,7 @@ main() {
     then
       if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
          SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
+         SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
         _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
       then
         if [[ -n "$DEBUG" ]]
