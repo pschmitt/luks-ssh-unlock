@@ -15,7 +15,7 @@ in
     enable = mkEnableOption "LUKS SSH Unlocker Service";
     instances = mkOption {
       type = types.attrsOf (
-        types.submodule ({
+        types.submodule {
           options = {
             hostname = mkOption {
               type = types.str;
@@ -30,6 +30,16 @@ in
               type = types.path;
               description = "SSH key path for authentication.";
               default = "/etc/ssh/ssh_host_ed25519_key";
+            };
+            sshKnownHosts = mkOption {
+              type = types.str;
+              default = "";
+              description = "Known hosts entries to validate host keys.";
+            };
+            sshKnownHostsFile = mkOption {
+              type = types.nullOr types.path;
+              default = null;
+              description = "Path to a known hosts file to validate host keys.";
             };
             port = mkOption {
               type = types.int;
@@ -153,61 +163,86 @@ in
               description = "Email notifications";
             };
           };
-        })
+        }
       );
       description = "Configuration for multiple LUKS SSH Unlocker instances.";
     };
   };
 
   config = mkIf cfg.enable {
-    environment.systemPackages = [ 
+    environment.systemPackages = [
       (pkgs.callPackage ./package.nix { })
     ];
 
     # Define environment files
-    environment.etc = mapAttrs' (
-      name: instance:
-      nameValuePair "luks-ssh-unlock/${name}.env" {
-        text = with instance; ''
-          DEBUG=${optionalString (debug == true) "1"}
-          SLEEP_INTERVAL=${toString sleepInterval}
+    environment.etc =
+      (mapAttrs' (
+        name: instance:
+        nameValuePair "luks-ssh-unlock/${name}.env" {
+          text =
+            with instance;
+            let
+              knownHostsPath =
+                if sshKnownHosts != "" then
+                  "/etc/luks-ssh-unlock/${name}.known_hosts"
+                else if sshKnownHostsFile != null then
+                  sshKnownHostsFile
+                else
+                  "";
+            in
+            ''
+              DEBUG=${optionalString debug "1"}
+              SLEEP_INTERVAL=${toString sleepInterval}
 
-          SSH_HOSTNAME=${hostname}
-          SSH_USER=${username}
-          SSH_KEY=${key}
-          SSH_PORT=${toString port}
+              SSH_HOSTNAME=${hostname}
+              SSH_USER=${username}
+              SSH_KEY=${key}
+              SSH_PORT=${toString port}
 
-          FORCE_IPV4=${optionalString (forceIpv4 == true) "1"}
-          FORCE_IPV6=${optionalString (forceIpv6 == true) "1"}
+              FORCE_IPV4=${optionalString forceIpv4 "1"}
+              FORCE_IPV6=${optionalString forceIpv6 "1"}
 
-          ${optionalString (instance.jumpHost.enable) ''
-            SSH_JUMPHOST=${optionalString (jumpHost.hostname != null) jumpHost.hostname}
-            SSH_JUMPHOST_USERNAME=${optionalString (jumpHost.username != null) jumpHost.username}
-            SSH_JUMPHOST_PORT=${optionalString (jumpHost.port != null) (toString jumpHost.port)}
-            SSH_JUMPHOST_KEY=${optionalString (jumpHost.key != null) jumpHost.key}
-          ''}
+              ${optionalString (knownHostsPath != "") ''
+                SSH_KNOWN_HOSTS_FILE=${knownHostsPath}
+              ''}
 
-          LUKS_PASSPHRASE=${passphrase}
-          LUKS_PASSPHRASE_FILE=${passphraseFile}
-          LUKS_TYPE=${type}
+              ${optionalString instance.jumpHost.enable ''
+                SSH_JUMPHOST=${optionalString (jumpHost.hostname != null) jumpHost.hostname}
+                SSH_JUMPHOST_USERNAME=${optionalString (jumpHost.username != null) jumpHost.username}
+                SSH_JUMPHOST_PORT=${optionalString (jumpHost.port != null) (toString jumpHost.port)}
+                SSH_JUMPHOST_KEY=${optionalString (jumpHost.key != null) jumpHost.key}
+              ''}
 
-          ${optionalString (instance.healthcheck.enable) ''
-            HEALTHCHECK_PORT=${optionalString (healthcheck.port != null) (toString healthcheck.port)}
-            HEALTHCHECK_REMOTE_HOSTNAME="${optionalString (healthcheck.hostname != "") healthcheck.hostname}"
-            HEALTHCHECK_REMOTE_USERNAME="${optionalString (healthcheck.username != "") healthcheck.username}"
-            HEALTHCHECK_REMOTE_CMD="${healthcheck.command}"
-          ''}
+              LUKS_PASSPHRASE=${passphrase}
+              LUKS_PASSPHRASE_FILE=${passphraseFile}
+              LUKS_TYPE=${type}
 
-          ${optionalString (instance.emailNotifications.enable) ''
-            EMAIL_RECIPIENT="${
-              optionalString (emailNotifications.recipient != "") emailNotifications.recipient
-            }"
-            EMAIL_SENDER="${optionalString (emailNotifications.sender != "") emailNotifications.sender}"
-            EMAIL_SUBJECT="${optionalString (emailNotifications.subject != "") emailNotifications.subject}"
-          ''}
-        '';
-      }
-    ) cfg.instances;
+              ${optionalString instance.healthcheck.enable ''
+                HEALTHCHECK_PORT=${optionalString (healthcheck.port != null) (toString healthcheck.port)}
+                HEALTHCHECK_REMOTE_HOSTNAME="${optionalString (healthcheck.hostname != "") healthcheck.hostname}"
+                HEALTHCHECK_REMOTE_USERNAME="${optionalString (healthcheck.username != "") healthcheck.username}"
+                HEALTHCHECK_REMOTE_CMD="${healthcheck.command}"
+              ''}
+
+              ${optionalString instance.emailNotifications.enable ''
+                EMAIL_RECIPIENT="${
+                  optionalString (emailNotifications.recipient != "") emailNotifications.recipient
+                }"
+                EMAIL_SENDER="${optionalString (emailNotifications.sender != "") emailNotifications.sender}"
+                EMAIL_SUBJECT="${optionalString (emailNotifications.subject != "") emailNotifications.subject}"
+              ''}
+            '';
+        }
+      ) cfg.instances)
+      // (mapAttrs' (
+        name: instance:
+        nameValuePair "luks-ssh-unlock/${name}.known_hosts" { text = instance.sshKnownHosts; }
+      ) (filterAttrs (_: instance: instance.sshKnownHosts != "") cfg.instances));
+
+    assertions = mapAttrsToList (name: instance: {
+      assertion = !(instance.sshKnownHosts != "" && instance.sshKnownHostsFile != null);
+      message = ''services.luks-ssh-unlocker.instances.${name} cannot set both sshKnownHosts and sshKnownHostsFile'';
+    }) cfg.instances;
 
     systemd.services = mapAttrs' (
       name: instance:

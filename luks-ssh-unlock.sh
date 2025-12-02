@@ -5,6 +5,9 @@ SSH_KEY="${SSH_KEY:-/run/secrets/ssh_key}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_USERNAME="${SSH_USERNAME:-root}"
 SSH_CONNECTION_TIMEOUT="${SSH_CONNECTION_TIMEOUT:-5}"
+SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-}"
+SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-}"
+SSH_KNOWN_HOSTS_PATH=""
 
 FORCE_IPV4="${FORCE_IPV4:-}"
 FORCE_IPV6="${FORCE_IPV6:-}"
@@ -60,6 +63,12 @@ usage() {
   echo "  --ssh-key, --key, --private-key, --pkey KEY"
   echo "                 SSH private key to use"
   echo "                 Env var: SSH_KEY"
+  echo "  --ssh-known-hosts HOSTS"
+  echo "                 Expected known_hosts content to enforce server host keys"
+  echo "                 Env var: SSH_KNOWN_HOSTS"
+  echo "  --ssh-known-hosts-file FILE"
+  echo "                 Known hosts file to enforce server host keys"
+  echo "                 Env var: SSH_KNOWN_HOSTS_FILE"
   echo "  --force-ipv4, --ipv4, -4"
   echo "                 Force IPv4"
   echo "                 Env var: FORCE_IPV4"
@@ -279,13 +288,55 @@ log-notify() {
   fi
 }
 
+prepare_known_hosts_path() {
+  if [[ -n "$SSH_KNOWN_HOSTS_PATH" ]]
+  then
+    return 0
+  fi
+
+  if [[ -n "$SSH_KNOWN_HOSTS" ]]
+  then
+    local known_hosts_path
+    known_hosts_path="${TMPDIR%/}/ssh_known_hosts"
+    printf "%s\n" "$SSH_KNOWN_HOSTS" > "$known_hosts_path"
+    chmod 600 "$known_hosts_path"
+    SSH_KNOWN_HOSTS_PATH="$known_hosts_path"
+    return 0
+  fi
+
+  if [[ -n "$SSH_KNOWN_HOSTS_FILE" ]]
+  then
+    if [[ ! -r "$SSH_KNOWN_HOSTS_FILE" ]]
+    then
+      echo "SSH_KNOWN_HOSTS_FILE at $SSH_KNOWN_HOSTS_FILE is not readable." >&2
+      return 2
+    fi
+
+    SSH_KNOWN_HOSTS_PATH="$SSH_KNOWN_HOSTS_FILE"
+    return 0
+  fi
+
+  SSH_KNOWN_HOSTS_PATH=/dev/null
+}
+
 _ssh() {
   local extra_args=()
-  local ssh_opts=(
-    -o UserKnownHostsFile=/dev/null
-    -o StrictHostKeyChecking=no
-    -o ControlMaster=no
-  )
+  local ssh_opts=()
+  local known_hosts_file="$SSH_KNOWN_HOSTS_PATH"
+
+  if [[ -z "$known_hosts_file" ]]
+  then
+    known_hosts_file=/dev/null
+  fi
+
+  ssh_opts+=(-o "UserKnownHostsFile=${known_hosts_file}" -o ControlMaster=no)
+
+  if [[ "$known_hosts_file" = /dev/null ]]
+  then
+    ssh_opts+=(-o StrictHostKeyChecking=no)
+  else
+    ssh_opts+=(-o StrictHostKeyChecking=yes)
+  fi
 
   if [[ -n "$FORCE_IPV4" ]]
   then
@@ -313,11 +364,22 @@ _ssh() {
 }
 
 _ssh_jumphost() {
-  local ssh_opts=(
-    -o UserKnownHostsFile=/dev/null
-    -o StrictHostKeyChecking=no
-    -o ControlMaster=no
-  )
+  local ssh_opts=()
+  local known_hosts_file="$SSH_KNOWN_HOSTS_PATH"
+
+  if [[ -z "$known_hosts_file" ]]
+  then
+    known_hosts_file=/dev/null
+  fi
+
+  ssh_opts+=(-o "UserKnownHostsFile=${known_hosts_file}" -o ControlMaster=no)
+
+  if [[ "$known_hosts_file" = /dev/null ]]
+  then
+    ssh_opts+=(-o StrictHostKeyChecking=no)
+  else
+    ssh_opts+=(-o StrictHostKeyChecking=yes)
+  fi
 
   ssh -F /dev/null \
     -o ConnectTimeout="$SSH_CONNECTION_TIMEOUT" \
@@ -473,6 +535,14 @@ main() {
         SSH_KEY="$2"
         shift 2
         ;;
+      --ssh-known-hosts)
+        SSH_KNOWN_HOSTS="$2"
+        shift 2
+        ;;
+      --ssh-known-hosts-file)
+        SSH_KNOWN_HOSTS_FILE="$2"
+        shift 2
+        ;;
       --force-ipv4|--ipv4|-4)
         FORCE_IPV4=1
         shift
@@ -588,6 +658,11 @@ main() {
     cp "$SSH_KEY" "$TMPDIR"
     SSH_KEY="${TMPDIR}/$(basename "$SSH_KEY")"
     chmod 400 "$SSH_KEY"
+  fi
+
+  if ! prepare_known_hosts_path
+  then
+    exit 2
   fi
 
   if [[ -z "$LUKS_PASSPHRASE" ]] && [[ -n "$LUKS_PASSPHRASE_FILE" ]]
