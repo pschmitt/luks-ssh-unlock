@@ -161,7 +161,7 @@ usage() {
 }
 
 log() {
-  echo "$(date -Iseconds) $*"
+  echo "$(date -Iseconds) $*" >&2
 }
 
 template-msg() {
