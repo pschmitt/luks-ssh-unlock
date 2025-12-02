@@ -343,11 +343,7 @@ _known_hosts_path() {
 }
 
 _ssh() {
-  local ssh_opts=(
-    -o "UserKnownHostsFile=${known_hosts_file}"
-    -o ControlMaster=no
-  )
-
+  local ssh_opts=(-o ControlMaster=no)
   local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
 
   local known_hosts_file
@@ -357,6 +353,8 @@ _ssh() {
   then
     known_hosts_file=/dev/null
   fi
+
+  ssh_opts+=(-o "UserKnownHostsFile=${known_hosts_file}")
 
   if [[ "$known_hosts_file" == /dev/null ]]
   then
