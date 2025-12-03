@@ -697,7 +697,7 @@ main() {
   case "$action" in
     __internal-remote-live-root)
       measure_live_root
-      exit 0
+      exit "$?"
     ;;
     __internal-remote-initrd-image)
       if [[ $# -lt 1 ]]
@@ -706,7 +706,7 @@ main() {
         exit 2
       fi
       measure_initrd_image "$1"
-      exit 0
+      exit "$?"
     ;;
   esac
 
