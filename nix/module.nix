@@ -314,8 +314,8 @@ in
         set -euo pipefail
 
         CHECKSUM_DIR="/etc/initrd-checksum"
-        CHECKSUM_FILE="${CHECKSUM_DIR}/checksum"
-        META_FILE="${CHECKSUM_DIR}/meta.json"
+        CHECKSUM_FILE="''${CHECKSUM_DIR}/checksum"
+        META_FILE="''${CHECKSUM_DIR}/meta.json"
 
         mkdir -p "$CHECKSUM_DIR"
 
