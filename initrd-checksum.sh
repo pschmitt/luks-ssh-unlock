@@ -66,6 +66,7 @@ setup_colors() {
     COLOR_OK=$'\033[1;32m'
     COLOR_RESET=$'\033[0m'
   else
+    COLOR_DEBUG=""
     COLOR_INFO=""
     COLOR_WARN=""
     COLOR_ERR=""
