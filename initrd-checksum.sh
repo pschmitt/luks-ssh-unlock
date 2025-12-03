@@ -757,7 +757,10 @@ diff_hashes() {
   if diff -u <(sort "$file1") <(sort "$file2")
   then
     log_ok "files are identical"
+    return 0
   fi
+
+  return 1
 }
 
 detect_remote_initrd() {
