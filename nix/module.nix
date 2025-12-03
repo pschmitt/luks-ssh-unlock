@@ -23,6 +23,7 @@ in
       enable = mkEnableOption "Generate initrd checksum and metadata during activation";
     };
     instances = mkOption {
+      default = { };
       type = types.attrsOf (
         types.submodule {
           options = {
@@ -291,18 +292,21 @@ in
         message = ''services.luks-ssh-unlocker.instances.${name} cannot set both initrdKnownHosts and initrdKnownHostsFile'';
       }) cfg.instances);
 
-    systemd.services = mapAttrs' (
-      name: instance:
-      nameValuePair "luks-ssh-unlock-${name}" {
-        wantedBy = [ "multi-user.target" ];
-        after = [ "network.target" ];
-        serviceConfig = {
-          Type = "simple";
-          EnvironmentFile = "/etc/luks-ssh-unlock/${name}.env";
-          ExecStart = "${package}/bin/luks-ssh-unlock";
-        };
-      }
-    ) cfg.instances;
+    systemd.services =
+      if cfg.instances == { }
+      then { }
+      else mapAttrs' (
+        name: instance:
+        nameValuePair "luks-ssh-unlock-${name}" {
+          wantedBy = [ "multi-user.target" ];
+          after = [ "network.target" ];
+          serviceConfig = {
+            Type = "simple";
+            EnvironmentFile = "/etc/luks-ssh-unlock/${name}.env";
+            ExecStart = "${package}/bin/luks-ssh-unlock";
+          };
+        }
+      ) cfg.instances;
 
     system.activationScripts = mkIf cfg.activationScript.enable {
       luksInitrdChecksum.text = ''
