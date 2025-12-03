@@ -607,6 +607,7 @@ check_initrd_checksum() {
 
   local checksum_args=(
     checksum
+    --quiet
     --host "$SSH_HOSTNAME"
     --ssh-user "$SSH_USERNAME"
     --identity "$SSH_KEY"
