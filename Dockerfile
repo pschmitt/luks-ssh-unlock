@@ -7,14 +7,13 @@ SHELL ["/bin/sh", "-euxo", "pipefail", "-c"]
 ENV NIX_CONFIG="experimental-features = nix-command flakes" \
     PATH="/nix/var/nix/profiles/default/bin:${PATH}"
 
-# Pre-build static busybox for amd64/arm64; copy binaries out
-RUN busybox_amd64=$(nix build --print-out-paths --no-link 'nixpkgs#legacyPackages.x86_64-linux.pkgsStatic.busybox') && \
-    busybox_arm64=$(nix build --print-out-paths --no-link 'nixpkgs#legacyPackages.aarch64-linux.pkgsStatic.busybox') && \
+WORKDIR /tmp/build
+COPY . .
+
+# Build busybox bundle (amd64 + arm64) via flake output
+RUN nix --option filter-syscalls false build '.#busybox-static' --out-link /tmp/busybox && \
     mkdir -p /out && \
-    cp "$busybox_amd64"/bin/busybox /out/busybox-amd64 && \
-    cp "$busybox_arm64"/bin/busybox /out/busybox-arm64 && \
-    cp "$busybox_amd64"/bin/busybox /out/busybox && \
-    chmod +x /out/busybox*
+    cp -a /tmp/busybox/. /out
 
 FROM alpine:edge
 

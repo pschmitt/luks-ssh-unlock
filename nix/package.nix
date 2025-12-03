@@ -16,8 +16,7 @@
   util-linux,
   gzip,
   zstd,
-  busyboxStaticAmd64,
-  busyboxStaticArm64,
+  busyboxBundle,
 }:
 
 stdenv.mkDerivation {
@@ -64,9 +63,8 @@ stdenv.mkDerivation {
     }
 
     mkdir -p $out/busybox
-    cp ${busyboxStaticAmd64}/bin/busybox $out/busybox/busybox-amd64
-    cp ${busyboxStaticArm64}/bin/busybox $out/busybox/busybox-arm64
-    # Default to amd64 as generic busybox; callers can pick arch as needed.
+    cp ${busyboxBundle}/busybox-amd64 $out/busybox/busybox-amd64
+    cp ${busyboxBundle}/busybox-arm64 $out/busybox/busybox-arm64
     ln -s busybox-amd64 $out/busybox/busybox
   '';
 

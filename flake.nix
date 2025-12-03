@@ -16,15 +16,19 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        busybox-static = pkgs.callPackage ./nix/busybox.nix {
+          busyboxAmd64 = nixpkgs.legacyPackages.x86_64-linux.pkgsStatic.busybox;
+          busyboxArm64 = nixpkgs.legacyPackages.aarch64-linux.pkgsStatic.busybox;
+        };
         luks-ssh-unlock = pkgs.callPackage ./nix/package.nix {
-          busyboxStaticAmd64 = nixpkgs.legacyPackages.x86_64-linux.pkgsStatic.busybox;
-          busyboxStaticArm64 = nixpkgs.legacyPackages.aarch64-linux.pkgsStatic.busybox;
+          busyboxBundle = busybox-static;
         };
         luks-ssh-unlock-entrypoint = pkgs.callPackage ./nix/entrypoint.nix { };
       in
       {
         packages = {
           inherit luks-ssh-unlock;
+          inherit busybox-static;
           default = luks-ssh-unlock;
           entrypoint = luks-ssh-unlock-entrypoint;
         };
