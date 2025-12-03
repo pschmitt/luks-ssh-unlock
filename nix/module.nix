@@ -310,33 +310,33 @@ in
         ) cfg.instances;
 
     system.activationScripts = mkIf cfg.activationScript.enable {
-      luksInitrdChecksum.text = ''
-        (
-        set -euo pipefail
+      luksInitrdChecksum = {
+        deps = [ "etc" ];
+        text = ''
+          set -euo pipefail
 
-        CHECKSUM_DIR="/etc/initrd-checksum"
-        CHECKSUM_FILE="''${CHECKSUM_DIR}/checksum"
-        META_FILE="''${CHECKSUM_DIR}/meta.json"
+          CHECKSUM_DIR="/etc/initrd-checksum"
+          CHECKSUM_FILE="''${CHECKSUM_DIR}/checksum"
+          META_FILE="''${CHECKSUM_DIR}/meta.json"
 
-        mkdir -p "$CHECKSUM_DIR"
+          mkdir -p "$CHECKSUM_DIR"
 
-        # Generate checksum file
-        ${package}/bin/initrd-checksum --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE" || exit 0
+          # Generate checksum file
+          ${package}/bin/initrd-checksum --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE"
 
-        # Build metadata
-        SYSTEM_PROFILE=$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system) || exit 0
-        GENERATION=$(${pkgs.coreutils}/bin/basename "$SYSTEM_PROFILE" | \
-          ${pkgs.gnused}/bin/sed 's/^system-\([0-9]\+\)-link$/\1/')
-        DATE_STR=$(${pkgs.coreutils}/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
-        CHECKSUM=$(${pkgs.coreutils}/bin/sha256sum "$CHECKSUM_FILE" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
+          # Build metadata
+          GENERATION=$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system)" | \
+            ${pkgs.gnused}/bin/sed 's/^system-\([0-9]\+\)-link$/\1/')
+          DATE_STR=$(${pkgs.coreutils}/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
+          CHECKSUM=$(${pkgs.coreutils}/bin/sha256sum "$CHECKSUM_FILE" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
 
-        ${pkgs.jq}/bin/jq -n \
-          --argjson generation "$GENERATION" \
-          --arg date "$DATE_STR" \
-          --arg checksum "$CHECKSUM" \
-          '{generation: $generation, date: $date, checksum: $checksum}' > "$META_FILE"
-        )
-      '';
+          ${pkgs.jq}/bin/jq -n \
+            --argjson generation "$GENERATION" \
+            --arg date "$DATE_STR" \
+            --arg checksum "$CHECKSUM" \
+            '{generation: $generation, date: $date, checksum: $checksum}' > "$META_FILE"
+        '';
+      };
     };
   };
 }
