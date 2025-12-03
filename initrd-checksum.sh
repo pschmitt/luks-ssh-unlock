@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 # Requirements (binaries):
 # - coreutils: find, sort, sha256sum, mktemp, cat, printf
@@ -345,7 +346,7 @@ hash_tree() {
         log_err "failed to hash $abs_path (need root?)"
         exit 1
       fi
-    done
+    done | sort -k 2
 }
 
 require_root() {
@@ -422,6 +423,7 @@ measure_remote_live_root() {
 
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" bash -s << 'EOF'
 set -eu
+export LC_ALL=C
 
 hash_tree() {
   local root=$1
@@ -462,7 +464,7 @@ hash_tree() {
         echo "error: failed to hash $abs_path" >&2
         exit 1
       fi
-    done
+    done | sort -k 2
 }
 
   if [[ "$(id -u)" -ne 0 ]]
@@ -488,6 +490,7 @@ measure_remote_initrd_image() {
 
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" bash -s "$initrd_path" << 'EOF'
 set -eu
+export LC_ALL=C
 
 resolve_initrd_path() {
   local input_path=$1 resolved=""
@@ -667,7 +670,7 @@ hash_tree() {
         echo "error: failed to hash $abs_path" >&2
         exit 1
       fi
-    done
+    done | sort -k 2
 }
 
 INITRD_PATH=$1
