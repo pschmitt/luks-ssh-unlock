@@ -184,6 +184,8 @@ IGNORE_RELS=(
   "var/empty/.bash_history"
   "etc/ssh/initrd/ssh_host_"
   ".initrd-secrets/etc/ssh/initrd/ssh_host_"
+  "kernel/x86/microcode/AuthenticAMD.bin"
+  "kernel/x86/microcode/GenuineIntel.bin"
 )
 
 REMOTE_PATH_PREFIX=""
@@ -438,15 +440,17 @@ measure_remote_live_root() {
 set -eu
 export LC_ALL=C
 
+ignore_rels=(
+  "etc/machine-id"
+  "var/empty/.bash_history"
+  "etc/ssh/initrd/ssh_host_"
+  ".initrd-secrets/etc/ssh/initrd/ssh_host_"
+  "kernel/x86/microcode/AuthenticAMD.bin"
+  "kernel/x86/microcode/GenuineIntel.bin"
+)
+
 hash_tree() {
   local root=$1
-
-  local ignore_rels=(
-    "etc/machine-id"
-    "var/empty/.bash_history"
-    "etc/ssh/initrd/ssh_host_"
-    ".initrd-secrets/etc/ssh/initrd/ssh_host_"
-  )
 
   cd "$root"
 
@@ -504,6 +508,15 @@ measure_remote_initrd_image() {
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" bash -s "$initrd_path" << 'EOF'
 set -eu
 export LC_ALL=C
+
+ignore_rels=(
+  "etc/machine-id"
+  "var/empty/.bash_history"
+  "etc/ssh/initrd/ssh_host_"
+  ".initrd-secrets/etc/ssh/initrd/ssh_host_"
+  "kernel/x86/microcode/AuthenticAMD.bin"
+  "kernel/x86/microcode/GenuineIntel.bin"
+)
 
 resolve_initrd_path() {
   local input_path=$1 resolved=""
@@ -645,13 +658,6 @@ find_compressed_magic_offset() {
 
 hash_tree() {
   local root=$1
-
-  local ignore_rels=(
-    "etc/machine-id"
-    "var/empty/.bash_history"
-    "etc/ssh/initrd/ssh_host_"
-    ".initrd-secrets/etc/ssh/initrd/ssh_host_"
-  )
 
   cd "$root"
 
