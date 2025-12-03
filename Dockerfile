@@ -15,7 +15,8 @@ RUN nix --option filter-syscalls false build '.#busybox-static' --out-link /tmp/
     mkdir -p /out && \
     cp -a /tmp/busybox/. /out
 
-FROM alpine:edge
+# hadolint ignore=DL3007
+FROM alpine:latest
 
 SHELL ["/bin/sh", "-eux", "-c"]
 
