@@ -311,6 +311,7 @@ in
 
     system.activationScripts = mkIf cfg.activationScript.enable {
       luksInitrdChecksum.text = ''
+        (
         set -euo pipefail
 
         CHECKSUM_DIR="/etc/initrd-checksum"
@@ -334,6 +335,7 @@ in
           --arg date "$DATE_STR" \
           --arg checksum "$CHECKSUM" \
           '{generation: $generation, date: $date, checksum: $checksum}' > "$META_FILE"
+        )
       '';
     };
   };
