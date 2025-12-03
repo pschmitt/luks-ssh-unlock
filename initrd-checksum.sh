@@ -133,6 +133,8 @@ SSH_OPTS=()
 SSH_KNOWN_HOSTS_FILE=""
 SSH_IDENTITY_FILE=""
 INSECURE_SSH=0
+SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s' "$0")
+REMOTE_SCRIPT_PATH=""
 
 enable_secure_ssh() {
   INSECURE_SSH=0
@@ -180,11 +182,17 @@ apply_identity_file() {
 enable_secure_ssh
 
 IGNORE_RELS=(
+  # machine-id is regenerated each boot
   "etc/machine-id"
+  # empty root history file in NixOS initrd
   "var/empty/.bash_history"
-  "etc/ssh/initrd/ssh_host_"
-  ".initrd-secrets/etc/ssh/initrd/ssh_host_"
+  # initrd-generated SSH host keys
+  "etc/ssh/initrd/ssh_host_*"
+  # same SSH host keys when stored in initrd secrets
+  ".initrd-secrets/etc/ssh/initrd/ssh_host_*"
+  # early AMD microcode blob lives in concatenated initrd payload
   "kernel/x86/microcode/AuthenticAMD.bin"
+  # early Intel microcode blob lives in concatenated initrd payload
   "kernel/x86/microcode/GenuineIntel.bin"
 )
 
@@ -378,6 +386,31 @@ measure_live_root() {
   hash_tree /
 }
 
+ensure_remote_script() {
+  local host=$1 ssh_user=$2
+
+  if [[ -n "$REMOTE_SCRIPT_PATH" ]]
+  then
+    return
+  fi
+
+  local remote_path
+  if ! remote_path=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "mktemp /tmp/initrd-checksum.sh.XXXXXX")
+  then
+    log_err "failed to allocate remote temp path"
+    exit 1
+  fi
+
+  if ! ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "cat > '$remote_path' && chmod +x '$remote_path'" < "$SCRIPT_PATH"
+  then
+    log_err "failed to upload script to $host:$remote_path"
+    exit 1
+  fi
+
+  REMOTE_SCRIPT_PATH=$remote_path
+  add_exit_trap "ssh ${SSH_OPTS[*]} -l '$ssh_user' '$host' \"rm -f '$remote_path'\""
+}
+
 measure_initrd_image() {
   local initrd_path="$1" initrd_src="" tmpdir="" initrd_tail="" tail_offset="" tail_stream="" magic_offset="" tail_stream_tmp=""
 
@@ -428,318 +461,33 @@ measure_initrd_image() {
 
 measure_remote_live_root() {
   local host=$1 ssh_user=$2
-  local remote_env=()
+  local remote_env=() remote_script=""
   if [[ -n "$REMOTE_PATH_PREFIX" ]]
   then
     remote_env=(env "PATH=${REMOTE_PATH_PREFIX}:\$PATH")
   fi
 
   log_info "remote host=$host user=$ssh_user mode=live-root"
+  ensure_remote_script "$host" "$ssh_user"
+  remote_script=$REMOTE_SCRIPT_PATH
 
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" bash -s << 'EOF'
-set -eu
-export LC_ALL=C
-
-ignore_rels=(
-  "etc/machine-id"
-  "var/empty/.bash_history"
-  "etc/ssh/initrd/ssh_host_"
-  ".initrd-secrets/etc/ssh/initrd/ssh_host_"
-  "kernel/x86/microcode/AuthenticAMD.bin"
-  "kernel/x86/microcode/GenuineIntel.bin"
-)
-
-hash_tree() {
-  local root=$1
-
-  cd "$root"
-
-  find . -xdev \
-    \( -path ./dev -o -path ./proc -o -path ./sys -o -path ./run -o -path ./tmp \) -prune -o \
-    -type f -print0 \
-  | sort -z \
-  | while IFS= read -r -d '' rel
-    do
-      rel=${rel#./}
-      for ignore in "${ignore_rels[@]}"
-      do
-        case "$rel" in
-          "$ignore"|"$ignore"*)
-            continue 2
-          ;;
-        esac
-      done
-      local abs_path hash_line hash
-      abs_path=/$rel
-
-      if hash_line=$(sha256sum "$abs_path" 2>/dev/null)
-      then
-        set -- $hash_line
-        hash=$1
-        printf '%s  %s\n' "$hash" "$abs_path"
-      else
-        echo "error: failed to hash $abs_path" >&2
-        exit 1
-      fi
-    done | sort -k 2
-}
-
-  if [[ "$(id -u)" -ne 0 ]]
-  then
-    echo "error: live root measurement needs root privileges (rerun with sudo or inside initrd)" >&2
-    exit 1
-  fi
-
-hash_tree /
-EOF
+  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" "$remote_script" __internal-remote-live-root
 }
 
 measure_remote_initrd_image() {
   local host=$1 initrd_path=$2 ssh_user=$3
 
-  local remote_env=()
+  local remote_env=() remote_script=""
   if [[ -n "$REMOTE_PATH_PREFIX" ]]
   then
     remote_env=(env "PATH=${REMOTE_PATH_PREFIX}:\$PATH")
   fi
 
   log_info "remote host=$host user=$ssh_user mode=initrd-image path=$initrd_path"
+  ensure_remote_script "$host" "$ssh_user"
+  remote_script=$REMOTE_SCRIPT_PATH
 
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" bash -s "$initrd_path" << 'EOF'
-set -eu
-export LC_ALL=C
-
-ignore_rels=(
-  "etc/machine-id"
-  "var/empty/.bash_history"
-  "etc/ssh/initrd/ssh_host_"
-  ".initrd-secrets/etc/ssh/initrd/ssh_host_"
-  "kernel/x86/microcode/AuthenticAMD.bin"
-  "kernel/x86/microcode/GenuineIntel.bin"
-)
-
-resolve_initrd_path() {
-  local input_path=$1 resolved=""
-
-  if resolved=$(readlink -f "$input_path" 2>/dev/null)
-  then
-    printf '%s\n' "$resolved"
-    return
-  fi
-
-  if resolved=$(realpath "$input_path" 2>/dev/null)
-  then
-    printf '%s\n' "$resolved"
-    return
-  fi
-
-  printf '%s\n' "$input_path"
-}
-
-detect_decompress_cmd() {
-  local input_path=$1
-
-  if command -v zstd >/dev/null 2>&1 && zstd -t "$input_path" >/dev/null 2>&1
-  then
-    printf 'zstd -dc\n'
-    return
-  fi
-
-  if command -v gzip >/dev/null 2>&1 && gzip -t "$input_path" >/dev/null 2>&1
-  then
-    printf 'gzip -dc\n'
-    return
-  fi
-
-  printf 'cat\n'
-}
-
-extract_cpio() {
-  local archive_path=$1 decompress_cmd=""
-  decompress_cmd=$(detect_decompress_cmd "$archive_path")
-
-  if [[ "$decompress_cmd" == "cat" ]]
-  then
-    cpio -idmu < "$archive_path"
-  else
-    $decompress_cmd "$archive_path" | cpio -idmu
-  fi
-}
-
-newc_end_offset() {
-  local archive_path=$1 offset=0 header="" magic="" namesize_hex="" filesize_hex="" namesize=0 filesize=0 name=""
-
-  while true
-  do
-    header=$(dd if="$archive_path" bs=1 count=110 skip=$offset status=none 2>/dev/null | LC_ALL=C tr -d '\0') || return 1
-    if [[ ${#header} -lt 110 ]]
-    then
-      return 1
-    fi
-    magic=${header:0:6}
-    if [[ "$magic" != "070701" ]]
-    then
-      return 1
-    fi
-
-    namesize_hex=${header:94:8}
-    filesize_hex=${header:54:8}
-    namesize=$((16#$namesize_hex))
-    filesize=$((16#$filesize_hex))
-    if [[ "$namesize" -le 0 ]]
-    then
-      return 1
-    fi
-
-    name=$(dd if="$archive_path" bs=1 count=$((namesize - 1)) skip=$((offset + 110)) status=none 2>/dev/null) || return 1
-
-    offset=$(( (offset + 110 + namesize + 3) & ~3 ))
-    offset=$(( (offset + filesize + 3) & ~3 ))
-
-    if [[ "$name" == "TRAILER!!!" ]]
-    then
-      printf '%s\n' "$offset"
-      return 0
-    fi
-  done
-}
-
-write_initrd_tail() {
-  local src=$1 dest=$2 end_offset="" total_size=""
-
-  end_offset=$(newc_end_offset "$src") || return 1
-  total_size=$(stat -c '%s' "$src") || return 1
-
-  if [[ "$end_offset" -ge "$total_size" ]]
-  then
-    return 1
-  fi
-
-  if dd if="$src" of="$dest" bs=1 skip="$end_offset" status=none 2>/dev/null
-  then
-    printf '%s\n' "$end_offset"
-    return 0
-  fi
-
-  return 1
-}
-
-find_compressed_magic_offset() {
-  local archive_path=$1 offset_gzip="" offset_zstd=""
-
-  offset_zstd=$(LC_ALL=C grep -aob -m1 $'\x28\xb5\x2f\xfd' "$archive_path" | head -n1 | cut -d: -f1)
-  offset_gzip=$(LC_ALL=C grep -aob -m1 $'\x1f\x8b\x08' "$archive_path" | head -n1 | cut -d: -f1)
-
-  if [[ -n "$offset_zstd" && -n "$offset_gzip" ]]
-  then
-    if [[ "$offset_zstd" -le "$offset_gzip" ]]
-    then
-      printf '%s\n' "$offset_zstd"
-    else
-      printf '%s\n' "$offset_gzip"
-    fi
-    return 0
-  fi
-
-  if [[ -n "$offset_zstd" ]]
-  then
-    printf '%s\n' "$offset_zstd"
-    return 0
-  fi
-
-  if [[ -n "$offset_gzip" ]]
-  then
-    printf '%s\n' "$offset_gzip"
-    return 0
-  fi
-
-  return 1
-}
-
-hash_tree() {
-  local root=$1
-
-  cd "$root"
-
-  find . -xdev \
-    \( -path ./dev -o -path ./proc -o -path ./sys -o -path ./run -o -path ./tmp \) -prune -o \
-    -type f -print0 \
-  | sort -z \
-  | while IFS= read -r -d '' rel
-    do
-      rel=${rel#./}
-      for ignore in "${ignore_rels[@]}"
-      do
-        case "$rel" in
-          "$ignore"|"$ignore"*)
-            continue 2
-          ;;
-        esac
-      done
-      local fs_path abs_path hash_line hash
-      fs_path="$root/$rel"
-      abs_path=/$rel
-
-      if hash_line=$(sha256sum "$fs_path" 2>/dev/null)
-      then
-        set -- $hash_line
-        hash=$1
-        printf '%s  %s\n' "$hash" "$abs_path"
-      else
-        echo "error: failed to hash $abs_path" >&2
-        exit 1
-      fi
-    done | sort -k 2
-}
-
-INITRD_PATH=$1
-INITRD_SRC=$(resolve_initrd_path "$INITRD_PATH")
-if [[ ! -f "$INITRD_SRC" && "$INITRD_PATH" = "/run/current-system/initrd" && -f /run/booted-system/initrd ]]
-then
-  echo "warn: initrd not found at $INITRD_SRC, falling back to /run/booted-system/initrd" >&2
-  INITRD_SRC=/run/booted-system/initrd
-fi
-if [[ ! -f "$INITRD_SRC" ]]
-then
-  echo "error: initrd not found: $INITRD_SRC" >&2
-  exit 1
-fi
-TMPDIR=$(mktemp -d)
-trap "rm -rf '$TMPDIR'" EXIT
-cd "$TMPDIR"
-extract_cpio "$INITRD_SRC"
-
-INITRD_TAIL=$(mktemp)
-TAIL_STREAM_TMP=""
-trap 'rm -rf "$TMPDIR" "$INITRD_TAIL" "${TAIL_STREAM_TMP:-}"' EXIT
-if TAIL_OFFSET=$(write_initrd_tail "$INITRD_SRC" "$INITRD_TAIL")
-then
-  echo "info: detected concatenated initrd payload at offset=$TAIL_OFFSET; unpacking tail" >&2
-  TAIL_STREAM="$INITRD_TAIL"
-  if [[ "$(detect_decompress_cmd "$TAIL_STREAM")" == "cat" ]] && MAGIC_OFFSET=$(find_compressed_magic_offset "$TAIL_STREAM")
-  then
-    TAIL_STREAM_TMP=$(mktemp)
-    if ! dd if="$TAIL_STREAM" of="$TAIL_STREAM_TMP" bs=1 skip="$MAGIC_OFFSET" status=none 2>/dev/null
-    then
-      rm -f "$TAIL_STREAM_TMP"
-      TAIL_STREAM_TMP=""
-    else
-      TAIL_STREAM="$TAIL_STREAM_TMP"
-    fi
-  fi
-
-  extract_cpio "$TAIL_STREAM"
-  if [[ -n "$TAIL_STREAM_TMP" && -f "$TAIL_STREAM_TMP" ]]
-  then
-    rm -f "$TAIL_STREAM_TMP"
-  fi
-fi
-rm -f "$INITRD_TAIL"
-
-hash_tree "$TMPDIR"
-
-rm -rf "$TMPDIR"
-EOF
+  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" "$remote_script" __internal-remote-initrd-image "$initrd_path"
 }
 
 diff_hashes() {
@@ -945,6 +693,22 @@ main() {
   then
     shift
   fi
+
+  case "$action" in
+    __internal-remote-live-root)
+      measure_live_root
+      exit 0
+    ;;
+    __internal-remote-initrd-image)
+      if [[ $# -lt 1 ]]
+      then
+        log_err "missing initrd path for internal remote invocation"
+        exit 2
+      fi
+      measure_initrd_image "$1"
+      exit 0
+    ;;
+  esac
 
   while [[ $# -gt 0 ]]
   do
