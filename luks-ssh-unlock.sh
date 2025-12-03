@@ -35,6 +35,7 @@ HEALTHCHECK_REMOTE_USERNAME="${HEALTHCHECK_REMOTE_USERNAME:-}"
 SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE="${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default}"
 
 INITRD_CHECKSUM_FILE="${INITRD_CHECKSUM_FILE:-}"
+INITRD_CHECKSUM_DIR="${INITRD_CHECKSUM_DIR:-}"
 INITRD_CHECKSUM_SCRIPT="${INITRD_CHECKSUM_SCRIPT:-/app/bin/initrd-checksum}"
 
 APPRISE_TAG="${APPRISE_TAG:-}"
@@ -125,6 +126,9 @@ usage() {
   echo "  --initrd-checksum-file FILE"
   echo "                 Expected initrd checksum file to validate before unlocking"
   echo "                 Env var: INITRD_CHECKSUM_FILE"
+  echo "  --initrd-checksum-dir DIR"
+  echo "                 Directory to store fetched initrd checksum snapshots"
+  echo "                 Env var: INITRD_CHECKSUM_DIR"
   echo
 
   echo "  --remote-check, --healthcheck-remote-cmd, --remote-command, --remote-cmd, --rcmd CMD"
@@ -412,6 +416,73 @@ _ssh() {
     "$@"
 }
 
+_scp() {
+  local scp_opts=(-o ControlMaster=no)
+  local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
+
+  local known_hosts_file
+  known_hosts_file=$(_known_hosts_path "$known_hosts_type") || return 2
+
+  if [[ -z "$known_hosts_file" ]]
+  then
+    known_hosts_file=/dev/null
+  fi
+
+  scp_opts+=(-o "UserKnownHostsFile=${known_hosts_file}")
+
+  if [[ "$known_hosts_file" == /dev/null ]]
+  then
+    scp_opts+=(-o StrictHostKeyChecking=no)
+  else
+    scp_opts+=(-o StrictHostKeyChecking=yes)
+  fi
+
+  if [[ -n "$FORCE_IPV4" ]]
+  then
+    scp_opts+=(-4)
+  elif [[ -n "$FORCE_IPV6" ]]
+  then
+    scp_opts+=(-6)
+  fi
+
+  if [[ -n "$SSH_PORT" ]]
+  then
+    scp_opts+=(-P "$SSH_PORT")
+  fi
+
+  local extra_args=()
+  if [[ -n "$SSH_JUMPHOST" ]]
+  then
+    local proxy_opts=(-F /dev/null -o ConnectTimeout="$SSH_CONNECTION_TIMEOUT")
+    proxy_opts+=(-o "UserKnownHostsFile=${known_hosts_file}")
+    if [[ "$known_hosts_file" == /dev/null ]]
+    then
+      proxy_opts+=(-o StrictHostKeyChecking=no)
+    else
+      proxy_opts+=(-o StrictHostKeyChecking=yes)
+    fi
+    if [[ -n "$FORCE_IPV4" ]]
+    then
+      proxy_opts+=(-4)
+    elif [[ -n "$FORCE_IPV6" ]]
+    then
+      proxy_opts+=(-6)
+    fi
+    proxy_opts+=(-p "$SSH_JUMPHOST_PORT" -i "$SSH_JUMPHOST_KEY" -l "$SSH_JUMPHOST_USERNAME" "$SSH_JUMPHOST" -W %h:%p)
+    local proxy_cmd
+    printf -v proxy_cmd '%q ' "${proxy_opts[@]}"
+    proxy_cmd=${proxy_cmd% }
+    extra_args=(-o "ProxyCommand=ssh ${proxy_cmd}")
+  fi
+
+  scp -F /dev/null \
+    -o ConnectTimeout="$SSH_CONNECTION_TIMEOUT" \
+    "${scp_opts[@]}" \
+    -i "$SSH_KEY" \
+    "${extra_args[@]}" \
+    "$@"
+}
+
 _ssh_jumphost() {
   local ssh_opts=(-o ControlMaster=no)
   local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
@@ -552,6 +623,35 @@ check_initrd_checksum() {
 
   log-notify -w "Initrd checksum validation failed for ${SSH_HOSTNAME}; skipping unlock attempt"
   return 1
+}
+
+fetch_initrd_checksum() {
+  if [[ -z "$INITRD_CHECKSUM_DIR" ]]
+  then
+    return 0
+  fi
+
+  local remote_checksum_path="/etc/initrd-checksum"
+  local checksum_dir="${INITRD_CHECKSUM_DIR%/}/${SSH_HOSTNAME}"
+
+  if ! mkdir -p "$checksum_dir"
+  then
+    log-notify -w "Failed to create initrd checksum directory at ${checksum_dir}"
+    return 1
+  fi
+
+  if ! _scp -r "${SSH_USERNAME}@${SSH_HOSTNAME}:${remote_checksum_path}/" "${checksum_dir}/"
+  then
+    log-notify -w "Failed to fetch ${remote_checksum_path} from ${SSH_HOSTNAME}"
+    return 1
+  fi
+
+  if [[ -n "$DEBUG" ]]
+  then
+    log "Stored initrd checksum from ${SSH_HOSTNAME} to ${checksum_dir}"
+  fi
+
+  return 0
 }
 
 luks_unlock() {
@@ -698,6 +798,10 @@ main() {
         INITRD_CHECKSUM_FILE="$2"
         shift 2
         ;;
+      --initrd-checksum-dir)
+        INITRD_CHECKSUM_DIR="$2"
+        shift 2
+        ;;
       --remote-check|--healthcheck-remote-cmd|--remote-command|--remote-cmd|--rcmd)
         HEALTHCHECK_REMOTE_CMD="$2"
         shift 2
@@ -806,6 +910,7 @@ main() {
     then
       if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
       then
+        fetch_initrd_checksum
         if [[ -n "$DEBUG" ]]
         then
           log "Healthcheck result OK" >&2
@@ -822,6 +927,7 @@ main() {
          SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
         _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
       then
+        fetch_initrd_checksum
         if [[ -n "$DEBUG" ]]
         then
           log "Healthcheck (remote cmd) result OK" >&2

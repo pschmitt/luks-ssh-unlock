@@ -35,7 +35,8 @@ RUN apk add --no-cache \
     gzip \
     zstd \
     netcat-openbsd && \
-  ln -sf /usr/bin/msmtp /usr/sbin/sendmail
+  ln -sf /usr/bin/msmtp /usr/sbin/sendmail && \
+  mkdir -p /data/events /data/initrd-checksum
 
 WORKDIR /app
 
@@ -69,6 +70,7 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     HEALTHCHECK_REMOTE_HOSTNAME= \
     HEALTHCHECK_REMOTE_USERNAME= \
     HEALTHCHECK_REMOTE_CMD= \
+    INITRD_CHECKSUM_DIR=/data/initrd-checksum \
     INITRD_CHECKSUM_FILE= \
     INITRD_CHECKSUM_SCRIPT=/usr/local/bin/initrd-checksum.sh \
     APPRISE_URL= \
@@ -81,6 +83,7 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     MSMTP_ACCOUNT=
 
 VOLUME /config
+VOLUME /data
 VOLUME /data/events
 
 ENTRYPOINT ["/entrypoint.sh"]
