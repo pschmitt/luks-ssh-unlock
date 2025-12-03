@@ -951,6 +951,7 @@ main() {
     else
       if ! check_initrd_checksum
       then
+        log-notify -w "Skipping unlock attempt for ${SSH_HOSTNAME} due to initrd checksum validation failure"
         sleep "$SLEEP_INTERVAL"
         continue
       fi
