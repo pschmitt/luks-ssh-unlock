@@ -320,10 +320,11 @@ in
         mkdir -p "$CHECKSUM_DIR"
 
         # Generate checksum file
-        ${package}/bin/initrd-checksum > "$CHECKSUM_FILE"
+        ${package}/bin/initrd-checksum --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE" || exit 0
 
         # Build metadata
-        GENERATION=$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system)" | \
+        SYSTEM_PROFILE=$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system) || exit 0
+        GENERATION=$(${pkgs.coreutils}/bin/basename "$SYSTEM_PROFILE" | \
           ${pkgs.gnused}/bin/sed 's/^system-\([0-9]\+\)-link$/\1/')
         DATE_STR=$(${pkgs.coreutils}/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
         CHECKSUM=$(${pkgs.coreutils}/bin/sha256sum "$CHECKSUM_FILE" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
