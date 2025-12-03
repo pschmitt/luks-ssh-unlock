@@ -9,10 +9,19 @@ with lib;
 
 let
   cfg = config.services.luks-ssh-unlocker;
+  package = pkgs.callPackage ./package.nix {
+    busyboxBundle = pkgs.callPackage ./busybox.nix {
+      busyboxAmd64 = pkgs.pkgsStatic.busybox;
+      busyboxArm64 = pkgs.pkgsStatic.busybox;
+    };
+  };
 in
 {
   options.services.luks-ssh-unlocker = {
     enable = mkEnableOption "LUKS SSH Unlocker Service";
+    activationScript = {
+      enable = mkEnableOption "Generate initrd checksum and metadata during activation";
+    };
     instances = mkOption {
       type = types.attrsOf (
         types.submodule {
@@ -186,7 +195,7 @@ in
 
   config = mkIf cfg.enable {
     environment.systemPackages = [
-      (pkgs.callPackage ./package.nix { })
+      package
     ];
 
     # Define environment files
@@ -290,9 +299,35 @@ in
         serviceConfig = {
           Type = "simple";
           EnvironmentFile = "/etc/luks-ssh-unlock/${name}.env";
-          ExecStart = "${pkgs.callPackage ./package.nix { }}/bin/luks-ssh-unlock";
+          ExecStart = "${package}/bin/luks-ssh-unlock";
         };
       }
     ) cfg.instances;
+
+    system.activationScripts = mkIf cfg.activationScript.enable {
+      luksInitrdChecksum.text = ''
+        set -euo pipefail
+
+        CHECKSUM_DIR="/etc/initrd-checksum"
+        CHECKSUM_FILE="${CHECKSUM_DIR}/checksum"
+        META_FILE="${CHECKSUM_DIR}/meta.json"
+
+        mkdir -p "$CHECKSUM_DIR"
+
+        # Generate checksum file
+        ${package}/bin/initrd-checksum > "$CHECKSUM_FILE"
+
+        # Build metadata
+        GENERATION=$(readlink -f /nix/var/nix/profiles/system | sed 's/.*-system-\([0-9]\+\)-link/\1/')
+        DATE_STR=$(${pkgs.coreutils}/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
+        CHECKSUM=$(${pkgs.coreutils}/bin/sha256sum "$CHECKSUM_FILE" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
+
+        ${pkgs.jq}/bin/jq -n \
+          --argjson generation "$GENERATION" \
+          --arg date "$DATE_STR" \
+          --arg checksum "$CHECKSUM" \
+          '{generation: $generation, date: $date, checksum: $checksum}' > "$META_FILE"
+      '';
+    };
   };
 }
