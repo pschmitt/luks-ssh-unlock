@@ -34,6 +34,9 @@ HEALTHCHECK_REMOTE_HOSTNAME="${HEALTHCHECK_REMOTE_HOSTNAME:-}"
 HEALTHCHECK_REMOTE_USERNAME="${HEALTHCHECK_REMOTE_USERNAME:-}"
 SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE="${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default}"
 
+INITRD_CHECKSUM_FILE="${INITRD_CHECKSUM_FILE:-}"
+INITRD_CHECKSUM_SCRIPT="${INITRD_CHECKSUM_SCRIPT:-/app/bin/initrd-checksum}"
+
 APPRISE_TAG="${APPRISE_TAG:-}"
 APPRISE_TITLE="${APPRISE_TITLE:-}"
 APPRISE_URL="${APPRISE_URL:-}"
@@ -119,6 +122,9 @@ usage() {
   echo "  --luks-passphrase-file, --luks-password-file, -F FILE"
   echo "                 LUKS password file to use"
   echo "                 Env var: LUKS_PASSPHRASE_FILE"
+  echo "  --initrd-checksum-file FILE"
+  echo "                 Expected initrd checksum file to validate before unlocking"
+  echo "                 Env var: INITRD_CHECKSUM_FILE"
   echo
 
   echo "  --remote-check, --healthcheck-remote-cmd, --remote-command, --remote-cmd, --rcmd CMD"
@@ -503,6 +509,51 @@ check_ssh_port() {
   nc -z -w 2 "$resolved_hostname" "$SSH_PORT"
 }
 
+check_initrd_checksum() {
+  if [[ -z "$INITRD_CHECKSUM_FILE" ]]
+  then
+    return 0
+  fi
+
+  local checksum_script="${INITRD_CHECKSUM_SCRIPT:-/app/bin/initrd-checksum}"
+  if [[ ! -x "$checksum_script" ]]
+  then
+    log-notify -w "Initrd checksum validation requested but ${checksum_script} is missing or not executable"
+    return 1
+  fi
+
+  if [[ ! -r "$INITRD_CHECKSUM_FILE" ]]
+  then
+    log-notify -w "Initrd checksum file ${INITRD_CHECKSUM_FILE} is not readable"
+    return 1
+  fi
+
+  local known_hosts_file
+  known_hosts_file=$(_known_hosts_path initrd) || return 1
+
+  local checksum_args=(checksum --host "$SSH_HOSTNAME" --ssh-user "$SSH_USERNAME" --diff "$INITRD_CHECKSUM_FILE")
+  if [[ "$known_hosts_file" == /dev/null ]]
+  then
+    checksum_args+=(--insecure-ssh)
+  elif [[ -n "$known_hosts_file" ]]
+  then
+    checksum_args+=(--known-hosts-file "$known_hosts_file")
+  fi
+
+  if [[ -n "$DEBUG" ]]
+  then
+    log "Running initrd checksum validation via ${checksum_script}"
+  fi
+
+  if "$checksum_script" "${checksum_args[@]}"
+  then
+    return 0
+  fi
+
+  log-notify -w "Initrd checksum validation failed for ${SSH_HOSTNAME}; skipping unlock attempt"
+  return 1
+}
+
 luks_unlock() {
   local SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd
 
@@ -643,6 +694,10 @@ main() {
         LUKS_PASSPHRASE_FILE="$2"
         shift 2
         ;;
+      --initrd-checksum-file)
+        INITRD_CHECKSUM_FILE="$2"
+        shift 2
+        ;;
       --remote-check|--healthcheck-remote-cmd|--remote-command|--remote-cmd|--rcmd)
         HEALTHCHECK_REMOTE_CMD="$2"
         shift 2
@@ -780,6 +835,12 @@ main() {
     then
       log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
     else
+      if ! check_initrd_checksum
+      then
+        sleep "$SLEEP_INTERVAL"
+        continue
+      fi
+
       log "Trying to unlock remotely ${SSH_HOSTNAME}"
 
       if luks_unlock

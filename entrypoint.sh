@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 
-EXTRA_ARGS=()
-
 if [[ -n "$DEBUG" ]]
 then
-  EXTRA_ARGS+=(-x)
+  set -x
 fi
 
 # Copy the msmtp config file to the default location
 if [[ -n "$MSMTPRC" && "$MSMTPRC" != /etc/msmtprc ]]
 then
+  mkdir -p /etc
   install -o "$(whoami)" -m 400 "$MSMTPRC" /etc/msmtprc
 fi
 
-exec bash "${EXTRA_ARGS[@]}" /luks-ssh-unlock.sh "$@"
+exec /usr/local/bin/luks-ssh-unlock.sh "$@"

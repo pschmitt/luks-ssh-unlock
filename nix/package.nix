@@ -2,30 +2,44 @@
   lib,
   stdenv,
   makeWrapper,
+  bash,
+  coreutils,
   curl,
+  cpio,
   dig,
   jq,
   gnugrep,
   msmtp,
   netcat-gnu,
   openssh,
+  findutils,
+  util-linux,
+  gzip,
+  zstd,
+  busyboxStaticAmd64,
+  busyboxStaticArm64,
 }:
 
 stdenv.mkDerivation {
   pname = "luks-ssh-unlock";
   version = "0.1.0";
 
-  src = ./.;
+  src = ../.;
 
   nativeBuildInputs = [ makeWrapper ];
 
   installPhase = ''
     mkdir -p $out/bin
-    cp luks-ssh-unlock.sh $out/bin/luks-ssh-unlock
+    cp "$src/luks-ssh-unlock.sh" $out/bin/luks-ssh-unlock
+    cp "$src/initrd-checksum.sh" $out/bin/initrd-checksum
     chmod +x $out/bin/luks-ssh-unlock
+    chmod +x $out/bin/initrd-checksum
+
+    patchShebangs $out/bin
 
     wrapProgram $out/bin/luks-ssh-unlock --prefix PATH : ${
       lib.makeBinPath [
+        bash
         dig
         curl
         gnugrep
@@ -35,6 +49,25 @@ stdenv.mkDerivation {
         openssh
       ]
     }
+
+    wrapProgram $out/bin/initrd-checksum --prefix PATH : ${
+      lib.makeBinPath [
+        bash
+        coreutils
+        findutils
+        util-linux
+        cpio
+        gzip
+        zstd
+        openssh
+      ]
+    }
+
+    mkdir -p $out/busybox
+    cp ${busyboxStaticAmd64}/bin/busybox $out/busybox/busybox-amd64
+    cp ${busyboxStaticArm64}/bin/busybox $out/busybox/busybox-arm64
+    # Default to amd64 as generic busybox; callers can pick arch as needed.
+    ln -s busybox-amd64 $out/busybox/busybox
   '';
 
   meta = with lib; {

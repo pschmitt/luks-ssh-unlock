@@ -81,6 +81,11 @@ in
               description = "Path to the file containing the passphrase for LUKS.";
               default = "";
             };
+            initrdChecksumFile = mkOption {
+              type = types.nullOr types.path;
+              default = null;
+              description = "Path to an initrd checksum file; enables checksum validation before unlocking when set.";
+            };
             debug = mkOption {
               type = types.bool;
               default = false;
@@ -236,6 +241,10 @@ in
               LUKS_PASSPHRASE=${passphrase}
               LUKS_PASSPHRASE_FILE=${passphraseFile}
               LUKS_TYPE=${type}
+
+              ${optionalString (initrdChecksumFile != null) ''
+                INITRD_CHECKSUM_FILE=${initrdChecksumFile}
+              ''}
 
               ${optionalString instance.healthcheck.enable ''
                 HEALTHCHECK_PORT=${optionalString (healthcheck.port != null) (toString healthcheck.port)}
