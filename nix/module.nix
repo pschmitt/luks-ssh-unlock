@@ -323,7 +323,7 @@ in
         ${package}/bin/initrd-checksum > "$CHECKSUM_FILE"
 
         # Build metadata
-        GENERATION=$(readlink -f /nix/var/nix/profiles/system | sed 's/.*-system-\([0-9]\+\)-link/\1/')
+        GENERATION=$(readlink -f /nix/var/nix/profiles/system | ${pkgs.gnused}/bin/sed 's/.*-system-\([0-9]\+\)-link/\1/')
         DATE_STR=$(${pkgs.coreutils}/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
         CHECKSUM=$(${pkgs.coreutils}/bin/sha256sum "$CHECKSUM_FILE" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
 
