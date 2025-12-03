@@ -296,7 +296,7 @@ write_initrd_tail() {
     return 1
   fi
 
-  if dd if="$src" of="$dest" bs=1 skip="$end_offset" status=none 2>/dev/null
+  if dd if="$src" of="$dest" bs=4M skip="$end_offset" iflag=skip_bytes status=none 2>/dev/null
   then
     printf '%s\n' "$end_offset"
     return 0
@@ -444,7 +444,7 @@ measure_initrd_image() {
     then
       tail_stream_tmp=$(mktemp)
       add_exit_trap "rm -f '$tail_stream_tmp'"
-      if dd if="$tail_stream" of="$tail_stream_tmp" bs=1 skip="$magic_offset" status=none 2>/dev/null
+      if dd if="$tail_stream" of="$tail_stream_tmp" bs=4M skip="$magic_offset" iflag=skip_bytes status=none 2>/dev/null
       then
         tail_stream=$tail_stream_tmp
       else
