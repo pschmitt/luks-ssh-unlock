@@ -322,7 +322,7 @@ in
           mkdir -p "$CHECKSUM_DIR"
 
           # Generate checksum file
-          ${package}/bin/initrd-checksum --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE"
+          ${package}/bin/initrd-checksum check --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE"
 
           # Build metadata
           GENERATION=$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system)" | \
