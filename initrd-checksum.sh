@@ -843,12 +843,15 @@ deploy_paranoid_bundle() {
   fi
 
   log_info "uploading busybox from $busybox_src"
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "cat > '$remote_root/busybox' && chmod +x '$remote_root/busybox'" < "$busybox_src"
+  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
+    "cat > '$remote_root/busybox' && chmod +x '$remote_root/busybox'" \
+    < "$busybox_src"
 
   # Symlink required applets to busybox (single ssh)
   local applets=(find sort sha256sum readlink realpath cpio gzip)
   log_info "linking applets: ${applets[*]}"
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "cd '$remote_root' && for a in ${applets[*]}; do ln -sf busybox \"\$a\"; done"
+  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
+    "cd '$remote_root' && for a in ${applets[*]}; do ln -sf busybox \"\$a\"; done"
 
   REMOTE_PATH_PREFIX="$remote_root"
 
