@@ -23,6 +23,7 @@ LUKS_PASSPHRASE_FILE="${LUKS_PASSPHRASE_FILE=-/run/secrets/luks_password_${SSH_H
 LUKS_TYPE="${LUKS_TYPE:-raw}"
 
 DEBUG="${DEBUG:-}"
+PARANOID="${PARANOID:-}"
 EVENTS_FILE="${EVENTS_FILE:-}"
 SKIP_SSH_PORT_CHECK="${SKIP_SSH_PORT_CHECK:-}"
 SLEEP_INTERVAL="${SLEEP_INTERVAL:-10}"
@@ -129,6 +130,8 @@ usage() {
   echo "  --initrd-checksum-dir DIR"
   echo "                 Directory to store fetched initrd checksum snapshots"
   echo "                 Env var: INITRD_CHECKSUM_DIR"
+  echo "  PARANOID=1     Run initrd-checksum validation in paranoid mode (--paranoid)"
+  echo "                 Env var: PARANOID"
   echo
 
   echo "  --remote-check, --healthcheck-remote-cmd, --remote-command, --remote-cmd, --rcmd CMD"
@@ -609,6 +612,11 @@ check_initrd_checksum() {
   elif [[ -n "$known_hosts_file" ]]
   then
     checksum_args+=(--known-hosts-file "$known_hosts_file")
+  fi
+
+  if [[ -n "$PARANOID" ]]
+  then
+    checksum_args+=(--paranoid)
   fi
 
   if [[ -n "$DEBUG" ]]

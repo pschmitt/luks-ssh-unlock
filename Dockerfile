@@ -73,6 +73,7 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     INITRD_CHECKSUM_DIR=/data/initrd-checksum \
     INITRD_CHECKSUM_FILE= \
     INITRD_CHECKSUM_SCRIPT=/usr/local/bin/initrd-checksum.sh \
+    PARANOID= \
     APPRISE_URL= \
     APPRISE_TAG= \
     APPRISE_TITLE= \
