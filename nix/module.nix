@@ -8,7 +8,7 @@
 with lib;
 
 let
-  cfg = config.services.luks-ssh-unlocker;
+  cfg = config.services.luks-ssh-unlock;
   package = pkgs.callPackage ./package.nix {
     busyboxBundle = pkgs.callPackage ./busybox.nix {
       busyboxAmd64 = pkgs.pkgsStatic.busybox;
@@ -17,8 +17,8 @@ let
   };
 in
 {
-  options.services.luks-ssh-unlocker = {
-    enable = mkEnableOption "LUKS SSH Unlocker Service";
+  options.services.luks-ssh-unlock = {
+    enable = mkEnableOption "LUKS SSH Unlock Service";
     activationScript = {
       enable = mkEnableOption "Generate initrd checksum and metadata during activation";
     };
