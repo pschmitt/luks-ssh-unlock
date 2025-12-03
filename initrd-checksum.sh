@@ -407,6 +407,32 @@ ensure_remote_script() {
     exit 1
   fi
 
+  local local_checksum_line
+  if ! local_checksum_line=$(sha256sum "$SCRIPT_PATH" 2>/dev/null)
+  then
+    log_err "failed to calculate local checksum for $SCRIPT_PATH"
+    exit 1
+  fi
+
+  local local_checksum
+  local_checksum=${local_checksum_line%% *}
+
+  local remote_checksum_line
+  if ! remote_checksum_line=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "sha256sum '$remote_path'")
+  then
+    log_err "failed to calculate remote checksum for $host:$remote_path"
+    exit 1
+  fi
+
+  local remote_checksum
+  remote_checksum=${remote_checksum_line%% *}
+
+  if [[ "$local_checksum" != "$remote_checksum" ]]
+  then
+    log_err "checksum mismatch for uploaded script (local $local_checksum remote $remote_checksum)"
+    exit 1
+  fi
+
   REMOTE_SCRIPT_PATH=$remote_path
   add_exit_trap "ssh ${SSH_OPTS[*]} -l '$ssh_user' '$host' \"rm -f '$remote_path'\""
 }
@@ -567,7 +593,7 @@ deploy_paranoid_bundle() {
   log_info "deploying busybox bundle to $host:$remote_root"
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "rm -rf '$remote_root' && mkdir -p '$remote_root'"
 
-  local busybox_src
+  local busybox_src=""
   case "$remote_uname" in
     aarch64)
       if [[ -x "${LOCAL_BUSYBOX_DIR}/busybox-arm64" ]]
