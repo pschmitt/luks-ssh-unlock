@@ -33,6 +33,7 @@ Mandatory arguments to long options are mandatory for short options too.
 Options (checksum):
   -H, --host HOST         SSH to HOST; auto-detect initrd via /etc/initrd-release.
   -l, --ssh-user USER     SSH user (default: root).
+  -i, --identity FILE     SSH identity file to use.
       --initrd[=PATH]     Force hashing of an initrd image (default: /run/current-system/initrd).
       --diff FILE         After hashing, show diff vs FILE (sorted).
   -q, --quiet             Suppress checksum stdout (still logs and runs diff if provided).
@@ -130,12 +131,14 @@ SSH_OPTS_INSECURE=(
 
 SSH_OPTS=()
 SSH_KNOWN_HOSTS_FILE=""
+SSH_IDENTITY_FILE=""
 INSECURE_SSH=0
 
 enable_secure_ssh() {
   INSECURE_SSH=0
   SSH_OPTS=("${SSH_OPTS_SECURE[@]}")
   apply_known_hosts_file
+  apply_identity_file
 }
 
 enable_insecure_ssh() {
@@ -146,6 +149,7 @@ enable_insecure_ssh() {
   fi
   INSECURE_SSH=1
   SSH_OPTS=("${SSH_OPTS_INSECURE[@]}")
+  apply_identity_file
 }
 
 apply_known_hosts_file() {
@@ -162,6 +166,15 @@ apply_known_hosts_file() {
 
   local user_known_hosts_file=$SSH_KNOWN_HOSTS_FILE
   SSH_OPTS+=( -o "UserKnownHostsFile=${user_known_hosts_file}" )
+}
+
+apply_identity_file() {
+  if [[ -z "$SSH_IDENTITY_FILE" ]]
+  then
+    return
+  fi
+
+  SSH_OPTS+=( -i "$SSH_IDENTITY_FILE" )
 }
 
 enable_secure_ssh
@@ -903,7 +916,7 @@ main() {
 
   local action="" host="" initrd_mode="" initrd_path=""
   local diff_file1="" diff_file2="" checksum_diff="" quiet=""
-  local known_hosts_file="" ssh_user="root" paranoid=""
+  local known_hosts_file="" identity_file="" ssh_user="root" paranoid=""
 
   if [[ $# -gt 0 ]]
   then
@@ -961,6 +974,17 @@ main() {
           exit 2
         fi
         ssh_user=$2
+        shift 2
+      ;;
+      --identity|-i)
+        if [[ $# -lt 2 ]]
+        then
+          log_err "missing argument for $1"
+          exit 2
+        fi
+        identity_file=$2
+        SSH_IDENTITY_FILE=$identity_file
+        apply_identity_file
         shift 2
       ;;
       --diff)

@@ -605,7 +605,13 @@ check_initrd_checksum() {
   local known_hosts_file
   known_hosts_file=$(_known_hosts_path initrd) || return 1
 
-  local checksum_args=(checksum --host "$SSH_HOSTNAME" --ssh-user "$SSH_USERNAME" --diff "$INITRD_CHECKSUM_FILE")
+  local checksum_args=(
+    checksum
+    --host "$SSH_HOSTNAME"
+    --ssh-user "$SSH_USERNAME"
+    --identity "$SSH_KEY"
+    --diff "$INITRD_CHECKSUM_FILE"
+  )
   if [[ "$known_hosts_file" == /dev/null ]]
   then
     checksum_args+=(--insecure-ssh)
