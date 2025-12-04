@@ -386,6 +386,19 @@ measure_live_root() {
   hash_tree /
 }
 
+# Upload a file to a remote host via SSH and verify its integrity using SHA256 checksums.
+#
+# Parameters:
+#   local_path   - Path to the local file to upload.
+#   host         - Hostname or IP address of the remote machine.
+#   ssh_user     - SSH username for the remote connection.
+#   remote_path  - Destination path on the remote host.
+#   remote_mode  - (Optional) File mode (permissions) to set on the remote file (e.g., 0644).
+#
+# Behavior:
+#   - Exits with an error if the local file does not exist, upload fails, or checksums do not match.
+#   - After upload, computes and compares SHA256 checksums of the local and remote files.
+#   - If remote_mode is provided, sets the file permissions on the remote file.
 scpio() {
   local local_path=$1
   local host=$2
