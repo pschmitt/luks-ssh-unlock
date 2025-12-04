@@ -416,6 +416,10 @@ scpio() {
 
   if [[ -n "$remote_mode" ]]
   then
+    if [[ ! "$remote_mode" =~ ^[0-7]{3,4}$ ]]; then
+      log_err "invalid remote_mode: $remote_mode"
+      exit 1
+    fi
     remote_cmd="${remote_cmd} && chmod $remote_mode '$remote_path'"
   fi
 
