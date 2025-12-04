@@ -673,15 +673,21 @@ deploy_paranoid_bundle() {
 
   # Symlink required applets to busybox (single ssh)
   local applets=(
+    cat
     cpio
+    cut
     find
+    grep
     gzip
+    id
+    mktemp
     readlink
     realpath
     rm
     sha256sum
     sort
     tail
+    tr
   )
   log_info "linking applets: ${applets[*]}"
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
