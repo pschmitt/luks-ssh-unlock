@@ -386,31 +386,53 @@ measure_live_root() {
   hash_tree /
 }
 
-ensure_remote_script() {
-  local host=$1 ssh_user=$2
+# Upload a file to a remote host via SSH and verify its integrity using SHA256 checksums.
+#
+# Parameters:
+#   local_path   - Path to the local file to upload.
+#   host         - Hostname or IP address of the remote machine.
+#   ssh_user     - SSH username for the remote connection.
+#   remote_path  - Destination path on the remote host.
+#   remote_mode  - (Optional) File mode (permissions) to set on the remote file (e.g., 0644).
+#
+# Behavior:
+#   - Exits with an error if the local file does not exist, upload fails, or checksums do not match.
+#   - After upload, computes and compares SHA256 checksums of the local and remote files.
+#   - If remote_mode is provided, sets the file permissions on the remote file.
+scpio() {
+  local local_path=$1
+  local host=$2
+  local ssh_user=$3
+  local remote_path=$4
+  local remote_mode=$5
 
-  if [[ -n "$REMOTE_SCRIPT_PATH" ]]
+  if [[ ! -f "$local_path" ]]
   then
-    return
-  fi
-
-  local remote_path
-  if ! remote_path=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "mktemp /tmp/initrd-checksum.sh.XXXXXX")
-  then
-    log_err "failed to allocate remote temp path"
+    log_err "local file not found: $local_path"
     exit 1
   fi
 
-  if ! ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "cat > '$remote_path' && chmod +x '$remote_path'" < "$SCRIPT_PATH"
+  local remote_cmd="cat > '$remote_path'"
+
+  if [[ -n "$remote_mode" ]]
   then
-    log_err "failed to upload script to $host:$remote_path"
+    if [[ ! "$remote_mode" =~ ^[0-7]{3,4}$ ]]; then
+      log_err "invalid remote_mode: $remote_mode"
+      exit 1
+    fi
+    remote_cmd="${remote_cmd} && chmod $remote_mode '$remote_path'"
+  fi
+
+  if ! ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "$remote_cmd" < "$local_path"
+  then
+    log_err "failed to upload $local_path to $host:$remote_path"
     exit 1
   fi
 
   local local_checksum_line
-  if ! local_checksum_line=$(sha256sum "$SCRIPT_PATH" 2>/dev/null)
+  if ! local_checksum_line=$(sha256sum "$local_path" 2>/dev/null)
   then
-    log_err "failed to calculate local checksum for $SCRIPT_PATH"
+    log_err "failed to calculate local checksum for $local_path"
     exit 1
   fi
 
@@ -429,9 +451,27 @@ ensure_remote_script() {
 
   if [[ "$local_checksum" != "$remote_checksum" ]]
   then
-    log_err "checksum mismatch for uploaded script (local $local_checksum remote $remote_checksum)"
+    log_err "checksum mismatch for uploaded $local_path (local $local_checksum remote $remote_checksum)"
     exit 1
   fi
+}
+
+ensure_remote_script() {
+  local host=$1 ssh_user=$2
+
+  if [[ -n "$REMOTE_SCRIPT_PATH" ]]
+  then
+    return
+  fi
+
+  local remote_path
+  if ! remote_path=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "mktemp /tmp/initrd-checksum.sh.XXXXXX")
+  then
+    log_err "failed to allocate remote temp path"
+    exit 1
+  fi
+
+  scpio "$SCRIPT_PATH" "$host" "$ssh_user" "$remote_path" "+x"
 
   REMOTE_SCRIPT_PATH=$remote_path
   add_exit_trap "ssh ${SSH_OPTS[*]} -l '$ssh_user' '$host' \"rm -f '$remote_path'\""
@@ -626,9 +666,7 @@ deploy_paranoid_bundle() {
   fi
 
   log_info "uploading busybox from $busybox_src"
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
-    "cat > '$remote_root/busybox' && chmod +x '$remote_root/busybox'" \
-    < "$busybox_src"
+  scpio "$busybox_src" "$host" "$ssh_user" "$remote_root/busybox" "+x"
 
   # Symlink required applets to busybox (single ssh)
   local applets=(find sort sha256sum readlink realpath cpio gzip)
