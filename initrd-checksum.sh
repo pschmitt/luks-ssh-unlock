@@ -416,10 +416,6 @@ scpio() {
 
   if [[ -n "$remote_mode" ]]
   then
-    if [[ ! "$remote_mode" =~ ^[0-7]{3,4}$ ]]; then
-      log_err "invalid remote_mode: $remote_mode"
-      exit 1
-    fi
     remote_cmd="${remote_cmd} && chmod $remote_mode '$remote_path'"
   fi
 
@@ -454,6 +450,8 @@ scpio() {
     log_err "checksum mismatch for uploaded $local_path (local $local_checksum remote $remote_checksum)"
     exit 1
   fi
+
+  log_info "successfully uploaded $local_path to $host:$remote_path (checksum verified)"
 }
 
 ensure_remote_script() {
@@ -537,7 +535,8 @@ measure_remote_live_root() {
   ensure_remote_script "$host" "$ssh_user"
   remote_script=$REMOTE_SCRIPT_PATH
 
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" "$remote_script" __internal-remote-live-root
+  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
+    "${remote_env[@]}" "$remote_script" __internal-remote-live-root
 }
 
 measure_remote_initrd_image() {
@@ -553,7 +552,8 @@ measure_remote_initrd_image() {
   ensure_remote_script "$host" "$ssh_user"
   remote_script=$REMOTE_SCRIPT_PATH
 
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "${remote_env[@]}" "$remote_script" __internal-remote-initrd-image "$initrd_path"
+  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
+    "${remote_env[@]}" "$remote_script" __internal-remote-initrd-image "$initrd_path"
 }
 
 diff_hashes() {
@@ -618,7 +618,9 @@ deploy_paranoid_bundle() {
 
   local remote_uname
   remote_uname=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "uname -m")
+
   log_info "remote arch detected: $remote_uname"
+
   local nix_attr="nixpkgs#pkgsStatic.busybox"
   case "$remote_uname" in
     aarch64)
@@ -630,6 +632,7 @@ deploy_paranoid_bundle() {
   esac
 
   local remote_root="/run/initrd-checksum/bin"
+
   log_info "deploying busybox bundle to $host:$remote_root"
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "rm -rf '$remote_root' && mkdir -p '$remote_root'"
 
@@ -669,10 +672,20 @@ deploy_paranoid_bundle() {
   scpio "$busybox_src" "$host" "$ssh_user" "$remote_root/busybox" "+x"
 
   # Symlink required applets to busybox (single ssh)
-  local applets=(find sort sha256sum readlink realpath cpio gzip)
+  local applets=(
+    cpio
+    find
+    gzip
+    readlink
+    realpath
+    rm
+    sha256sum
+    sort
+    tail
+  )
   log_info "linking applets: ${applets[*]}"
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
-    "cd '$remote_root' && for a in ${applets[*]}; do ln -sf busybox \"\$a\"; done"
+    "cd '$remote_root' && for a in ${applets[*]}; do ln -vsf busybox \"\$a\"; done"
 
   REMOTE_PATH_PREFIX="$remote_root"
 
@@ -681,7 +694,8 @@ deploy_paranoid_bundle() {
 }
 
 run_checksum() {
-  local host=$1 initrd_path=$2 initrd_mode=$3 ssh_user=$4 diff_target=$5 quiet=$6 paranoid=$7
+  local host=$1 initrd_path=$2 initrd_mode=$3 ssh_user=$4
+  local diff_target=$5 quiet=$6 paranoid=$7
   local tmpfile="" mode=""
 
   tmpfile=$(mktemp)
