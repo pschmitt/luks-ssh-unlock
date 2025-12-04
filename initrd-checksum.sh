@@ -682,6 +682,7 @@ deploy_paranoid_bundle() {
     grep
     gzip
     id
+    mkdir
     mktemp
     readlink
     realpath
@@ -689,6 +690,8 @@ deploy_paranoid_bundle() {
     sha256sum
     sort
     tail
+    tar
+    test
     tr
   )
   log_info "linking applets: ${applets[*]}"
