@@ -676,6 +676,8 @@ deploy_paranoid_bundle() {
     cat
     cpio
     cut
+    date
+    dd
     find
     grep
     gzip
