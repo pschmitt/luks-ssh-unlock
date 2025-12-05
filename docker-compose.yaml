@@ -2,53 +2,86 @@
 version: "3.8"
 
 services:
-  nasteanas:
-    image: pschmitt/luks-ssh-unlock:latest
-    build: .
+  vault-west:
+    # Use the published GHCR image; swap to `build: .` for local iteration.
+    image: ghcr.io/pschmitt/luks-ssh-unlock:latest
+    restart: unless-stopped
     deploy:
       placement:
         constraints:
-          - node.hostname != nasteanas
+          - node.hostname != vault-west
     volumes:
       - "./events:/events"
+      # Mount host known_hosts if you want to reuse an existing SSH trust store.
+      - "./known_hosts:/etc/ssh/known_hosts:ro"
     secrets:
       - ssh_key
-      - password_ntn
+      - passphrase_vault_west
     environment:
-      # - "DEBUG=1"
-      - 'LUKS_TYPE=direct'
-      - 'SSH_HOSTNAME=10.7.0.215'
-      - 'SSH_KEY=/run/secrets/ssh_key'
-      - 'LUKS_PASSWORD_FILE=/run/secrets/password_ntn'
-      - 'EVENT_FILE=/events/ntn'
-      - 'SLEEP_INTERVAL=30'
+      # Core target
+      SSH_HOSTNAME: "10.7.0.215"
+      SSH_USERNAME: "root"
+      SSH_KEY: "/run/secrets/ssh_key"
+      SSH_PORT: "22"
+      LUKS_TYPE: "systemd"
+      LUKS_PASSPHRASE_FILE: "/run/secrets/passphrase_vault_west"
+      EVENTS_FILE: "/events/vault-west.log"
+      SLEEP_INTERVAL: "30"
+      # Host key pinning (inline)
+      SSH_KNOWN_HOSTS_FILE: "/etc/ssh/known_hosts"
+      # Jumphost example (only set when needed)
+      SSH_JUMPHOST: "bastion.internal"
+      SSH_JUMPHOST_USERNAME: "jump"
+      SSH_JUMPHOST_PORT: "2222"
+      # Health check before unlock
+      HEALTHCHECK_PORT: "9090"
+      HEALTHCHECK_REMOTE_CMD: "systemctl is-active dropbear.socket"
+      # Notifications (Apprise + email)
+      APPRISE_URL: "https://example.net/notifications"
+      APPRISE_TITLE: "Unlocking {{SSH_HOSTNAME}}"
+      APPRISE_TAG: "unlock"
+      MSMTP_ACCOUNT: "default"
+      EMAIL_FROM: "alerts@example.com"
+      EMAIL_RECIPIENT: "ops@example.com"
+      EMAIL_SUBJECT: "Unlock attempt on {{SSH_HOSTNAME}}"
 
-  fnuc:
-    image: pschmitt/luks-ssh-unlock:latest
-    build: .
+  vault-east:
+    image: ghcr.io/pschmitt/luks-ssh-unlock:latest
+    restart: on-failure
     deploy:
       placement:
         constraints:
-          - node.hostname != fnuc
+          - node.hostname != vault-east
     volumes:
       - "./events:/events"
     secrets:
       - ssh_key
-      - password_fnuc
+      - passphrase_vault_east
+      - initrd_checksum
     environment:
-      # - "DEBUG=1"
-      - "HEALTHCHECK_PORT=9090"
-      - 'LUKS_TYPE=dracut'
-      - 'SSH_HOSTNAME=10.7.0.200'
-      - 'SSH_KEY=/run/secrets/ssh_key'
-      - 'LUKS_PASSWORD_FILE=/run/secrets/password_fnuc'
-      - 'EVENT_FILE=/events/fnuc'
-      - 'SLEEP_INTERVAL=30'
+      # Core target
+      SSH_HOSTNAME: "10.7.0.200"
+      SSH_USERNAME: "root"
+      SSH_KEY: "/run/secrets/ssh_key"
+      LUKS_TYPE: "systemd-tool"
+      LUKS_PASSPHRASE_FILE: "/run/secrets/passphrase_vault_east"
+      EVENTS_FILE: "/events/vault-east.log"
+      SLEEP_INTERVAL: "45"
+      # Force IPv6 and skip port probe for isolated networks
+      FORCE_IPV6: "1"
+      SKIP_SSH_PORT_CHECK: "1"
+      # Initrd checksum validation
+      INITRD_CHECKSUM_FILE: "/run/secrets/initrd_checksum"
+      PARANOID: "1"
+      # Health check against a custom command
+      HEALTHCHECK_REMOTE_CMD: "ls /dev/mapper"
 
 secrets:
   ssh_key:
     file: ./secrets/id_docker_rsa
-  password_ntn:
-    file: ./secrets/password.ntn
-  password_fnuc:
-    file: ./secrets/password.fnuc
+  passphrase_vault_west:
+    file: ./secrets/passphrase.vault-west
+  passphrase_vault_east:
+    file: ./secrets/passphrase.vault-east
+  initrd_checksum:
+    file: ./secrets/initrd.checksum
