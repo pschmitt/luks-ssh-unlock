@@ -184,11 +184,20 @@ enable_secure_ssh
 IGNORE_RELS=(
   # machine-id is regenerated each boot
   "etc/machine-id"
+
   # empty root history file in NixOS initrd
   "var/empty/.bash_history"
-  # initrd SSH host keys when stored in initrd secrets
-  "/.initrd-secrets/etc/ssh/initrd/ssh_host_ed25519_key"
-  "/.initrd-secrets/etc/ssh/initrd/ssh_host_rsa_key"
+
+  # initrd ssh host keys
+  "etc/ssh/initrd/ssh_host_ed25519_key"
+  "etc/ssh/initrd/ssh_host_ed25519_key.pub"
+  "etc/ssh/initrd/ssh_host_rsa_key"
+  "etc/ssh/initrd/ssh_host_rsa_key.pub"
+
+  # initrd SSH host keys (initrd secrets)
+  ".initrd-secrets/etc/ssh/initrd/ssh_host_ed25519_key"
+  ".initrd-secrets/etc/ssh/initrd/ssh_host_rsa_key"
+
   # early AMD/Intel microcode blob living in concatenated initrd payload
   "kernel/x86/microcode/AuthenticAMD.bin"
   "kernel/x86/microcode/GenuineIntel.bin"
