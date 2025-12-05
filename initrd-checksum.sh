@@ -186,13 +186,11 @@ IGNORE_RELS=(
   "etc/machine-id"
   # empty root history file in NixOS initrd
   "var/empty/.bash_history"
-  # initrd-generated SSH host keys
-  "etc/ssh/initrd/ssh_host_*"
-  # same SSH host keys when stored in initrd secrets
-  ".initrd-secrets/etc/ssh/initrd/ssh_host_*"
-  # early AMD microcode blob lives in concatenated initrd payload
+  # initrd SSH host keys when stored in initrd secrets
+  "/.initrd-secrets/etc/ssh/initrd/ssh_host_ed25519_key"
+  "/.initrd-secrets/etc/ssh/initrd/ssh_host_rsa_key"
+  # early AMD/Intel microcode blob living in concatenated initrd payload
   "kernel/x86/microcode/AuthenticAMD.bin"
-  # early Intel microcode blob lives in concatenated initrd payload
   "kernel/x86/microcode/GenuineIntel.bin"
 )
 
