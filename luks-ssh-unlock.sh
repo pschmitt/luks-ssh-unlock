@@ -641,7 +641,7 @@ check_initrd_checksum() {
 }
 
 fetch_initrd_checksum() {
-  if [[ -z "$INITRD_CHECKSUM_DIR" ]]
+  if [[ -z "$INITRD_CHECKSUM_DIR" || "$INITRD_CHECKSUM_DIR" == "/dev/null" ]]
   then
     return 0
   fi
