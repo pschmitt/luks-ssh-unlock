@@ -136,6 +136,11 @@ in
               default = 15;
               description = "Time to wait between attempts.";
             };
+            tickTimeout = mkOption {
+              type = types.int;
+              default = 120;
+              description = "Timeout for each tick.";
+            };
             healthcheck = mkOption {
               type = types.submodule {
                 options = {
@@ -225,6 +230,7 @@ in
             ''
               DEBUG=${optionalString debug "1"}
               SLEEP_INTERVAL=${toString sleepInterval}
+              TICK_TIMEOUT=${toString tickTimeout}
 
               SSH_HOSTNAME=${hostname}
               SSH_USER=${username}

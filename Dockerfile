@@ -66,6 +66,7 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     LUKS_TYPE=raw \
     EVENTS_FILE= \
     SLEEP_INTERVAL=5 \
+    TICK_TIMEOUT=120 \
     HEALTHCHECK_PORT= \
     HEALTHCHECK_REMOTE_HOSTNAME= \
     HEALTHCHECK_REMOTE_USERNAME= \

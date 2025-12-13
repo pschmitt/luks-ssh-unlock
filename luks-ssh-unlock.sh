@@ -27,6 +27,7 @@ PARANOID="${PARANOID:-}"
 EVENTS_FILE="${EVENTS_FILE:-}"
 SKIP_SSH_PORT_CHECK="${SKIP_SSH_PORT_CHECK:-}"
 SLEEP_INTERVAL="${SLEEP_INTERVAL:-10}"
+TICK_TIMEOUT="${TICK_TIMEOUT:-120}"
 TMPDIR="${TMPDIR:-/tmp}"
 
 HEALTHCHECK_PORT="${HEALTHCHECK_PORT:-}"
@@ -110,6 +111,9 @@ usage() {
   echo "  --sleep-interval, --sleep, --interval, -i SECONDS"
   echo "                 Sleep interval between attempts"
   echo "                 Env var: SLEEP_INTERVAL"
+  echo "  --tick-timeout, --timeout SECONDS"
+  echo "                 Timeout for each tick (default: 120)"
+  echo "                 Env var: TICK_TIMEOUT"
   echo "  --skip-ssh-port-check, --skip-port-check"
   echo "                 Skip SSH port check"
   echo "                 Env var: SKIP_SSH_PORT_CHECK"
@@ -721,6 +725,58 @@ luks_unlock() {
   esac
 }
 
+run_tick() {
+  # Perform Healthcheck if required
+  if [[ -n "$HEALTHCHECK_PORT" ]]
+  then
+    if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
+    then
+      fetch_initrd_checksum
+      if [[ -n "$DEBUG" ]]
+      then
+        log "Healthcheck result OK" >&2
+      fi
+      return 0
+    fi
+  fi
+
+  if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
+  then
+    if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
+       SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
+       SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
+      _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
+    then
+      fetch_initrd_checksum
+      if [[ -n "$DEBUG" ]]
+      then
+        log "Healthcheck (remote cmd) result OK" >&2
+      fi
+      return 0
+    fi
+  fi
+
+  if [[ -z "$SKIP_SSH_PORT_CHECK" ]] && ! check_ssh_port
+  then
+    log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
+  else
+    if ! check_initrd_checksum
+    then
+      log-notify -w "Skipping unlock attempt for ${SSH_HOSTNAME} due to initrd checksum validation failure"
+      return 0
+    fi
+
+    log "Trying to unlock remotely ${SSH_HOSTNAME}"
+
+    if luks_unlock
+    then
+      log-notify -s "LUKS unlocked host at $SSH_HOSTNAME"
+    else
+      log-notify -f "Failed to unlock $SSH_HOSTNAME" >&2
+    fi
+  fi
+}
+
 main() {
   while [[ -n "$*" ]]
   do
@@ -791,6 +847,10 @@ main() {
         ;;
       --sleep-interval|--sleep|-s|--interval|-i)
         SLEEP_INTERVAL="$2"
+        shift 2
+        ;;
+      --tick-timeout|--timeout)
+        TICK_TIMEOUT="$2"
         shift 2
         ;;
       --skip-ssh-port-check|--skip-port-check)
@@ -920,58 +980,38 @@ main() {
 
   while true
   do
-    # Perform Healthcheck if required
-    if [[ -n "$HEALTHCHECK_PORT" ]]
-    then
-      if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
-      then
-        fetch_initrd_checksum
-        if [[ -n "$DEBUG" ]]
-        then
-          log "Healthcheck result OK" >&2
-        fi
-        sleep "$SLEEP_INTERVAL"
-        continue
-      fi
-    fi
+    run_tick &
+    local pid=$!
+    local count=0
 
-    if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
-    then
-      if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
-         SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
-         SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
-        _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
+    while kill -0 "$pid" 2>/dev/null
+    do
+      if (( count >= TICK_TIMEOUT ))
       then
-        fetch_initrd_checksum
-        if [[ -n "$DEBUG" ]]
-        then
-          log "Healthcheck (remote cmd) result OK" >&2
-        fi
-        sleep "$SLEEP_INTERVAL"
-        continue
-      fi
-    fi
+        log "Tick timed out after ${TICK_TIMEOUT}s, killing..."
+        kill "$pid"
 
-    if [[ -z "$SKIP_SSH_PORT_CHECK" ]] && ! check_ssh_port
-    then
-      log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
-    else
-      if ! check_initrd_checksum
-      then
-        log-notify -w "Skipping unlock attempt for ${SSH_HOSTNAME} due to initrd checksum validation failure"
-        sleep "$SLEEP_INTERVAL"
-        continue
-      fi
+        # Wait a bit for it to die
+        local kill_wait=0
+        while kill -0 "$pid" 2>/dev/null
+        do
+          sleep 1
+          ((kill_wait++))
+          if (( kill_wait > 10 ))
+          then
+            log "Tick process $pid refused to die, sending SIGKILL"
+            kill -9 "$pid"
+            break
+          fi
+        done
 
-      log "Trying to unlock remotely ${SSH_HOSTNAME}"
-
-      if luks_unlock
-      then
-        log-notify -s "LUKS unlocked host at $SSH_HOSTNAME"
-      else
-        log-notify -f "Failed to unlock $SSH_HOSTNAME" >&2
+        break
       fi
-    fi
+      sleep 1
+      ((count++))
+    done
+
+    wait "$pid" 2>/dev/null
 
     sleep "$SLEEP_INTERVAL"
   done
