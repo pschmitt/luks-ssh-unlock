@@ -1,5 +1,5 @@
 # hadolint ignore=DL3002
-ARG NIX_VERSION=2.34.1
+ARG NIX_VERSION=2.34.2
 FROM nixos/nix:${NIX_VERSION} AS busybox-builder
 
 SHELL ["/bin/sh", "-euxo", "pipefail", "-c"]
