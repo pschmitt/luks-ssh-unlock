@@ -207,6 +207,14 @@ IGNORE_RELS=(
   "kernel/x86/microcode/GenuineIntel.bin"
 )
 
+IGNORE_GLOBS=(
+  # initrd secret staging content is expected to differ from the unpacked target paths
+  "/.initrd-secrets/**"
+
+  # encrypted SOPS payloads are secret inputs, not stable runtime artifacts
+  "**.sops.**"
+)
+
 REMOTE_PATH_PREFIX=""
 LOCAL_BUSYBOX_DIR="${INITRD_CHECKSUM_BUSYBOX_DIR:-/busybox}"
 
@@ -360,6 +368,8 @@ hash_tree() {
   | while IFS= read -r -d '' rel
     do
       rel=${rel#./}
+      local abs_path=""
+      abs_path=/$rel
       for ignore in "${IGNORE_RELS[@]}"
       do
         case "$rel" in
@@ -368,9 +378,16 @@ hash_tree() {
           ;;
         esac
       done
-      local fs_path="" abs_path="" hash_line="" hash=""
+      for ignore_glob in "${IGNORE_GLOBS[@]}"
+      do
+        case "$abs_path" in
+          $ignore_glob)
+            continue 2
+          ;;
+        esac
+      done
+      local fs_path="" hash_line="" hash=""
       fs_path="$root/$rel"
-      abs_path=/$rel
 
       if hash_line=$(sha256sum "$fs_path" 2>/dev/null)
       then
