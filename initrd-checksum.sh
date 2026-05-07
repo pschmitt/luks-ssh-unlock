@@ -198,6 +198,10 @@ IGNORE_RELS=(
   ".initrd-secrets/etc/ssh/initrd/ssh_host_ed25519_key"
   ".initrd-secrets/etc/ssh/initrd/ssh_host_rsa_key"
 
+  # rendered Wi-Fi supplicant config may legitimately differ across boots/build inputs
+  "etc/wpa_supplicant/"
+  ".initrd-secrets/etc/wpa_supplicant/"
+
   # early AMD/Intel microcode blob living in concatenated initrd payload
   "kernel/x86/microcode/AuthenticAMD.bin"
   "kernel/x86/microcode/GenuineIntel.bin"
