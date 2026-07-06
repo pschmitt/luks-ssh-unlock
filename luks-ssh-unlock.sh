@@ -39,6 +39,7 @@ SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE="${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default}"
 INITRD_CHECKSUM_FILE="${INITRD_CHECKSUM_FILE:-}"
 INITRD_CHECKSUM_DIR="${INITRD_CHECKSUM_DIR:-/dev/null}"
 INITRD_CHECKSUM_SCRIPT="${INITRD_CHECKSUM_SCRIPT:-/app/bin/initrd-checksum}"
+INITRD_CHECKSUM_REQUIRE_SIGNATURE="${INITRD_CHECKSUM_REQUIRE_SIGNATURE:-}"
 
 APPRISE_TAG="${APPRISE_TAG:-}"
 APPRISE_TITLE="${APPRISE_TITLE:-}"
@@ -136,6 +137,10 @@ usage() {
   echo "                 Env var: INITRD_CHECKSUM_DIR"
   echo "  PARANOID=1     Run initrd-checksum validation in paranoid mode (--paranoid)"
   echo "                 Env var: PARANOID"
+  echo "  INITRD_CHECKSUM_REQUIRE_SIGNATURE=1"
+  echo "                 Fail closed if the fetched checksum baseline has no valid"
+  echo "                 ssh-keygen signature (baseline.sig) from the host's SSH key"
+  echo "                 Env var: INITRD_CHECKSUM_REQUIRE_SIGNATURE"
   echo
 
   echo "  --remote-check, --healthcheck-remote-cmd, --remote-command, --remote-cmd, --rcmd CMD"
@@ -587,6 +592,55 @@ check_ssh_port() {
   nc -z -w 2 "$resolved_hostname" "$SSH_PORT"
 }
 
+verify_initrd_checksum_signature() {
+  local sig_file="${INITRD_CHECKSUM_FILE}.sig"
+
+  local allowed_signers
+  allowed_signers=$(_known_hosts_path default) || return 1
+
+  if [[ "$allowed_signers" == /dev/null ]]
+  then
+    if [[ -n "$INITRD_CHECKSUM_REQUIRE_SIGNATURE" ]]
+    then
+      log-notify -w "No known_hosts configured for ${SSH_HOSTNAME}; cannot verify initrd checksum signature (required)"
+      return 1
+    fi
+
+    log-notify -w "No known_hosts configured for ${SSH_HOSTNAME}; skipping initrd checksum signature verification"
+    return 0
+  fi
+
+  if [[ ! -r "$sig_file" ]]
+  then
+    if [[ -n "$INITRD_CHECKSUM_REQUIRE_SIGNATURE" ]]
+    then
+      log-notify -w "Initrd checksum signature ${sig_file} is missing or not readable (required)"
+      return 1
+    fi
+
+    log-notify -w "Initrd checksum signature ${sig_file} is missing or not readable; skipping signature verification"
+    return 0
+  fi
+
+  if ! ssh-keygen -Y verify \
+    -f "$allowed_signers" \
+    -I "$SSH_HOSTNAME" \
+    -n initrd-checksum \
+    -s "$sig_file" \
+    < "$INITRD_CHECKSUM_FILE" > /dev/null
+  then
+    log-notify -w "Initrd checksum signature verification FAILED for ${SSH_HOSTNAME}; baseline may be tampered with"
+    return 1
+  fi
+
+  if [[ -n "$DEBUG" ]]
+  then
+    log "Initrd checksum signature verified for ${SSH_HOSTNAME}"
+  fi
+
+  return 0
+}
+
 check_initrd_checksum() {
   if [[ -z "$INITRD_CHECKSUM_FILE" ]]
   then
@@ -603,6 +657,12 @@ check_initrd_checksum() {
   if [[ ! -r "$INITRD_CHECKSUM_FILE" ]]
   then
     log-notify -w "Initrd checksum file ${INITRD_CHECKSUM_FILE} is not readable"
+    return 1
+  fi
+
+  if ! verify_initrd_checksum_signature
+  then
+    log-notify -w "Skipping unlock attempt for ${SSH_HOSTNAME} due to initrd checksum signature failure"
     return 1
   fi
 

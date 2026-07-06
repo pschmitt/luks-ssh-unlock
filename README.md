@@ -40,6 +40,7 @@ The main entry point is `luks-ssh-unlock.sh`. It exposes flags for SSH connectiv
 | Initrd validation | `INITRD_CHECKSUM_DIR` | _(empty)_ | `--initrd-checksum-dir` | Directory to store fetched checksum snapshots. |
 | Initrd validation | `INITRD_CHECKSUM_SCRIPT` | `/app/bin/initrd-checksum` | _n/a_ | Helper used to collect initrd hashes. |
 | Initrd validation | `PARANOID` | _(empty)_ | `PARANOID=1` / `--paranoid` | Hardened initrd-checksum mode using a minimal remote bundle. |
+| Initrd validation | `INITRD_CHECKSUM_REQUIRE_SIGNATURE` | _(empty)_ | `INITRD_CHECKSUM_REQUIRE_SIGNATURE=1` | Fail closed unless the fetched baseline has a valid `ssh-keygen -Y` signature from the host's SSH key. |
 | Health checks | `HEALTHCHECK_PORT` | _(empty)_ | _n/a_ | Optional TCP port probe before attempting unlock. |
 | Health checks | `HEALTHCHECK_REMOTE_CMD` | _(empty)_ | `--remote-check`, `--healthcheck-remote-cmd`, `--remote-command`, `--remote-cmd`, `--rcmd` | Remote command used to confirm reachability. |
 | Health checks | `HEALTHCHECK_REMOTE_HOSTNAME` | _(empty)_ | `--healthcheck-host`, `--hc-host` | Hostname used by the remote check. |
@@ -108,6 +109,7 @@ The `nix/module.nix` output offers a `services.luks-ssh-unlock` module for decla
 - Each instance supports SSH (host, user, key, port, force IPv4/IPv6), jumphosts, LUKS type and passphrase inputs, optional initrd checksum validation, and health checks.
 - Notification helpers include email fields (`recipient`, `sender`, `subject`) and msmtp wiring, plus host key pinning for both normal and initrd unlock flows.
 - `services.luks-ssh-unlock.activationScript.enable` can precompute initrd checksums during activation by using the packaged `initrd-checksum` helper.
+- The activation script also signs the checksum baseline (`checksum.sig`) with the host's own `/etc/ssh/ssh_host_ed25519_key`, using `ssh-keygen -Y sign`. Since `fetch_initrd_checksum` already pulls the whole `/etc/initrd-checksum/` directory, the signature travels with the baseline automatically. Set `services.luks-ssh-unlock.instances.<name>.initrdCheck.requireSignature = true` to fail closed if that signature is missing or doesn't verify against the host's known SSH public key (`sshKnownHosts`/`sshKnownHostsFile`) — this protects the locally cached baseline from being swapped out after it's fetched. Only enable it once every target host has redeployed with a signed baseline and a fresh copy has been fetched.
 
 Refer to `nix/module.nix` for the full option list and defaults; each option is documented inline in the module for quick reference.
 

@@ -99,6 +99,9 @@ in
                 ${optionalString initrdCheck.paranoid ''
                   PARANOID=1
                 ''}
+                ${optionalString initrdCheck.requireSignature ''
+                  INITRD_CHECKSUM_REQUIRE_SIGNATURE=1
+                ''}
               ''}
 
               ${optionalString (eventsFile != null) ''
@@ -209,6 +212,21 @@ in
 
           # Generate checksum file
           ${package}/bin/initrd-checksum check --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE"
+
+          # Sign the checksum baseline with this host's regular SSH host key, so
+          # the operator (whose known_hosts already pins that key) can detect a
+          # baseline that was tampered with after being fetched off-host.
+          rm -f "''${CHECKSUM_FILE}.sig"
+          SSH_HOST_KEY="/etc/ssh/ssh_host_ed25519_key"
+          if [ -r "$SSH_HOST_KEY" ]
+          then
+            ${pkgs.openssh}/bin/ssh-keygen -Y sign \
+              -f "$SSH_HOST_KEY" \
+              -n initrd-checksum \
+              "$CHECKSUM_FILE"
+          else
+            echo "luks-ssh-unlock: warning: $SSH_HOST_KEY not readable, skipping initrd checksum signature" >&2
+          fi
 
           # Build metadata
           GENERATION=$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system)" | \
@@ -338,6 +356,18 @@ in
                     type = types.bool;
                     default = false;
                     description = "Enable paranoid initrd-checksum mode (PARANOID=1).";
+                  };
+                  requireSignature = mkOption {
+                    type = types.bool;
+                    default = false;
+                    description = ''
+                      Fail closed if the fetched checksum baseline has no valid
+                      ssh-keygen signature from the target host's regular SSH host key
+                      (INITRD_CHECKSUM_REQUIRE_SIGNATURE=1). Only enable this once every
+                      target host has redeployed with `activationScript.enable` (so a
+                      signed baseline actually exists) and a fresh baseline has been
+                      fetched into `dir`.
+                    '';
                   };
                 };
               };
