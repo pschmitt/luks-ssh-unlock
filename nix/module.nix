@@ -179,6 +179,22 @@ in
         assertion = !(instance.notifications.mail.enable && !instance.notifications.enable);
         message =
           ''services.luks-ssh-unlocker.instances.${name} cannot enable notifications.mail when notifications.enable is false'';
+      }) cfg.instances)
+      ++ (mapAttrsToList (name: instance: {
+        assertion = !(
+          instance.initrdCheck.enable
+          && instance.initrdCheck.requireSignature
+          && instance.initrdCheck.dir == null
+        );
+        message = ''
+          services.luks-ssh-unlocker.instances.${name} sets initrdCheck.requireSignature
+          without initrdCheck.dir. fetch_initrd_checksum() only refreshes the signed
+          baseline when INITRD_CHECKSUM_DIR is set (via initrdCheck.dir); without it, no
+          baseline is ever fetched and, with requireSignature enabled, every unlock
+          attempt is silently skipped forever ("file not readable"). Set initrdCheck.dir
+          to the directory checksum snapshots should be cached under (a per-hostname
+          subdirectory is created automatically).
+        '';
       }) cfg.instances);
 
     systemd.services =
