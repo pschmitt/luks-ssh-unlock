@@ -46,6 +46,15 @@ in
                   toString initrdKnownHostsFile
                 else
                   "";
+              initrdChecksumDir =
+                if initrdCheck.dir != null then toString initrdCheck.dir else null;
+              initrdChecksumFile =
+                if initrdCheck.file != null then
+                  toString initrdCheck.file
+                else if initrdChecksumDir != null then
+                  "${initrdChecksumDir}/${hostname}/initrd-checksum/checksum"
+                else
+                  null;
             in
             ''
               DEBUG=${optionalString debug "1"}
@@ -88,11 +97,11 @@ in
               ''}
 
               ${optionalString initrdCheck.enable ''
-                ${optionalString (initrdCheck.file != null) ''
-                  INITRD_CHECKSUM_FILE=${toString initrdCheck.file}
+                ${optionalString (initrdChecksumFile != null) ''
+                  INITRD_CHECKSUM_FILE=${initrdChecksumFile}
                 ''}
-                ${optionalString (initrdCheck.dir != null) ''
-                  INITRD_CHECKSUM_DIR=${toString initrdCheck.dir}
+                ${optionalString (initrdChecksumDir != null) ''
+                  INITRD_CHECKSUM_DIR=${initrdChecksumDir}
                 ''}
                 INITRD_CHECKSUM_SCRIPT=${toString initrdCheck.script}
                 INITRD_CHECKSUM_BUSYBOX_DIR=${toString initrdCheck.busyboxDir}
@@ -351,12 +360,25 @@ in
                   file = mkOption {
                     type = nullPathOrStr;
                     default = null;
-                    description = "Expected initrd checksum file to validate before unlocking (INITRD_CHECKSUM_FILE).";
+                    description = ''
+                      Expected initrd checksum file to validate before unlocking
+                      (INITRD_CHECKSUM_FILE). Defaults to
+                      "''${dir}/''${hostname}/initrd-checksum/checksum", matching where
+                      `dir` (below) fetches the baseline to, so in most setups this does
+                      not need to be set explicitly.
+                    '';
                   };
                   dir = mkOption {
                     type = nullPathOrStr;
-                    default = null;
-                    description = "Directory to store fetched initrd checksum snapshots (INITRD_CHECKSUM_DIR).";
+                    default = "/var/lib/luks-ssh-unlock/initrd-checksum";
+                    description = ''
+                      Directory to store fetched initrd checksum snapshots
+                      (INITRD_CHECKSUM_DIR). fetch_initrd_checksum() refreshes the
+                      signed baseline here on every successful healthcheck, so leaving
+                      this at its default is what makes paranoid/requireSignature mode
+                      self-bootstrapping. Set to null to disable baseline fetching
+                      entirely (do not combine with requireSignature = true).
+                    '';
                   };
                   script = mkOption {
                     type = pathOrStr;
