@@ -388,7 +388,14 @@ in
                   };
                   script = mkOption {
                     type = pathOrStr;
-                    default = "$SCRIPT_DIR/initrd-checksum";
+                    # NixOS deploys this via systemd's EnvironmentFile=,
+                    # which takes KEY=VALUE lines literally -- it does not
+                    # expand $SCRIPT_DIR (that only works when the .env is
+                    # shell-sourced, e.g. the Docker entrypoint). Default
+                    # to the real store path so INITRD_CHECKSUM_SCRIPT is
+                    # actually executable under NixOS, matching busyboxDir
+                    # below.
+                    default = "${package}/bin/initrd-checksum";
                     description = "Path to initrd-checksum helper (INITRD_CHECKSUM_SCRIPT).";
                   };
                   busyboxDir = mkOption {
