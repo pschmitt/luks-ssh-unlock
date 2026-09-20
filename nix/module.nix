@@ -215,6 +215,12 @@ in
           nameValuePair "luks-ssh-unlock-${name}" {
             wantedBy = [ "multi-user.target" ];
             after = [ "network.target" ];
+            # EnvironmentFile points at a stable /etc path, so the unit
+            # text itself never changes when only an instance's options
+            # do; without this, switch-to-configuration has nothing to
+            # detect and the running process keeps using its stale
+            # environment until the next reboot or manual restart.
+            restartTriggers = [ config.environment.etc."luks-ssh-unlock/${name}.env".source ];
             serviceConfig = {
               Type = "simple";
               EnvironmentFile = "/etc/luks-ssh-unlock/${name}.env";
