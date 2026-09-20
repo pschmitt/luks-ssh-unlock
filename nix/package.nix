@@ -6,6 +6,7 @@
   coreutils,
   curl,
   cpio,
+  diffutils,
   dig,
   jq,
   gnugrep,
@@ -53,6 +54,7 @@ stdenv.mkDerivation {
       lib.makeBinPath [
         bash
         coreutils
+        diffutils
         findutils
         util-linux
         cpio
