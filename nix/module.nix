@@ -583,7 +583,7 @@ in
                   interface = mkOption {
                     type = types.str;
                     default = "";
-                    description = "Interface on which to listen for DHCP ACK packets.";
+                    description = "Interface on which to listen for DHCP ACK packets, or any for all interfaces.";
                   };
                   clientHostname = mkOption {
                     type = types.str;

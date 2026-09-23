@@ -130,7 +130,8 @@ def main():
                 active_addresses.discard(address)
 
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x0800))
-    sock.bind((args.interface, socket.htons(0x0800)))
+    interface = "" if args.interface == "any" else args.interface
+    sock.bind((interface, socket.htons(0x0800)))
     while True:
         packet, _ = sock.recvfrom(4096)
         dhcp_packet = parse_dhcp_packet(packet)
