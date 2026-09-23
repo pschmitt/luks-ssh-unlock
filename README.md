@@ -106,7 +106,7 @@ The `nix/module.nix` output offers a `services.luks-ssh-unlock` module for decla
 
 - `services.luks-ssh-unlock.enable` toggles the service and packages the CLI.
 - `services.luks-ssh-unlock.instances` lets you define multiple targets; each instance emits an environment file under `/etc/luks-ssh-unlock/<name>.env` and a matching systemd unit `luks-ssh-unlock-<name>`.
-- Each instance also adds a one-shot `luks-ssh-unlock-<name>` command. Run it as root to make one unlock attempt using that instance's configured credentials. `--force`/`-f` skips initrd checksum/signature validation and SSH host-key verification; client-key authentication remains enabled. Use it only when you intend to bypass both checks. For example: `sudo luks-ssh-unlock-rofl-10 --force`.
+- Each instance also adds a `luks-ssh-unlock-<name>` command. With no arguments it makes one unlock attempt using that instance's configured credentials; `logs`/`l` tails that instance's systemd journal. `--force`/`-f` skips initrd checksum/signature validation and SSH host-key verification; client-key authentication remains enabled. Use it only when you intend to bypass both checks. For example: `sudo luks-ssh-unlock-rofl-10 --force`.
 - Each instance supports SSH (host, user, key, port, force IPv4/IPv6), jumphosts, LUKS type and passphrase inputs, optional initrd checksum validation, and health checks.
 - Notification helpers include email fields (`recipient`, `sender`, `subject`) and msmtp wiring, plus host key pinning for both normal and initrd unlock flows.
 - `services.luks-ssh-unlock.activationScript.enable` can precompute initrd checksums during activation by using the packaged `initrd-checksum` helper.

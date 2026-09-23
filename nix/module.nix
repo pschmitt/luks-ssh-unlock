@@ -23,6 +23,16 @@ let
       name = "luks-ssh-unlock-${name}";
       runtimeInputs = [ pkgs.systemd ];
       text = ''
+        if [[ "''${1:-}" == logs || "''${1:-}" == l ]]
+        then
+          if [[ $# -ne 1 ]]
+          then
+            printf 'Usage: luks-ssh-unlock-${name} [logs|l]\n' >&2
+            exit 2
+          fi
+          exec journalctl --follow --unit=luks-ssh-unlock-${name}.service
+        fi
+
         exec systemd-run \
           --system \
           --wait \
