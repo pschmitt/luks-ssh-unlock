@@ -55,6 +55,8 @@ stdenv.mkDerivation {
       ]
     }
 
+    wrapProgram $out/bin/luks-ssh-unlock-dhcp-listener --prefix PATH : ${lib.makeBinPath [ python3 ]}
+
     wrapProgram $out/bin/initrd-checksum --prefix PATH : ${
       lib.makeBinPath [
         bash
