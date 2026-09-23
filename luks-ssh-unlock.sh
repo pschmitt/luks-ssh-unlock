@@ -23,6 +23,8 @@ LUKS_PASSPHRASE_FILE="${LUKS_PASSPHRASE_FILE=-/run/secrets/luks_password_${SSH_H
 LUKS_TYPE="${LUKS_TYPE:-raw}"
 
 DEBUG="${DEBUG:-}"
+RUN_ONCE="${RUN_ONCE:-}"
+FORCE="${FORCE:-}"
 PARANOID="${PARANOID:-}"
 EVENTS_FILE="${EVENTS_FILE:-}"
 SKIP_SSH_PORT_CHECK="${SKIP_SSH_PORT_CHECK:-}"
@@ -58,6 +60,8 @@ usage() {
   echo "  --help, -h     Display this help message"
   echo "  --debug, -D    Enable debug mode"
   echo "                 Env var: DEBUG"
+  echo "  --once         Run one unlock attempt and exit"
+  echo "  --force, -f    Skip initrd checksum and SSH host-key checks (requires --once)"
   echo
 
   echo "  --host, --ssh-host, -H HOSTNAME"
@@ -327,6 +331,16 @@ _known_hosts_path() {
   local file_var
   local tmp_suffix
 
+  if [[ -n "$FORCE" && -n "$RUN_ONCE" ]]
+  then
+    if [[ -n "$DEBUG" ]]
+    then
+      log "FORCE: bypassing SSH host-key verification for ${SSH_HOSTNAME}"
+    fi
+    echo /dev/null
+    return 0
+  fi
+
   case "$type" in
     initrd)
       hosts_var="SSH_INITRD_KNOWN_HOSTS"
@@ -398,6 +412,10 @@ _ssh() {
   if [[ "$known_hosts_file" == /dev/null ]]
   then
     ssh_opts+=(-o StrictHostKeyChecking=no)
+    if [[ -n "$FORCE" && -n "$RUN_ONCE" ]]
+    then
+      ssh_opts+=(-o GlobalKnownHostsFile=/dev/null)
+    fi
   else
     ssh_opts+=(-o StrictHostKeyChecking=yes)
   fi
@@ -445,6 +463,10 @@ _scp() {
   if [[ "$known_hosts_file" == /dev/null ]]
   then
     scp_opts+=(-o StrictHostKeyChecking=no)
+    if [[ -n "$FORCE" && -n "$RUN_ONCE" ]]
+    then
+      scp_opts+=(-o GlobalKnownHostsFile=/dev/null)
+    fi
   else
     scp_opts+=(-o StrictHostKeyChecking=yes)
   fi
@@ -470,6 +492,10 @@ _scp() {
     if [[ "$known_hosts_file" == /dev/null ]]
     then
       proxy_opts+=(-o StrictHostKeyChecking=no)
+      if [[ -n "$FORCE" && -n "$RUN_ONCE" ]]
+      then
+        proxy_opts+=(-o GlobalKnownHostsFile=/dev/null)
+      fi
     else
       proxy_opts+=(-o StrictHostKeyChecking=yes)
     fi
@@ -512,6 +538,10 @@ _ssh_jumphost() {
   if [[ "$known_hosts_file" == /dev/null ]]
   then
     ssh_opts+=(-o StrictHostKeyChecking=no)
+    if [[ -n "$FORCE" && -n "$RUN_ONCE" ]]
+    then
+      ssh_opts+=(-o GlobalKnownHostsFile=/dev/null)
+    fi
   else
     ssh_opts+=(-o StrictHostKeyChecking=yes)
   fi
@@ -791,8 +821,9 @@ luks_unlock() {
 }
 
 run_tick() {
-  # Perform Healthcheck if required
-  if [[ -n "$HEALTHCHECK_PORT" ]]
+  # Healthchecks are for the daemon loop. A one-shot invocation explicitly
+  # requests an unlock attempt, so it must not return early on a healthy host.
+  if [[ -z "$RUN_ONCE" && -n "$HEALTHCHECK_PORT" ]]
   then
     if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
     then
@@ -805,7 +836,7 @@ run_tick() {
     fi
   fi
 
-  if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
+  if [[ -z "$RUN_ONCE" && -n "$HEALTHCHECK_REMOTE_CMD" ]]
   then
     if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
        SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
@@ -824,10 +855,14 @@ run_tick() {
   if [[ -z "$SKIP_SSH_PORT_CHECK" ]] && ! check_ssh_port
   then
     log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
+    return 1
   else
-    if ! check_initrd_checksum
+    if [[ -n "$FORCE" ]]
     then
-      return 0
+      log "WARNING: forced unlock bypassing initrd checksum/signature and SSH host-key validation for ${SSH_HOSTNAME}; client-key authentication remains enabled"
+    elif ! check_initrd_checksum
+    then
+      return 1
     fi
 
     log "Trying to unlock remotely ${SSH_HOSTNAME}"
@@ -837,8 +872,11 @@ run_tick() {
       log-notify -s "LUKS unlocked host at $SSH_HOSTNAME"
     else
       log-notify -f "Failed to unlock $SSH_HOSTNAME" >&2
+      return 1
     fi
   fi
+
+  return 0
 }
 
 main() {
@@ -851,6 +889,14 @@ main() {
         ;;
       --debug|-D)
         DEBUG=1
+        shift
+        ;;
+      --once)
+        RUN_ONCE=1
+        shift
+        ;;
+      --force|-f)
+        FORCE=1
         shift
         ;;
       --host|-H|--ssh-host*)
@@ -1035,12 +1081,24 @@ main() {
     exit 2
   fi
 
+  if [[ -n "$FORCE" && -z "$RUN_ONCE" ]]
+  then
+    echo "--force can only be used with --once." >&2
+    exit 2
+  fi
+
   local msg="LUKS rigmarole started (type: $LUKS_TYPE). I'll be trying to unlock ${SSH_HOSTNAME}"
   if [[ -n "$SSH_JUMPHOST" ]]
   then
     msg+=" through ${SSH_JUMPHOST}"
   fi
   log "$msg"
+
+  if [[ -n "$RUN_ONCE" ]]
+  then
+    run_tick
+    exit "$?"
+  fi
 
   while true
   do

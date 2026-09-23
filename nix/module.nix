@@ -17,12 +17,28 @@ let
       busyboxArm64 = pkgs.pkgsStatic.busybox;
     };
   };
+  adHocUnlockers = mapAttrsToList (
+    name: _:
+    pkgs.writeShellApplication {
+      name = "luks-ssh-unlock-${name}";
+      runtimeInputs = [ pkgs.systemd ];
+      text = ''
+        exec systemd-run \
+          --system \
+          --wait \
+          --pipe \
+          --collect \
+          --unit=${escapeShellArg "luks-ssh-unlock-manual-${name}-"}"$$" \
+          --property=${escapeShellArg "EnvironmentFile=/etc/luks-ssh-unlock/${name}.env"} \
+          --property=TimeoutStartSec=infinity \
+          -- ${package}/bin/luks-ssh-unlock --once "$@"
+      '';
+    }
+  ) cfg.instances;
 in
 {
   config = mkIf cfg.enable {
-    environment.systemPackages = [
-      package
-    ];
+    environment.systemPackages = [ package ] ++ adHocUnlockers;
 
     # Define environment files
     environment.etc =
