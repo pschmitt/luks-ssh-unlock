@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+
+"""Watch DHCP ACK packets and start a validated one-shot unlock attempt."""
+
+import argparse
+import ipaddress
+import logging
+import socket
+import struct
+import subprocess
+import threading
+import time
+
+
+def parse_dhcp_packet(packet):
+    if len(packet) < 20:
+        return None
+
+    ip_header_length = (packet[0] & 0x0F) * 4
+    if packet[9] != socket.IPPROTO_UDP or len(packet) < ip_header_length + 8 + 240:
+        return None
+
+    source_port, destination_port = struct.unpack_from("!HH", packet, ip_header_length)
+    if (source_port, destination_port) != (67, 68):
+        return None
+
+    bootp = packet[ip_header_length + 8 :]
+    if bootp[236:240] != b"\x63\x82\x53\x63":
+        return None
+
+    operation = bootp[0]
+    transaction_id = bootp[4:8]
+    client_address = bootp[28:34]
+    assigned_ip = str(ipaddress.ip_address(bootp[16:20]))
+    options = {}
+    offset = 240
+    while offset < len(bootp):
+        option = bootp[offset]
+        offset += 1
+        if option == 255:
+            break
+        if option == 0:
+            continue
+        if offset >= len(bootp):
+            break
+        length = bootp[offset]
+        offset += 1
+        value = bootp[offset : offset + length]
+        offset += length
+        options[option] = value
+
+    if 53 not in options:
+        return None
+
+    client_hostname = options.get(12, b"").decode("ascii", errors="ignore").rstrip(".").lower()
+    return operation, options[53][0], transaction_id, client_address, client_hostname, assigned_ip
+
+
+def wait_for_ssh(address, port, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((address, port), timeout=2):
+                return True
+        except OSError:
+            time.sleep(2)
+    return False
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--interface", required=True)
+    parser.add_argument("--client-hostname", required=True)
+    parser.add_argument("--target-hostname", required=True)
+    parser.add_argument("--ssh-port", type=int, default=22)
+    parser.add_argument("--ssh-wait-timeout", type=int, default=180)
+    parser.add_argument("--environment-file", required=True)
+    parser.add_argument("--unlocker", required=True)
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+    )
+    logging.info(
+        "Listening for DHCP ACKs for %s on %s",
+        args.client_hostname,
+        args.interface,
+    )
+
+    active_addresses = set()
+    recent_addresses = {}
+    pending_clients = {}
+    lock = threading.Lock()
+
+    def handle_ack(address):
+        try:
+            logging.info("DHCP assigned %s to %s; waiting for SSH", address, args.client_hostname)
+            if not wait_for_ssh(address, args.ssh_port, args.ssh_wait_timeout):
+                logging.warning("SSH did not become ready at %s within %ss", address, args.ssh_wait_timeout)
+                return
+
+            logging.info("SSH is ready at %s; starting validated unlock for %s", address, args.target_hostname)
+            unit = f"luks-ssh-unlock-dhcp-{args.client_hostname}-{int(time.time())}"
+            result = subprocess.run(
+                [
+                    "systemd-run",
+                    "--system",
+                    "--wait",
+                    "--pipe",
+                    "--collect",
+                    f"--unit={unit}",
+                    f"--property=EnvironmentFile={args.environment_file}",
+                    f"--setenv=SSH_CONNECT_ADDRESS={address}",
+                    f"--setenv=SSH_HOSTKEY_ALIAS={args.target_hostname}",
+                    "--",
+                    args.unlocker,
+                    "run",
+                    "--once",
+                ],
+                check=False,
+            )
+            if result.returncode == 0:
+                logging.info("Validated unlock attempt completed for %s", args.target_hostname)
+            else:
+                logging.error("Unlock attempt for %s failed with status %s", args.target_hostname, result.returncode)
+        finally:
+            with lock:
+                active_addresses.discard(address)
+
+    sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x0800))
+    sock.bind((args.interface, socket.htons(0x0800)))
+    while True:
+        packet, _ = sock.recvfrom(4096)
+        dhcp_packet = parse_dhcp_packet(packet)
+        if dhcp_packet is None:
+            continue
+
+        operation, message_type, transaction_id, client_address, client_hostname, address = dhcp_packet
+        if operation == 1 and message_type in (1, 3):
+            if client_hostname != args.client_hostname.lower():
+                continue
+            pending_clients[client_address] = (transaction_id, time.monotonic())
+            logging.info("Detected DHCP request from %s; waiting for its lease", args.client_hostname)
+            continue
+
+        if operation != 2 or message_type != 5:
+            continue
+
+        pending = pending_clients.get(client_address)
+        if pending is not None and time.monotonic() - pending[1] > 180:
+            pending_clients.pop(client_address, None)
+            pending = None
+        if client_hostname != args.client_hostname.lower() and pending is None:
+            continue
+        if pending is not None:
+            pending_clients.pop(client_address, None)
+
+        now = time.monotonic()
+        with lock:
+            if address in active_addresses or now - recent_addresses.get(address, 0) < 60:
+                continue
+            active_addresses.add(address)
+            recent_addresses[address] = now
+
+        threading.Thread(target=handle_ack, args=(address,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

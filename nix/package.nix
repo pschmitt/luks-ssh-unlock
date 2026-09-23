@@ -17,6 +17,7 @@
   util-linux,
   gzip,
   zstd,
+  python3,
   busyboxBundle,
 }:
 
@@ -32,8 +33,10 @@ stdenv.mkDerivation {
     mkdir -p $out/bin
     cp "$src/luks-ssh-unlock.sh" $out/bin/luks-ssh-unlock
     cp "$src/initrd-checksum.sh" $out/bin/initrd-checksum
+    cp "$src/dhcp-listener.py" $out/bin/luks-ssh-unlock-dhcp-listener
     chmod +x $out/bin/luks-ssh-unlock
     chmod +x $out/bin/initrd-checksum
+    chmod +x $out/bin/luks-ssh-unlock-dhcp-listener
 
     patchShebangs $out/bin
 
@@ -48,6 +51,7 @@ stdenv.mkDerivation {
         msmtp # for sendmail TODO: allow overriding this via build var
         netcat-gnu
         openssh
+        python3
       ]
     }
 

@@ -153,8 +153,7 @@ in
                   toString initrdKnownHostsFile
                 else
                   "";
-              initrdChecksumDir =
-                if initrdCheck.dir != null then toString initrdCheck.dir else null;
+              initrdChecksumDir = if initrdCheck.dir != null then toString initrdCheck.dir else null;
               initrdChecksumFile =
                 if initrdCheck.file != null then
                   toString initrdCheck.file
@@ -248,7 +247,9 @@ in
                 ''}
 
                 ${optionalString notifications.mail.enable ''
-                  EMAIL_RECIPIENT="${optionalString (notifications.mail.recipient != "") notifications.mail.recipient}"
+                  EMAIL_RECIPIENT="${
+                    optionalString (notifications.mail.recipient != "") notifications.mail.recipient
+                  }"
                   EMAIL_FROM="${optionalString (notifications.mail.from != "") notifications.mail.from}"
                   EMAIL_SUBJECT=${escapeShellArg notifications.mail.subject}
                 ''}
@@ -262,9 +263,7 @@ in
                 SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE=${healthcheck.knownHostsType}
               ''}
 
-              ${concatStringsSep "\n" (
-                mapAttrsToList (k: v: "${k}=${escapeShellArg v}") extraEnvironment
-              )}
+              ${concatStringsSep "\n" (mapAttrsToList (k: v: "${k}=${escapeShellArg v}") extraEnvironment)}
             '';
         }
       ) cfg.instances)
@@ -280,28 +279,27 @@ in
     assertions =
       (mapAttrsToList (name: instance: {
         assertion = !(instance.sshKnownHosts != "" && instance.sshKnownHostsFile != null);
-        message = ''services.luks-ssh-unlocker.instances.${name} cannot set both sshKnownHosts and sshKnownHostsFile'';
+        message = "services.luks-ssh-unlocker.instances.${name} cannot set both sshKnownHosts and sshKnownHostsFile";
       }) cfg.instances)
       ++ (mapAttrsToList (name: instance: {
         assertion = !(instance.initrdKnownHosts != "" && instance.initrdKnownHostsFile != null);
-        message = ''services.luks-ssh-unlocker.instances.${name} cannot set both initrdKnownHosts and initrdKnownHostsFile'';
+        message = "services.luks-ssh-unlocker.instances.${name} cannot set both initrdKnownHosts and initrdKnownHostsFile";
       }) cfg.instances)
       ++ (mapAttrsToList (name: instance: {
         assertion = !(instance.notifications.apprise.enable && !instance.notifications.enable);
-        message =
-          ''services.luks-ssh-unlocker.instances.${name} cannot enable notifications.apprise when notifications.enable is false'';
+        message = "services.luks-ssh-unlocker.instances.${name} cannot enable notifications.apprise when notifications.enable is false";
       }) cfg.instances)
       ++ (mapAttrsToList (name: instance: {
         assertion = !(instance.notifications.mail.enable && !instance.notifications.enable);
-        message =
-          ''services.luks-ssh-unlocker.instances.${name} cannot enable notifications.mail when notifications.enable is false'';
+        message = "services.luks-ssh-unlocker.instances.${name} cannot enable notifications.mail when notifications.enable is false";
       }) cfg.instances)
       ++ (mapAttrsToList (name: instance: {
-        assertion = !(
-          instance.initrdCheck.enable
-          && instance.initrdCheck.requireSignature
-          && instance.initrdCheck.dir == null
-        );
+        assertion =
+          !(
+            instance.initrdCheck.enable
+            && instance.initrdCheck.requireSignature
+            && instance.initrdCheck.dir == null
+          );
         message = ''
           services.luks-ssh-unlocker.instances.${name} sets initrdCheck.requireSignature
           without initrdCheck.dir. fetch_initrd_checksum() only refreshes the signed
@@ -310,6 +308,15 @@ in
           attempt is silently skipped forever ("file not readable"). Set initrdCheck.dir
           to the directory checksum snapshots should be cached under (a per-hostname
           subdirectory is created automatically).
+        '';
+      }) cfg.instances)
+      ++ (mapAttrsToList (name: instance: {
+        assertion =
+          !instance.dhcpListener.enable
+          || (instance.dhcpListener.interface != "" && instance.dhcpListener.clientHostname != "");
+        message = ''
+          services.luks-ssh-unlock.instances.${name}.dhcpListener.enable requires
+          both interface and clientHostname.
         '';
       }) cfg.instances);
 
@@ -334,7 +341,40 @@ in
               ExecStart = "${package}/bin/luks-ssh-unlock";
             };
           }
-        ) cfg.instances;
+        ) cfg.instances
+        // mapAttrs' (
+          name: instance:
+          nameValuePair "luks-ssh-unlock-dhcp-listener-${name}" {
+            wantedBy = [ "multi-user.target" ];
+            after = [ "network.target" ];
+            serviceConfig = {
+              Type = "simple";
+              Restart = "always";
+              RestartSec = 5;
+              AmbientCapabilities = [ "CAP_NET_RAW" ];
+              CapabilityBoundingSet = [ "CAP_NET_RAW" ];
+              ExecStart =
+                "${package}/bin/luks-ssh-unlock-dhcp-listener "
+                + escapeShellArgs [
+                  "--interface"
+                  instance.dhcpListener.interface
+                  "--client-hostname"
+                  instance.dhcpListener.clientHostname
+                  "--target-hostname"
+                  instance.hostname
+                  "--ssh-port"
+                  (toString instance.port)
+                  "--ssh-wait-timeout"
+                  (toString instance.dhcpListener.sshWaitTimeout)
+                  "--environment-file"
+                  "/etc/luks-ssh-unlock/${name}.env"
+                  "--unlocker"
+                  "${package}/bin/luks-ssh-unlock"
+                ];
+            };
+            environment.PATH = makeBinPath [ pkgs.systemd ];
+          }
+        ) (filterAttrs (_: instance: instance.dhcpListener.enable) cfg.instances);
 
     system.activationScripts = mkIf cfg.activationScript.enable {
       luksInitrdChecksum = {
@@ -537,6 +577,30 @@ in
               default = null;
               description = "File path to append events to (EVENTS_FILE).";
             };
+            dhcpListener = mkOption {
+              type = types.submodule {
+                options = {
+                  enable = mkEnableOption "Unlock this target after its DHCP lease becomes reachable.";
+                  interface = mkOption {
+                    type = types.str;
+                    default = "";
+                    description = "Interface on which to listen for DHCP ACK packets.";
+                  };
+                  clientHostname = mkOption {
+                    type = types.str;
+                    default = "";
+                    description = "DHCP option 12 hostname used to identify the target.";
+                  };
+                  sshWaitTimeout = mkOption {
+                    type = types.ints.positive;
+                    default = 180;
+                    description = "How long to wait for SSH after DHCP assigns an address.";
+                  };
+                };
+              };
+              default = { };
+              description = "Optional DHCP-triggered unlock listener settings.";
+            };
             skipSshPortCheck = mkOption {
               type = types.bool;
               default = false;
@@ -635,76 +699,76 @@ in
               default = { };
               description = "Health check configuration.";
             };
-              notifications = mkOption {
-                type = types.submodule {
-                  options = {
-                    enable = mkEnableOption "Enable notifications.";
-                    apprise = mkOption {
-                      type = types.submodule {
-                        options = {
-                          enable = mkEnableOption "Enable Apprise notifications.";
-                          url = mkOption {
-                            type = types.str;
-                            default = "";
-                            description = "Apprise URL (APPRISE_URL).";
-                          };
-                          tag = mkOption {
-                            type = types.str;
-                            default = "";
-                            description = "Apprise tag (APPRISE_TAG).";
-                          };
-                          title = mkOption {
-                            type = types.str;
-                            default = "";
-                            description = "Apprise title (APPRISE_TITLE).";
-                          };
+            notifications = mkOption {
+              type = types.submodule {
+                options = {
+                  enable = mkEnableOption "Enable notifications.";
+                  apprise = mkOption {
+                    type = types.submodule {
+                      options = {
+                        enable = mkEnableOption "Enable Apprise notifications.";
+                        url = mkOption {
+                          type = types.str;
+                          default = "";
+                          description = "Apprise URL (APPRISE_URL).";
+                        };
+                        tag = mkOption {
+                          type = types.str;
+                          default = "";
+                          description = "Apprise tag (APPRISE_TAG).";
+                        };
+                        title = mkOption {
+                          type = types.str;
+                          default = "";
+                          description = "Apprise title (APPRISE_TITLE).";
                         };
                       };
-                      default = { };
-                      description = "Apprise settings.";
                     };
-                    msmtp = mkOption {
-                      type = types.submodule {
-                        options = {
-                          account = mkOption {
-                            type = types.str;
-                            default = "";
-                            description = "msmtp account to use (MSMTP_ACCOUNT).";
-                          };
+                    default = { };
+                    description = "Apprise settings.";
+                  };
+                  msmtp = mkOption {
+                    type = types.submodule {
+                      options = {
+                        account = mkOption {
+                          type = types.str;
+                          default = "";
+                          description = "msmtp account to use (MSMTP_ACCOUNT).";
                         };
                       };
-                      default = { };
-                      description = "msmtp settings.";
                     };
-                    mail = mkOption {
-                      type = types.submodule {
-                        options = {
-                          enable = mkEnableOption "Enable email notifications.";
-                          recipient = mkOption {
-                            type = types.str;
-                            default = "";
-                            description = "Email recipient address (EMAIL_RECIPIENT).";
-                          };
-                          from = mkOption {
-                            type = types.str;
-                            default = "";
-                            description = "Email sender address (EMAIL_FROM).";
-                          };
-                          subject = mkOption {
-                            type = types.str;
-                            default = "";
-                            description = "Email subject (EMAIL_SUBJECT).";
-                          };
+                    default = { };
+                    description = "msmtp settings.";
+                  };
+                  mail = mkOption {
+                    type = types.submodule {
+                      options = {
+                        enable = mkEnableOption "Enable email notifications.";
+                        recipient = mkOption {
+                          type = types.str;
+                          default = "";
+                          description = "Email recipient address (EMAIL_RECIPIENT).";
+                        };
+                        from = mkOption {
+                          type = types.str;
+                          default = "";
+                          description = "Email sender address (EMAIL_FROM).";
+                        };
+                        subject = mkOption {
+                          type = types.str;
+                          default = "";
+                          description = "Email subject (EMAIL_SUBJECT).";
                         };
                       };
-                      default = { };
-                      description = "Email settings.";
                     };
+                    default = { };
+                    description = "Email settings.";
                   };
                 };
-                default = { };
-                description = "Notification configuration.";
               };
+              default = { };
+              description = "Notification configuration.";
+            };
           };
         }
       );

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 SSH_HOSTNAME="${SSH_HOSTNAME:-example.com}"
+SSH_CONNECT_ADDRESS="${SSH_CONNECT_ADDRESS:-}"
+SSH_HOSTKEY_ALIAS="${SSH_HOSTKEY_ALIAS:-}"
 SSH_KEY="${SSH_KEY:-/run/secrets/ssh_key}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_USERNAME="${SSH_USERNAME:-root}"
@@ -419,6 +421,14 @@ _ssh() {
   fi
 
   ssh_opts+=(-o "UserKnownHostsFile=${known_hosts_file}")
+  if [[ -n "$SSH_CONNECT_ADDRESS" ]]
+  then
+    ssh_opts+=(-o "HostName=${SSH_CONNECT_ADDRESS}")
+  fi
+  if [[ -n "$SSH_HOSTKEY_ALIAS" ]]
+  then
+    ssh_opts+=(-o "HostKeyAlias=${SSH_HOSTKEY_ALIAS}")
+  fi
 
   if [[ "$known_hosts_file" == /dev/null ]]
   then
@@ -470,6 +480,14 @@ _scp() {
   fi
 
   scp_opts+=(-o "UserKnownHostsFile=${known_hosts_file}")
+  if [[ -n "$SSH_CONNECT_ADDRESS" ]]
+  then
+    scp_opts+=(-o "HostName=${SSH_CONNECT_ADDRESS}")
+  fi
+  if [[ -n "$SSH_HOSTKEY_ALIAS" ]]
+  then
+    scp_opts+=(-o "HostKeyAlias=${SSH_HOSTKEY_ALIAS}")
+  fi
 
   if [[ "$known_hosts_file" == /dev/null ]]
   then
@@ -590,6 +608,12 @@ is-an-ip-address() {
 }
 
 resolve-hostname() {
+  if [[ -n "$SSH_CONNECT_ADDRESS" ]]
+  then
+    echo "$SSH_CONNECT_ADDRESS"
+    return 0
+  fi
+
   if is-an-ip-address "$SSH_HOSTNAME"
   then
     echo "$SSH_HOSTNAME"
@@ -630,7 +654,7 @@ check_ssh_port() {
     return "$?"
   fi
 
-  nc -z -w 2 "$resolved_hostname" "$SSH_PORT"
+  nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$resolved_hostname}" "$SSH_PORT"
 }
 
 verify_initrd_checksum_signature() {
@@ -795,7 +819,7 @@ show_status() {
   fi
   printf '\n%sTarget state%s\n' "$cyan" "$reset"
 
-  if [[ -n "$HEALTHCHECK_PORT" ]] && nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
+  if [[ -n "$HEALTHCHECK_PORT" ]] && nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$SSH_HOSTNAME}" "$HEALTHCHECK_PORT"
   then
     show_remote_metadata default
     printf '  %s✅ Unlocked; healthcheck port %s is open%s\n' "$green" "$HEALTHCHECK_PORT" "$reset"
@@ -987,7 +1011,7 @@ run_tick() {
   # checksum and host-key validation still gate the unlock attempt.
   if [[ -n "$HEALTHCHECK_PORT" ]]
   then
-    if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
+    if nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$SSH_HOSTNAME}" "$HEALTHCHECK_PORT"
     then
       fetch_initrd_checksum
       log "✅ Healthcheck OK for ${SSH_HOSTNAME}"
