@@ -27,6 +27,11 @@ let
       name = "luks-ssh-unlock-${name}";
       runtimeInputs = [ pkgs.systemd ];
       text = ''
+        credential_properties=()
+        ${optionalString (instance.passphraseFile != null) ''
+          credential_properties+=(--property=${escapeShellArg "LoadCredential=luks-passphrase:${toString instance.passphraseFile}"})
+        ''}
+
         case "''${1:-}" in
           logs|l)
             shift
@@ -125,10 +130,8 @@ let
           --collect \
           --unit=${escapeShellArg "luks-ssh-unlock-manual-${name}-"}"$$" \
           --property=${escapeShellArg "EnvironmentFile=/etc/luks-ssh-unlock/${name}.env"} \
-          ${optionalString (instance.passphraseFile != null) ''
-            --property=${escapeShellArg "LoadCredential=luks-passphrase:${toString instance.passphraseFile}"} \
-          ''}
           --property=TimeoutStartSec=infinity \
+          "''${credential_properties[@]}" \
           -- ${package}/bin/luks-ssh-unlock run --once "$@"
       '';
     }
