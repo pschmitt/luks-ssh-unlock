@@ -23,15 +23,41 @@ let
       name = "luks-ssh-unlock-${name}";
       runtimeInputs = [ pkgs.systemd ];
       text = ''
-        if [[ "''${1:-}" == logs || "''${1:-}" == l ]]
-        then
-          if [[ $# -ne 1 ]]
-          then
-            printf 'Usage: luks-ssh-unlock-${name} [logs|l]\n' >&2
-            exit 2
-          fi
-          exec journalctl --follow --unit=luks-ssh-unlock-${name}.service
-        fi
+        case "''${1:-}" in
+          logs|l)
+            if [[ $# -ne 1 ]]
+            then
+              printf 'Usage: luks-ssh-unlock-${name} [logs|l]\n' >&2
+              exit 2
+            fi
+            exec journalctl --follow --unit=luks-ssh-unlock-${name}.service
+            ;;
+          status)
+            if [[ $# -ne 1 ]]
+            then
+              printf 'Usage: luks-ssh-unlock-${name} status\n' >&2
+              exit 2
+            fi
+            status_exit=0
+            status_environment=()
+            if [[ -t 1 && "''${TERM:-}" != dumb ]]
+            then
+              status_environment+=(--property=Environment=FORCE_COLOR=1)
+            fi
+            systemd-run \
+              --system \
+              --wait \
+              --pipe \
+              --collect \
+              --unit=${escapeShellArg "luks-ssh-unlock-status-${name}-"}"$$" \
+              --property=${escapeShellArg "EnvironmentFile=/etc/luks-ssh-unlock/${name}.env"} \
+              "''${status_environment[@]}" \
+              -- ${package}/bin/luks-ssh-unlock status || status_exit=$?
+            printf '\nRecent daemon logs for ${name}:\n'
+            journalctl --unit=luks-ssh-unlock-${name}.service --no-pager -n 10 || true
+            exit "$status_exit"
+            ;;
+        esac
 
         exec systemd-run \
           --system \
@@ -41,7 +67,7 @@ let
           --unit=${escapeShellArg "luks-ssh-unlock-manual-${name}-"}"$$" \
           --property=${escapeShellArg "EnvironmentFile=/etc/luks-ssh-unlock/${name}.env"} \
           --property=TimeoutStartSec=infinity \
-          -- ${package}/bin/luks-ssh-unlock --once "$@"
+          -- ${package}/bin/luks-ssh-unlock run --once "$@"
       '';
     }
   ) cfg.instances;

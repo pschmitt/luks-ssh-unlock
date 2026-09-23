@@ -24,6 +24,8 @@ LUKS_TYPE="${LUKS_TYPE:-raw}"
 
 DEBUG="${DEBUG:-}"
 RUN_ONCE="${RUN_ONCE:-}"
+ACTION=run
+FORCE_COLOR="${FORCE_COLOR:-}"
 FORCE="${FORCE:-}"
 PARANOID="${PARANOID:-}"
 EVENTS_FILE="${EVENTS_FILE:-}"
@@ -53,7 +55,11 @@ EMAIL_SUBJECT="${EMAIL_SUBJECT:-}"
 MSMTP_ACCOUNT="${MSMTP_ACCOUNT:-}"
 
 usage() {
-  echo "Usage: $(basename "$0") OPTIONS"
+  echo "Usage: $(basename "$0") [COMMAND] [OPTIONS]"
+  echo
+  echo "Commands:"
+  echo "  run       Run the unlock service (default)"
+  echo "  status    Show target config and remote boot/unlock status"
   echo
   echo "Options:"
   echo
@@ -221,6 +227,11 @@ template-msg() {
 
 log-notify() {
   local event_type
+
+  if [[ "$ACTION" == status ]]
+  then
+    return 0
+  fi
 
   case "$1" in
     -i|--info)
@@ -730,12 +741,104 @@ check_initrd_checksum() {
     log "Running initrd checksum validation via ${checksum_script}"
   fi
 
-  if "$checksum_script" "${checksum_args[@]}"
+  local checksum_output
+  if checksum_output=$("$checksum_script" "${checksum_args[@]}" 2>&1)
   then
+    if [[ -n "$DEBUG" && -n "$checksum_output" ]]
+    then
+      log "$checksum_output"
+    fi
     return 0
   fi
 
+  if [[ -n "$DEBUG" && -n "$checksum_output" ]]
+  then
+    log "$checksum_output"
+  fi
+
   log-notify -w "Initrd checksum validation failed for ${SSH_HOSTNAME}; skipping unlock attempt"
+  return 1
+}
+
+show_status() {
+  local reset='' green='' yellow='' red='' cyan='' dim=''
+  local key_check='not configured'
+
+  if [[ -n "$FORCE_COLOR" || ( -t 1 && "${TERM:-}" != dumb ) ]]
+  then
+    reset=$'\033[0m'
+    green=$'\033[32m'
+    yellow=$'\033[33m'
+    red=$'\033[31m'
+    cyan=$'\033[36m'
+    dim=$'\033[2m'
+  fi
+
+  if [[ -n "$SSH_KNOWN_HOSTS_FILE" || -n "$SSH_KNOWN_HOSTS" ]] &&
+    [[ -n "$SSH_INITRD_KNOWN_HOSTS_FILE" || -n "$SSH_INITRD_KNOWN_HOSTS" ]]
+  then
+    key_check='regular and initrd keys configured'
+  fi
+
+  printf '%sLUKS SSH unlock: %s%s\n' "$cyan" "$SSH_HOSTNAME" "$reset"
+  printf '  %-19s %s@%s:%s\n' 'SSH target' "$SSH_USERNAME" "$SSH_HOSTNAME" "$SSH_PORT"
+  printf '  %-19s %s\n' 'LUKS type' "$LUKS_TYPE"
+  printf '  %-19s %s\n' 'Healthcheck' "${HEALTHCHECK_REMOTE_CMD:-not configured}"
+  printf '  %-19s %s\n' 'Initrd checksum' "${INITRD_CHECKSUM_FILE:-not configured}"
+  printf '  %-19s %s\n' 'Signature check' "$([[ -n "$INITRD_CHECKSUM_REQUIRE_SIGNATURE" ]] && printf required || printf optional)"
+  printf '  %-19s %s\n' 'Host-key checks' "$key_check"
+  printf '\n%sTarget state%s\n' "$cyan" "$reset"
+
+  if [[ -n "$HEALTHCHECK_PORT" ]] && nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
+  then
+    printf '  %s✅ Unlocked; healthcheck port %s is open%s\n' "$green" "$HEALTHCHECK_PORT" "$reset"
+    return 0
+  fi
+
+  if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
+  then
+    if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
+      SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
+      SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
+      _ssh sh -c "$HEALTHCHECK_REMOTE_CMD" >/dev/null 2>&1
+    then
+      printf '  %s✅ Unlocked; normal-boot healthcheck passed%s\n' "$green" "$reset"
+      return 0
+    fi
+    printf '  %s⚠️  Normal-boot healthcheck failed%s\n' "$yellow" "$reset"
+  else
+    printf '  %s⚠️  No normal-boot healthcheck configured%s\n' "$yellow" "$reset"
+  fi
+
+  if SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd _ssh true >/dev/null 2>&1
+  then
+    printf '  %s✅ Initrd SSH is reachable%s\n' "$yellow" "$reset"
+    if [[ -n "$INITRD_CHECKSUM_FILE" ]]
+    then
+      local checksum_output
+      if checksum_output=$(check_initrd_checksum 2>&1)
+      then
+        printf '  %s✅ Initrd checksum/signature validated%s\n' "$green" "$reset"
+        if [[ -n "$DEBUG" && -n "$checksum_output" ]]
+        then
+          printf '%s\n' "$checksum_output" >&2
+        fi
+      else
+        printf '  %s❌ Initrd checksum/signature validation failed%s\n' "$red" "$reset"
+        if [[ -n "$DEBUG" && -n "$checksum_output" ]]
+        then
+          printf '%s\n' "$checksum_output" >&2
+        fi
+        return 1
+      fi
+    else
+      printf '  %s⚠️  Initrd checksum validation is not configured%s\n' "$yellow" "$reset"
+    fi
+    return 0
+  fi
+
+  printf '  %s❌ Target is not reachable through normal or initrd SSH%s\n' "$red" "$reset"
+  printf '%s%s%s\n' "$dim" 'Check network reachability and SSH credentials.' "$reset"
   return 1
 }
 
@@ -747,6 +850,14 @@ fetch_initrd_checksum() {
 
   local remote_checksum_path="/etc/initrd-checksum"
   local checksum_dir="${INITRD_CHECKSUM_DIR%/}/${SSH_HOSTNAME}"
+  local checksum_file="${checksum_dir}/initrd-checksum/checksum"
+  local old_checksum=''
+  local new_checksum=''
+
+  if [[ -r "$checksum_file" ]]
+  then
+    old_checksum=$(sha256sum "$checksum_file" | cut -d ' ' -f 1)
+  fi
 
   if ! mkdir -p "$checksum_dir"
   then
@@ -758,6 +869,19 @@ fetch_initrd_checksum() {
   then
     log-notify -w "Failed to fetch ${remote_checksum_path} from ${SSH_HOSTNAME}"
     return 1
+  fi
+
+  if [[ -r "$checksum_file" ]]
+  then
+    new_checksum=$(sha256sum "$checksum_file" | cut -d ' ' -f 1)
+  fi
+
+  if [[ "$old_checksum" != "$new_checksum" ]]
+  then
+    log "✅ Initrd checksum baseline updated for ${SSH_HOSTNAME}"
+  elif [[ -n "$DEBUG" ]]
+  then
+    log "Initrd checksum baseline unchanged for ${SSH_HOSTNAME}"
   fi
 
   if [[ -n "$DEBUG" ]]
@@ -829,9 +953,10 @@ run_tick() {
     if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
     then
       fetch_initrd_checksum
-      if [[ -n "$DEBUG" ]]
+      log "✅ Healthcheck OK for ${SSH_HOSTNAME}"
+      if [[ -n "$RUN_ONCE" ]]
       then
-        log "Healthcheck result OK" >&2
+        log "Host ${SSH_HOSTNAME} is already booted; skipping unlock attempt"
       fi
       return 0
     fi
@@ -839,20 +964,30 @@ run_tick() {
 
   if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
   then
-    if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
-       SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
-       SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
-      _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
+    local healthcheck_output
+    if healthcheck_output=$(
+      SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
+        SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
+        SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
+        _ssh sh -c "$HEALTHCHECK_REMOTE_CMD" 2>&1
+    )
     then
       fetch_initrd_checksum
+      log "✅ Healthcheck OK for ${SSH_HOSTNAME}"
       if [[ -n "$RUN_ONCE" ]]
       then
         log "Host ${SSH_HOSTNAME} is already booted; skipping unlock attempt"
       elif [[ -n "$DEBUG" ]]
       then
-        log "Healthcheck (remote cmd) result OK" >&2
+        log "Healthcheck output: ${healthcheck_output}"
       fi
       return 0
+    else
+      log "⚠️  Healthcheck failed for ${SSH_HOSTNAME}; checking initrd access"
+      if [[ -n "$DEBUG" && -n "$healthcheck_output" ]]
+      then
+        log "Healthcheck output: ${healthcheck_output}"
+      fi
     fi
   fi
 
@@ -867,6 +1002,8 @@ run_tick() {
     elif ! check_initrd_checksum
     then
       return 1
+    else
+      log "✅ Initrd checksum/signature validated for ${SSH_HOSTNAME}"
     fi
 
     log "Trying to unlock remotely ${SSH_HOSTNAME}"
@@ -887,6 +1024,10 @@ main() {
   while [[ -n "$*" ]]
   do
     case "$1" in
+      run|status)
+        ACTION="$1"
+        shift
+        ;;
       --help|-h)
         usage
         exit 0
@@ -1066,6 +1207,16 @@ main() {
     cp "$SSH_KEY" "$TMPDIR"
     SSH_KEY="${TMPDIR}/$(basename "$SSH_KEY")"
     chmod 400 "$SSH_KEY"
+  fi
+
+  if [[ "$ACTION" == status ]]
+  then
+    if show_status
+    then
+      exit 0
+    else
+      exit "$?"
+    fi
   fi
 
   if [[ -z "$LUKS_PASSPHRASE" ]] && [[ -n "$LUKS_PASSPHRASE_FILE" ]]
