@@ -165,8 +165,8 @@ def main():
     sockets = []
     for interface in interfaces:
         try:
-            sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x0800))
-            sock.bind((interface, socket.htons(0x0800)))
+            sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, 0x0800)
+            sock.bind((interface, 0x0800))
             sockets.append(sock)
         except OSError as error:
             logging.warning("Could not listen on %s: %s", interface, error)
