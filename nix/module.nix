@@ -26,19 +26,11 @@ let
         case "''${1:-}" in
           logs|l)
             shift
-            journalctl \
+            exec journalctl \
               --follow \
               --unit=luks-ssh-unlock-${name}.service \
               "$@" \
-              --output=cat |
-              while IFS= read -r log_line
-              do
-                if [[ "$log_line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}[[:space:]] ]]
-                then
-                  log_line="''${log_line#* }"
-                fi
-                printf '%s\n' "$log_line"
-              done
+              --output=cat
             ;;
           status)
             if [[ $# -ne 1 ]]
@@ -85,10 +77,6 @@ let
             then
               while IFS= read -r log_line
               do
-                if [[ "$log_line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}[[:space:]] ]]
-                then
-                  log_line="''${log_line#* }"
-                fi
                 printf '%s%s%s\n' "$log_color" "$log_line" "$log_reset"
               done <<< "$log_lines"
             fi
