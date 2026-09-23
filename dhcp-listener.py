@@ -55,7 +55,20 @@ def parse_dhcp_packet(packet):
         return None
 
     client_hostname = options.get(12, b"").decode("ascii", errors="ignore").rstrip(".").lower()
-    return operation, options[53][0], transaction_id, client_address, client_hostname, assigned_ip
+    requested_ip = (
+        str(ipaddress.ip_address(options[50]))
+        if len(options.get(50, b"")) == 4
+        else None
+    )
+    return (
+        operation,
+        options[53][0],
+        transaction_id,
+        client_address,
+        client_hostname,
+        assigned_ip,
+        requested_ip,
+    )
 
 
 def wait_for_ssh(address, port, timeout):
@@ -90,6 +103,19 @@ def main():
         args.client_hostname,
         args.interface,
     )
+    try:
+        target_addresses = {
+            result[4][0]
+            for result in socket.getaddrinfo(
+                args.target_hostname,
+                None,
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+            )
+        }
+    except socket.gaierror:
+        target_addresses = set()
+        logging.warning("Could not resolve target address for %s", args.target_hostname)
 
     active_addresses = set()
     recent_addresses = {}
@@ -155,9 +181,20 @@ def main():
             if dhcp_packet is None:
                 continue
 
-            operation, message_type, transaction_id, client_address, client_hostname, address = dhcp_packet
+            (
+                operation,
+                message_type,
+                transaction_id,
+                client_address,
+                client_hostname,
+                address,
+                requested_address,
+            ) = dhcp_packet
             if operation == 1 and message_type in (1, 3):
-                if client_hostname != args.client_hostname.lower():
+                if (
+                    client_hostname != args.client_hostname.lower()
+                    and requested_address not in target_addresses
+                ):
                     continue
                 pending_clients[client_address] = (transaction_id, time.monotonic())
                 logging.info("Detected DHCP request from %s; waiting for its lease", args.client_hostname)
