@@ -25,12 +25,20 @@ let
       text = ''
         case "''${1:-}" in
           logs|l)
-            if [[ $# -ne 1 ]]
-            then
-              printf 'Usage: luks-ssh-unlock-${name} [logs|l]\n' >&2
-              exit 2
-            fi
-            exec journalctl --follow --unit=luks-ssh-unlock-${name}.service
+            shift
+            journalctl \
+              --follow \
+              --unit=luks-ssh-unlock-${name}.service \
+              "$@" \
+              --output=cat |
+              while IFS= read -r log_line
+              do
+                if [[ "$log_line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}[[:space:]] ]]
+                then
+                  log_line="''${log_line#* }"
+                fi
+                printf '%s\n' "$log_line"
+              done
             ;;
           status)
             if [[ $# -ne 1 ]]
