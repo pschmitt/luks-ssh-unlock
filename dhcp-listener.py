@@ -148,11 +148,23 @@ def main():
                 if os.path.isfile(credential_path):
                     command.append(f"--property=LoadCredential=luks-passphrase:{credential_path}")
             command.extend(["--", args.unlocker, "run", "--once"])
-            result = subprocess.run(command, check=False)
-            if result.returncode == 0:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            if process.stdout is not None:
+                for line in process.stdout:
+                    message = line.rstrip("\r\n")
+                    if message:
+                        logging.info("Unlocker: %s", message)
+            result = process.wait()
+            if result == 0:
                 logging.info("Validated unlock attempt completed for %s", args.target_hostname)
             else:
-                logging.error("Unlock attempt for %s failed with status %s", args.target_hostname, result.returncode)
+                logging.error("Unlock attempt for %s failed with status %s", args.target_hostname, result)
         finally:
             with lock:
                 active_addresses.discard(address)
