@@ -122,9 +122,9 @@ def main():
     pending_clients = {}
     lock = threading.Lock()
 
-    def handle_ack(address):
+    def handle_address(address):
         try:
-            logging.info("DHCP assigned %s to %s; waiting for SSH", address, args.client_hostname)
+            logging.info("Waiting for SSH at %s for %s", address, args.client_hostname)
             if not wait_for_ssh(address, args.ssh_port, args.ssh_wait_timeout):
                 logging.warning("SSH did not become ready at %s within %ss", address, args.ssh_wait_timeout)
                 return
@@ -156,6 +156,17 @@ def main():
         finally:
             with lock:
                 active_addresses.discard(address)
+
+    def start_unlock(address):
+        now = time.monotonic()
+        with lock:
+            if address in active_addresses or now - recent_addresses.get(address, 0) < 60:
+                return False
+            active_addresses.add(address)
+            recent_addresses[address] = now
+
+        threading.Thread(target=handle_address, args=(address,), daemon=True).start()
+        return True
 
     interfaces = (
         [name for _, name in socket.if_nameindex()]
@@ -196,8 +207,25 @@ def main():
                     and requested_address not in target_addresses
                 ):
                     continue
+
+                if message_type == 3 and requested_address in target_addresses:
+                    pending_clients.pop(client_address, None)
+                    if start_unlock(requested_address):
+                        logging.info(
+                            "DHCP request from %s asks for %s; waiting for SSH",
+                            args.client_hostname,
+                            requested_address,
+                        )
+                    continue
+
+                pending = pending_clients.get(client_address)
+                if pending is not None and pending[0] == transaction_id:
+                    continue
                 pending_clients[client_address] = (transaction_id, time.monotonic())
-                logging.info("Detected DHCP request from %s; waiting for its lease", args.client_hostname)
+                logging.info(
+                    "Detected DHCP request from %s; waiting for its lease",
+                    args.client_hostname,
+                )
                 continue
 
             if operation != 2 or message_type != 5:
@@ -211,15 +239,12 @@ def main():
                 continue
             if pending is not None:
                 pending_clients.pop(client_address, None)
-
-            now = time.monotonic()
-            with lock:
-                if address in active_addresses or now - recent_addresses.get(address, 0) < 60:
-                    continue
-                active_addresses.add(address)
-                recent_addresses[address] = now
-
-            threading.Thread(target=handle_ack, args=(address,), daemon=True).start()
+            if start_unlock(address):
+                logging.info(
+                    "DHCP assigned %s to %s; waiting for SSH",
+                    address,
+                    args.client_hostname,
+                )
 
 
 if __name__ == "__main__":
