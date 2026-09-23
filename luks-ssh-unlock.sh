@@ -467,6 +467,14 @@ _ssh() {
     "$@"
 }
 
+_ssh_remote_command() {
+  local remote_command="$1"
+  local quoted_command
+
+  printf -v quoted_command '%q' "$remote_command"
+  _ssh "sh -c $quoted_command"
+}
+
 _scp() {
   local scp_opts=(-o ControlMaster=no)
   local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
@@ -831,7 +839,7 @@ show_status() {
     if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
       SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
       SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
-      _ssh sh -c "$HEALTHCHECK_REMOTE_CMD" >/dev/null 2>&1
+      _ssh_remote_command "$HEALTHCHECK_REMOTE_CMD" >/dev/null 2>&1
     then
       show_remote_metadata "${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default}"
       printf '  %s✅ Unlocked; normal-boot healthcheck passed%s\n' "$green" "$reset"
@@ -1030,7 +1038,7 @@ run_tick() {
       SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
         SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
         SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
-        _ssh sh -c "$HEALTHCHECK_REMOTE_CMD" 2>&1
+        _ssh_remote_command "$HEALTHCHECK_REMOTE_CMD" 2>&1
     )
     then
       fetch_initrd_checksum
