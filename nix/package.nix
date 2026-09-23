@@ -40,6 +40,7 @@ stdenv.mkDerivation {
     wrapProgram $out/bin/luks-ssh-unlock --prefix PATH : ${
       lib.makeBinPath [
         bash
+        coreutils
         dig
         curl
         gnugrep
