@@ -219,10 +219,7 @@ template-msg() {
   msg=${msg//#jport/${SSH_JUMPHOST_PORT}}
 
   msg=${msg//#luks_type/${LUKS_TYPE}}
-  if [[ -n "$DEBUG" ]]
-  then
-    msg=${msg//#luks_password/${LUKS_PASSPHRASE}}
-  fi
+  msg=${msg//#luks_password/[REDACTED]}
 
   msg=${msg//#remote_cmd/${HEALTHCHECK_REMOTE_CMD}}
   msg=${msg//#remote_hostname/${HEALTHCHECK_REMOTE_HOSTNAME}}
@@ -981,6 +978,63 @@ fetch_initrd_checksum() {
   return 0
 }
 
+systemd-tty-unlock() {
+  local ready_marker="LUKS-SSH-UNLOCK-READY-${BASHPID}-${RANDOM}"
+  local remote_command="stty -echo && printf '\\n%s\\n' '${ready_marker}' && exec systemd-tty-ask-password-agent"
+  local line
+  local ssh_status=0
+  local ready=0
+
+  coproc ask_password_agent {
+    _ssh -tt "$remote_command"
+  }
+
+  local ssh_pid="$!"
+  local output_fd="${ask_password_agent[0]}"
+  local input_fd="${ask_password_agent[1]}"
+
+  # Do not send the passphrase until the remote PTY has disabled echo.
+  while IFS= read -r -u "$output_fd" line
+  do
+    line=${line%$'\r'}
+    if [[ "$line" == "$ready_marker" ]]
+    then
+      ready=1
+      break
+    fi
+
+    if [[ -n "$line" ]]
+    then
+      printf '%s\n' "$line" >&2
+    fi
+  done
+
+  if [[ "$ready" -ne 1 ]]
+  then
+    wait "$ssh_pid" || ssh_status=$?
+    echo "Failed to prepare the remote terminal for the LUKS passphrase" >&2
+    if [[ "$ssh_status" -eq 0 ]]
+    then
+      ssh_status=1
+    fi
+    return "$ssh_status"
+  fi
+
+  printf '%s\n' "$LUKS_PASSPHRASE" >&"$input_fd"
+
+  while IFS= read -r -u "$output_fd" line
+  do
+    line=${line%$'\r'}
+    if [[ -n "$LUKS_PASSPHRASE" ]]
+    then
+      line=${line//"$LUKS_PASSPHRASE"/[REDACTED]}
+    fi
+    printf '%s\n' "$line" >&2
+  done
+
+  wait "$ssh_pid"
+}
+
 luks_unlock() {
   local SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd
 
@@ -1023,7 +1077,7 @@ luks_unlock() {
 
     # https://github.com/gsauthof/dracut-sshd/issues/32
     systemd|dracut-systemd|dracut-sshd|dracut|alt)
-      _ssh -tt systemd-tty-ask-password-agent <<< "$LUKS_PASSPHRASE"
+      systemd-tty-unlock
       ;;
 
     # https://github.com/pschmitt/luks-mount.sh
