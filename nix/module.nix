@@ -61,6 +61,28 @@ let
               --property=${escapeShellArg "EnvironmentFile=/etc/luks-ssh-unlock/${name}.env"} \
               "''${status_environment[@]}" \
               -- ${package}/bin/luks-ssh-unlock status || status_exit=$?
+            service_state=$(systemctl is-active luks-ssh-unlock-${name}.service 2>/dev/null) || :
+            service_label=$service_state
+            if [[ "$service_state" == inactive ]]
+            then
+              service_label='stopped (inactive)'
+            elif [[ -z "$service_label" ]]
+            then
+              service_label=unknown
+            fi
+            service_color=
+            service_reset=
+            if [[ -n "''${FORCE_COLOR:-}" || ( -t 1 && "''${TERM:-}" != dumb ) ]]
+            then
+              service_reset=$'\033[0m'
+              if [[ "$service_state" == active ]]
+              then
+                service_color=$'\033[32m'
+              else
+                service_color=$'\033[1;31m'
+              fi
+            fi
+            printf '\nUnlock service: %s%s%s\n' "$service_color" "$service_label" "$service_reset"
             last_unlock=$(journalctl \
               --grep=${escapeShellArg "LUKS unlocked host at ${name}"} \
               --no-pager \
