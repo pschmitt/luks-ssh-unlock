@@ -1020,6 +1020,82 @@ run_tick() {
   return 0
 }
 
+run_action() {
+  if [[ -z "$LUKS_PASSPHRASE" ]] && [[ -n "$LUKS_PASSPHRASE_FILE" ]]
+  then
+    if [[ ! -r "$LUKS_PASSPHRASE_FILE" ]]
+    then
+      echo "$LUKS_PASSPHRASE_FILE: No such file or directory" >&2
+      return 3
+    fi
+
+    LUKS_PASSPHRASE="$(cat "$LUKS_PASSPHRASE_FILE")"
+  fi
+
+  if [[ -z "$LUKS_PASSPHRASE" ]]
+  then
+    echo "LUKS_PASSPHRASE is not set." >&2
+    return 2
+  fi
+
+  if [[ -n "$FORCE" && -z "$RUN_ONCE" ]]
+  then
+    echo "--force can only be used with --once." >&2
+    return 2
+  fi
+
+  local msg="LUKS rigmarole started (type: $LUKS_TYPE). I'll be trying to unlock ${SSH_HOSTNAME}"
+  if [[ -n "$SSH_JUMPHOST" ]]
+  then
+    msg+=" through ${SSH_JUMPHOST}"
+  fi
+  log "$msg"
+
+  if [[ -n "$RUN_ONCE" ]]
+  then
+    run_tick
+    return "$?"
+  fi
+
+  while true
+  do
+    run_tick &
+    local pid=$!
+    local count=0
+
+    while kill -0 "$pid" 2>/dev/null
+    do
+      if (( count >= TICK_TIMEOUT ))
+      then
+        log "Tick timed out after ${TICK_TIMEOUT}s, killing..."
+        kill "$pid"
+
+        # Wait a bit for it to die
+        local kill_wait=0
+        while kill -0 "$pid" 2>/dev/null
+        do
+          sleep 1
+          ((kill_wait++))
+          if (( kill_wait > 10 ))
+          then
+            log "Tick process $pid refused to die, sending SIGKILL"
+            kill -9 "$pid"
+            break
+          fi
+        done
+
+        break
+      fi
+      sleep 1
+      ((count++))
+    done
+
+    wait "$pid" 2>/dev/null
+
+    sleep "$SLEEP_INTERVAL"
+  done
+}
+
 main() {
   while [[ -n "$*" ]]
   do
@@ -1198,7 +1274,7 @@ main() {
   if [[ ! -r "$SSH_KEY" ]]
   then
     echo "SSH_KEY at $SSH_KEY is not readable." >&2
-    exit 2
+    return 2
   fi
 
   # Copy file locally and correct mode
@@ -1209,89 +1285,19 @@ main() {
     chmod 400 "$SSH_KEY"
   fi
 
-  if [[ "$ACTION" == status ]]
-  then
-    if show_status
-    then
-      exit 0
-    else
-      exit "$?"
-    fi
-  fi
-
-  if [[ -z "$LUKS_PASSPHRASE" ]] && [[ -n "$LUKS_PASSPHRASE_FILE" ]]
-  then
-    if [[ ! -r "$LUKS_PASSPHRASE_FILE" ]]
-    then
-      echo "$LUKS_PASSPHRASE_FILE: No such file or directory" >&2
-      exit 3
-    fi
-
-    LUKS_PASSPHRASE="$(cat "$LUKS_PASSPHRASE_FILE")"
-  fi
-
-  if [[ -z "$LUKS_PASSPHRASE" ]]
-  then
-    echo "LUKS_PASSPHRASE is not set." >&2
-    exit 2
-  fi
-
-  if [[ -n "$FORCE" && -z "$RUN_ONCE" ]]
-  then
-    echo "--force can only be used with --once." >&2
-    exit 2
-  fi
-
-  local msg="LUKS rigmarole started (type: $LUKS_TYPE). I'll be trying to unlock ${SSH_HOSTNAME}"
-  if [[ -n "$SSH_JUMPHOST" ]]
-  then
-    msg+=" through ${SSH_JUMPHOST}"
-  fi
-  log "$msg"
-
-  if [[ -n "$RUN_ONCE" ]]
-  then
-    run_tick
-    exit "$?"
-  fi
-
-  while true
-  do
-    run_tick &
-    local pid=$!
-    local count=0
-
-    while kill -0 "$pid" 2>/dev/null
-    do
-      if (( count >= TICK_TIMEOUT ))
-      then
-        log "Tick timed out after ${TICK_TIMEOUT}s, killing..."
-        kill "$pid"
-
-        # Wait a bit for it to die
-        local kill_wait=0
-        while kill -0 "$pid" 2>/dev/null
-        do
-          sleep 1
-          ((kill_wait++))
-          if (( kill_wait > 10 ))
-          then
-            log "Tick process $pid refused to die, sending SIGKILL"
-            kill -9 "$pid"
-            break
-          fi
-        done
-
-        break
-      fi
-      sleep 1
-      ((count++))
-    done
-
-    wait "$pid" 2>/dev/null
-
-    sleep "$SLEEP_INTERVAL"
-  done
+  case "$ACTION" in
+    run)
+      run_action
+      ;;
+    status)
+      show_status
+      ;;
+    *)
+      printf 'Unknown action: %s\n' "$ACTION" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
