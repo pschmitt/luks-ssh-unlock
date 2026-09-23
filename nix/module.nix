@@ -372,7 +372,6 @@ in
                   "${package}/bin/luks-ssh-unlock"
                 ];
             };
-            environment.PATH = makeBinPath [ pkgs.systemd ];
           }
         ) (filterAttrs (_: instance: instance.dhcpListener.enable) cfg.instances);
 
