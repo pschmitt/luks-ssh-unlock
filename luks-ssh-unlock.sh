@@ -821,9 +821,10 @@ luks_unlock() {
 }
 
 run_tick() {
-  # Healthchecks are for the daemon loop. A one-shot invocation explicitly
-  # requests an unlock attempt, so it must not return early on a healthy host.
-  if [[ -z "$RUN_ONCE" && -n "$HEALTHCHECK_PORT" ]]
+  # One-shot invocations must also avoid trying to unlock a host that is
+  # already booted. If the configured healthcheck fails, the normal initrd
+  # checksum and host-key validation still gate the unlock attempt.
+  if [[ -n "$HEALTHCHECK_PORT" ]]
   then
     if nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
     then
@@ -836,7 +837,7 @@ run_tick() {
     fi
   fi
 
-  if [[ -z "$RUN_ONCE" && -n "$HEALTHCHECK_REMOTE_CMD" ]]
+  if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
   then
     if SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
        SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
@@ -844,7 +845,10 @@ run_tick() {
       _ssh sh -c "$HEALTHCHECK_REMOTE_CMD"
     then
       fetch_initrd_checksum
-      if [[ -n "$DEBUG" ]]
+      if [[ -n "$RUN_ONCE" ]]
+      then
+        log "Host ${SSH_HOSTNAME} is already booted; skipping unlock attempt"
+      elif [[ -n "$DEBUG" ]]
       then
         log "Healthcheck (remote cmd) result OK" >&2
       fi
