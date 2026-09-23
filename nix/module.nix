@@ -65,17 +65,24 @@ let
               printf '\nLast reported unlock for ${name}: no successful unlock recorded\n'
             fi
             printf '\nRecent daemon logs for ${name}:\n'
-            log_lines=$(journalctl --unit=luks-ssh-unlock-${name}.service --no-pager --output=short-iso -n 5) || log_lines=
-            if [[ ( -n "''${FORCE_COLOR:-}" || ( -t 1 && "''${TERM:-}" != dumb ) ) && -n "$log_lines" ]]
+            log_lines=$(journalctl --unit=luks-ssh-unlock-${name}.service --no-pager --output=cat -n 5) || log_lines=
+            log_color=
+            log_reset=
+            if [[ -n "''${FORCE_COLOR:-}" || ( -t 1 && "''${TERM:-}" != dumb ) ]]
             then
-              log_gray=$'\033[90m'
+              log_color=$'\033[90m'
               log_reset=$'\033[0m'
+            fi
+            if [[ -n "$log_lines" ]]
+            then
               while IFS= read -r log_line
               do
-                printf '%s%s%s\n' "$log_gray" "$log_line" "$log_reset"
+                if [[ "$log_line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}[[:space:]] ]]
+                then
+                  log_line="''${log_line#* }"
+                fi
+                printf '%s%s%s\n' "$log_color" "$log_line" "$log_reset"
               done <<< "$log_lines"
-            else
-              printf '%s\n' "$log_lines"
             fi
             exit "$status_exit"
             ;;
