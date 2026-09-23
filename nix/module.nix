@@ -9,6 +9,10 @@ with lib;
 
 let
   cfg = config.services.luks-ssh-unlock;
+  escapeEnvironmentFileValue = value: replaceStrings [ "\\" "\"" ] [ "\\\\" "\\\"" ] value;
+  passphraseCredential =
+    instance:
+    optional (instance.passphraseFile != null) "luks-passphrase:${toString instance.passphraseFile}";
   pathOrStr = types.either types.path types.str;
   nullPathOrStr = types.nullOr pathOrStr;
   package = pkgs.callPackage ./package.nix {
@@ -18,7 +22,7 @@ let
     };
   };
   adHocUnlockers = mapAttrsToList (
-    name: _:
+    name: instance:
     pkgs.writeShellApplication {
       name = "luks-ssh-unlock-${name}";
       runtimeInputs = [ pkgs.systemd ];
@@ -121,6 +125,9 @@ let
           --collect \
           --unit=${escapeShellArg "luks-ssh-unlock-manual-${name}-"}"$$" \
           --property=${escapeShellArg "EnvironmentFile=/etc/luks-ssh-unlock/${name}.env"} \
+          ${optionalString (instance.passphraseFile != null) ''
+            --property=${escapeShellArg "LoadCredential=luks-passphrase:${toString instance.passphraseFile}"} \
+          ''}
           --property=TimeoutStartSec=infinity \
           -- ${package}/bin/luks-ssh-unlock run --once "$@"
       '';
@@ -259,7 +266,7 @@ in
                 HEALTHCHECK_PORT=${optionalString (healthcheck.port != null) (toString healthcheck.port)}
                 HEALTHCHECK_REMOTE_HOSTNAME="${optionalString (healthcheck.hostname != "") healthcheck.hostname}"
                 HEALTHCHECK_REMOTE_USERNAME="${optionalString (healthcheck.username != "") healthcheck.username}"
-                HEALTHCHECK_REMOTE_CMD="${healthcheck.command}"
+                HEALTHCHECK_REMOTE_CMD="${escapeEnvironmentFileValue healthcheck.command}"
                 SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE=${healthcheck.knownHostsType}
               ''}
 
@@ -338,6 +345,7 @@ in
             serviceConfig = {
               Type = "simple";
               EnvironmentFile = "/etc/luks-ssh-unlock/${name}.env";
+              LoadCredential = passphraseCredential instance;
               ExecStart = "${package}/bin/luks-ssh-unlock";
             };
           }
@@ -353,6 +361,7 @@ in
               RestartSec = 5;
               AmbientCapabilities = [ "CAP_NET_RAW" ];
               CapabilityBoundingSet = [ "CAP_NET_RAW" ];
+              LoadCredential = passphraseCredential instance;
               ExecStart =
                 "${package}/bin/luks-ssh-unlock-dhcp-listener "
                 + escapeShellArgs [

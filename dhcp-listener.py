@@ -104,24 +104,24 @@ def main():
 
             logging.info("SSH is ready at %s; starting validated unlock for %s", address, args.target_hostname)
             unit = f"luks-ssh-unlock-dhcp-{args.client_hostname}-{int(time.time())}"
-            result = subprocess.run(
-                [
-                    "systemd-run",
-                    "--system",
-                    "--wait",
-                    "--pipe",
-                    "--collect",
-                    f"--unit={unit}",
-                    f"--property=EnvironmentFile={args.environment_file}",
-                    f"--setenv=SSH_CONNECT_ADDRESS={address}",
-                    f"--setenv=SSH_HOSTKEY_ALIAS={args.target_hostname}",
-                    "--",
-                    args.unlocker,
-                    "run",
-                    "--once",
-                ],
-                check=False,
-            )
+            command = [
+                "systemd-run",
+                "--system",
+                "--wait",
+                "--pipe",
+                "--collect",
+                f"--unit={unit}",
+                f"--property=EnvironmentFile={args.environment_file}",
+                f"--setenv=SSH_CONNECT_ADDRESS={address}",
+                f"--setenv=SSH_HOSTKEY_ALIAS={args.target_hostname}",
+            ]
+            credential_directory = os.environ.get("CREDENTIALS_DIRECTORY")
+            if credential_directory:
+                credential_path = os.path.join(credential_directory, "luks-passphrase")
+                if os.path.isfile(credential_path):
+                    command.append(f"--property=LoadCredential=luks-passphrase:{credential_path}")
+            command.extend(["--", args.unlocker, "run", "--once"])
+            result = subprocess.run(command, check=False)
             if result.returncode == 0:
                 logging.info("Validated unlock attempt completed for %s", args.target_hostname)
             else:

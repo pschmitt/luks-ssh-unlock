@@ -22,6 +22,10 @@ SSH_JUMPHOST_KEY="${SSH_JUMPHOST_KEY:-${SSH_KEY}}"
 
 LUKS_PASSPHRASE="${LUKS_PASSPHRASE:-}"
 LUKS_PASSPHRASE_FILE="${LUKS_PASSPHRASE_FILE=-/run/secrets/luks_password_${SSH_HOSTNAME}}"
+if [[ -n "${CREDENTIALS_DIRECTORY:-}" && -r "${CREDENTIALS_DIRECTORY}/luks-passphrase" ]]
+then
+  LUKS_PASSPHRASE_FILE="${CREDENTIALS_DIRECTORY}/luks-passphrase"
+fi
 LUKS_TYPE="${LUKS_TYPE:-raw}"
 
 DEBUG="${DEBUG:-}"
@@ -415,6 +419,11 @@ _ssh() {
   local known_hosts_file
   known_hosts_file=$(_known_hosts_path "$known_hosts_type") || return 2
 
+  if [[ -n "$FORCE" && -n "$RUN_ONCE" && "$known_hosts_type" == initrd ]]
+  then
+    known_hosts_file=/dev/null
+  fi
+
   if [[ -z "$known_hosts_file" ]]
   then
     known_hosts_file=/dev/null
@@ -665,6 +674,11 @@ check_ssh_port() {
   nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$resolved_hostname}" "$SSH_PORT"
 }
 
+is_initrd() {
+  SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd \
+    _ssh test -e /etc/initrd-release >/dev/null 2>&1
+}
+
 verify_initrd_checksum_signature() {
   local sig_file="${INITRD_CHECKSUM_FILE}.sig"
 
@@ -854,6 +868,12 @@ show_status() {
   then
     show_remote_metadata initrd
     printf '  %s✅ Initrd SSH is reachable%s\n' "$yellow" "$reset"
+    if ! is_initrd
+    then
+      printf '  %s⚠️  /etc/initrd-release is absent; target is not in initrd%s\n' "$yellow" "$reset"
+      return 1
+    fi
+    printf '  %s✅ Initrd environment detected%s\n' "$green" "$reset"
     if [[ -n "$INITRD_CHECKSUM_FILE" ]]
     then
       local checksum_output
@@ -1015,8 +1035,8 @@ luks_unlock() {
 
 run_tick() {
   # One-shot invocations must also avoid trying to unlock a host that is
-  # already booted. If the configured healthcheck fails, the normal initrd
-  # checksum and host-key validation still gate the unlock attempt.
+  # already booted. A failed healthcheck is only a signal to check the initrd;
+  # /etc/initrd-release is the explicit test before any unlock attempt.
   if [[ -n "$HEALTHCHECK_PORT" ]]
   then
     if nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$SSH_HOSTNAME}" "$HEALTHCHECK_PORT"
@@ -1065,6 +1085,12 @@ run_tick() {
     log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
     return 1
   else
+    if ! is_initrd
+    then
+      log "✅ /etc/initrd-release is absent on ${SSH_HOSTNAME}; skipping unlock attempt"
+      return 0
+    fi
+
     if [[ -n "$FORCE" ]]
     then
       log "WARNING: forced unlock bypassing initrd checksum/signature and SSH host-key validation for ${SSH_HOSTNAME}; client-key authentication remains enabled"
