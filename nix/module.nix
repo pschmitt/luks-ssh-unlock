@@ -32,6 +32,14 @@ let
               "$@" \
               --output=cat
             ;;
+          start|stop)
+            if [[ $# -ne 1 ]]
+            then
+              printf 'Usage: luks-ssh-unlock-${name} start|stop\n' >&2
+              exit 2
+            fi
+            exec systemctl "$1" luks-ssh-unlock-${name}.service
+            ;;
           status)
             if [[ $# -ne 1 ]]
             then
