@@ -21,7 +21,7 @@ def parse_dhcp_packet(packet):
         return None
 
     source_port, destination_port = struct.unpack_from("!HH", packet, ip_header_length)
-    if (source_port, destination_port) != (67, 68):
+    if (source_port, destination_port) not in ((67, 68), (68, 67)):
         return None
 
     bootp = packet[ip_header_length + 8 :]
