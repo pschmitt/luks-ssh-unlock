@@ -36,7 +36,8 @@ Options (checksum):
   -i, --identity FILE     SSH identity file to use.
       --initrd[=PATH]     Force hashing of an initrd image (default: /run/current-system/initrd).
       --diff FILE         After hashing, show diff vs FILE (sorted).
-  -q, --quiet             Suppress checksum stdout (still logs and runs diff if provided).
+  -q, --quiet             Suppress checksum stdout and routine info logs; warnings/errors remain.
+      --debug             Enable verbose debug and info logs (overrides --quiet for logs).
       --paranoid          Push a minimal bundle to /run/initrd-checksum/bin on the remote host and prepend to PATH.
       --insecure-ssh      Disable host key verification (unsafe; sets StrictHostKeyChecking=no and null known_hosts files).
       --known-hosts-file FILE
@@ -83,11 +84,17 @@ log() {
 }
 
 log_debug() {
-  log DBG "$1" "$COLOR_DEBUG"
+  if [[ -n "$DEBUG" ]]
+  then
+    log DBG "$1" "$COLOR_DEBUG"
+  fi
 }
 
 log_info() {
-  log INF "$1" "$COLOR_INFO"
+  if [[ -z "$LOG_QUIET" || -n "$DEBUG" ]]
+  then
+    log INF "$1" "$COLOR_INFO"
+  fi
 }
 
 log_warn() {
@@ -794,6 +801,8 @@ main() {
   local action="" host="" initrd_mode="" initrd_path=""
   local diff_file1="" diff_file2="" checksum_diff="" quiet=""
   local known_hosts_file="" identity_file="" ssh_user="root" paranoid=""
+  DEBUG="${DEBUG:-}"
+  LOG_QUIET="${LOG_QUIET:-}"
 
   if [[ $# -gt 0 ]]
   then
@@ -910,6 +919,11 @@ main() {
       ;;
       -q|--quiet)
         quiet=1
+        LOG_QUIET=1
+        shift
+      ;;
+      --debug|-D)
+        DEBUG=1
         shift
       ;;
       --paranoid)

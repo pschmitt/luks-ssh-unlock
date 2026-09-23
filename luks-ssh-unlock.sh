@@ -692,6 +692,11 @@ check_initrd_checksum() {
 
   if [[ -n "$DEBUG" ]]
   then
+    checksum_args+=(--debug)
+  fi
+
+  if [[ -n "$DEBUG" ]]
+  then
     log "Running initrd checksum validation via ${checksum_script}"
   fi
 
@@ -822,7 +827,6 @@ run_tick() {
   else
     if ! check_initrd_checksum
     then
-      log-notify -w "Skipping unlock attempt for ${SSH_HOSTNAME} due to initrd checksum validation failure"
       return 0
     fi
 
