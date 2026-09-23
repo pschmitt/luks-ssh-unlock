@@ -787,10 +787,17 @@ show_status() {
   printf '  %-19s %s\n' 'Initrd checksum' "${INITRD_CHECKSUM_FILE:-not configured}"
   printf '  %-19s %s\n' 'Signature check' "$([[ -n "$INITRD_CHECKSUM_REQUIRE_SIGNATURE" ]] && printf required || printf optional)"
   printf '  %-19s %s\n' 'Host-key checks' "$key_check"
+  if [[ -n "$INITRD_CHECKSUM_FILE" && -r "$INITRD_CHECKSUM_FILE" ]]
+  then
+    printf '  %-19s %s\n' 'Baseline refreshed' "$(stat -c '%y' "$INITRD_CHECKSUM_FILE")"
+  else
+    printf '  %-19s %s\n' 'Baseline refreshed' 'not available'
+  fi
   printf '\n%sTarget state%s\n' "$cyan" "$reset"
 
   if [[ -n "$HEALTHCHECK_PORT" ]] && nc -z -w 2 "$SSH_HOSTNAME" "$HEALTHCHECK_PORT"
   then
+    show_remote_metadata default
     printf '  %s✅ Unlocked; healthcheck port %s is open%s\n' "$green" "$HEALTHCHECK_PORT" "$reset"
     return 0
   fi
@@ -802,6 +809,7 @@ show_status() {
       SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
       _ssh sh -c "$HEALTHCHECK_REMOTE_CMD" >/dev/null 2>&1
     then
+      show_remote_metadata "${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default}"
       printf '  %s✅ Unlocked; normal-boot healthcheck passed%s\n' "$green" "$reset"
       return 0
     fi
@@ -812,6 +820,7 @@ show_status() {
 
   if SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd _ssh true >/dev/null 2>&1
   then
+    show_remote_metadata initrd
     printf '  %s✅ Initrd SSH is reachable%s\n' "$yellow" "$reset"
     if [[ -n "$INITRD_CHECKSUM_FILE" ]]
     then
@@ -840,6 +849,34 @@ show_status() {
   printf '  %s❌ Target is not reachable through normal or initrd SSH%s\n' "$red" "$reset"
   printf '%s%s%s\n' "$dim" 'Check network reachability and SSH credentials.' "$reset"
   return 1
+}
+
+show_remote_metadata() {
+  local known_hosts_type="$1"
+  local target_uptime='unavailable'
+  local target_checksum_time='unavailable'
+
+  if target_uptime=$(
+    SSH_KNOWN_HOSTS_TYPE_OVERRIDE="$known_hosts_type" _ssh uptime -p 2>/dev/null
+  )
+  then
+    :
+  else
+    target_uptime='unavailable'
+  fi
+
+  if target_checksum_time=$(
+    SSH_KNOWN_HOSTS_TYPE_OVERRIDE="$known_hosts_type" \
+      _ssh stat -c '%y' /etc/initrd-checksum/checksum 2>/dev/null
+  )
+  then
+    :
+  else
+    target_checksum_time='unavailable'
+  fi
+
+  printf '  %-19s %s\n' 'Target uptime' "$target_uptime"
+  printf '  %-19s %s\n' 'Target checksum' "$target_checksum_time"
 }
 
 fetch_initrd_checksum() {

@@ -53,8 +53,30 @@ let
               --property=${escapeShellArg "EnvironmentFile=/etc/luks-ssh-unlock/${name}.env"} \
               "''${status_environment[@]}" \
               -- ${package}/bin/luks-ssh-unlock status || status_exit=$?
+            last_unlock=$(journalctl \
+              --grep=${escapeShellArg "LUKS unlocked host at ${name}"} \
+              --no-pager \
+              --output=short-iso \
+              -n 1) || last_unlock=
+            if [[ -n "$last_unlock" ]]
+            then
+              printf '\nLast reported unlock for ${name}: %s\n' "$last_unlock"
+            else
+              printf '\nLast reported unlock for ${name}: no successful unlock recorded\n'
+            fi
             printf '\nRecent daemon logs for ${name}:\n'
-            journalctl --unit=luks-ssh-unlock-${name}.service --no-pager -n 10 || true
+            log_lines=$(journalctl --unit=luks-ssh-unlock-${name}.service --no-pager --output=short-iso -n 5) || log_lines=
+            if [[ ( -n "''${FORCE_COLOR:-}" || ( -t 1 && "''${TERM:-}" != dumb ) ) && -n "$log_lines" ]]
+            then
+              log_gray=$'\033[90m'
+              log_reset=$'\033[0m'
+              while IFS= read -r log_line
+              do
+                printf '%s%s%s\n' "$log_gray" "$log_line" "$log_reset"
+              done <<< "$log_lines"
+            else
+              printf '%s\n' "$log_lines"
+            fi
             exit "$status_exit"
             ;;
         esac
