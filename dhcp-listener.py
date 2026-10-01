@@ -3,6 +3,7 @@
 """Watch DHCP ACK packets and start a validated one-shot unlock attempt."""
 
 import argparse
+import errno
 import ipaddress
 import logging
 import os
@@ -180,26 +181,52 @@ def main():
         threading.Thread(target=handle_address, args=(address,), daemon=True).start()
         return True
 
-    interfaces = (
-        [name for _, name in socket.if_nameindex()]
-        if args.interface == "any"
-        else [args.interface]
-    )
-    sockets = []
-    for interface in interfaces:
-        try:
-            sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, 0x0800)
-            sock.bind((interface, 0x0800))
-            sockets.append(sock)
-        except OSError as error:
-            logging.warning("Could not listen on %s: %s", interface, error)
+    sockets = {}
+
+    def bind_sockets():
+        # With "any", interfaces come and go (container veths, VPN links), so
+        # re-enumerate periodically and bind sockets for new ones.
+        interfaces = (
+            [name for _, name in socket.if_nameindex()]
+            if args.interface == "any"
+            else [args.interface]
+        )
+        for interface in interfaces:
+            if interface in sockets:
+                continue
+            try:
+                sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, 0x0800)
+                sock.bind((interface, 0x0800))
+                sockets[interface] = sock
+            except OSError as error:
+                logging.warning("Could not listen on %s: %s", interface, error)
+
+    bind_sockets()
     if not sockets:
         raise RuntimeError("Could not bind a DHCP listener socket to any interface")
 
+    last_bind = time.monotonic()
     while True:
-        readable, _, _ = select.select(sockets, [], [])
+        if args.interface == "any" and time.monotonic() - last_bind >= 30:
+            bind_sockets()
+            last_bind = time.monotonic()
+
+        readable, _, _ = select.select(list(sockets.values()), [], [], 30)
         for sock in readable:
-            packet, _ = sock.recvfrom(4096)
+            try:
+                packet, _ = sock.recvfrom(4096)
+            except OSError as error:
+                # A packet socket reports ENETDOWN when its interface goes
+                # down; it recovers once the link is back up. Any other error
+                # (e.g. the interface was removed) leaves it unusable.
+                if error.errno == errno.ENETDOWN:
+                    continue
+                interface = next(
+                    name for name, candidate in sockets.items() if candidate is sock
+                )
+                logging.warning("Dropping listener on %s: %s", interface, error)
+                sockets.pop(interface).close()
+                continue
             dhcp_packet = parse_dhcp_packet(packet)
             if dhcp_packet is None:
                 continue
