@@ -42,6 +42,8 @@ Options (checksum):
       --insecure-ssh      Disable host key verification (unsafe; sets StrictHostKeyChecking=no and null known_hosts files).
       --known-hosts-file FILE
                           Override the SSH UserKnownHostsFile (only in secure mode).
+  -o, --ssh-option OPT    Pass "-o OPT" to every ssh invocation (repeatable),
+                          e.g. a ProxyCommand to reach the host via a jumphost.
   -h, --help              Show this help and exit.
 
 Output:
@@ -55,8 +57,8 @@ EOF
 }
 
 ssh() {
-  log_debug "\$ ssh $*"
-  command ssh "$@"
+  log_debug "\$ ssh ${SSH_EXTRA_OPTS[*]} $*"
+  command ssh "${SSH_EXTRA_OPTS[@]}" "$@"
 }
 
 setup_colors() {
@@ -137,6 +139,9 @@ SSH_OPTS_INSECURE=(
 )
 
 SSH_OPTS=()
+# Extra -o options from --ssh-option; kept separate from SSH_OPTS so that
+# toggling secure/insecure mode does not drop them.
+SSH_EXTRA_OPTS=()
 SSH_KNOWN_HOSTS_FILE=""
 SSH_IDENTITY_FILE=""
 INSECURE_SSH=0
@@ -944,6 +949,19 @@ main() {
         SSH_KNOWN_HOSTS_FILE=$known_hosts_file
         apply_known_hosts_file
         shift 2
+      ;;
+      --ssh-option|-o)
+        if [[ $# -lt 2 ]]
+        then
+          log_err "missing argument for $1"
+          exit 2
+        fi
+        SSH_EXTRA_OPTS+=(-o "$2")
+        shift 2
+      ;;
+      --ssh-option=*)
+        SSH_EXTRA_OPTS+=(-o "${1#--ssh-option=}")
+        shift
       ;;
       --known-hosts-file=*)
         known_hosts_file=${1#--known-hosts-file=}

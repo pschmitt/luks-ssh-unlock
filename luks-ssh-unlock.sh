@@ -481,6 +481,35 @@ _ssh_remote_command() {
   _ssh "sh -c $quoted_command"
 }
 
+# Print a ProxyCommand ssh option value that reaches the target through
+# SSH_JUMPHOST, verifying the jumphost against KNOWN_HOSTS_FILE.
+_jumphost_proxy_command() {
+  local known_hosts_file="$1"
+  local proxy_opts=(-F /dev/null -o ConnectTimeout="$SSH_CONNECTION_TIMEOUT")
+  proxy_opts+=(-o "UserKnownHostsFile=${known_hosts_file}")
+  if [[ "$known_hosts_file" == /dev/null ]]
+  then
+    proxy_opts+=(-o StrictHostKeyChecking=no)
+    if [[ -n "$FORCE" && -n "$RUN_ONCE" ]]
+    then
+      proxy_opts+=(-o GlobalKnownHostsFile=/dev/null)
+    fi
+  else
+    proxy_opts+=(-o StrictHostKeyChecking=yes)
+  fi
+  if [[ -n "$FORCE_IPV4" ]]
+  then
+    proxy_opts+=(-4)
+  elif [[ -n "$FORCE_IPV6" ]]
+  then
+    proxy_opts+=(-6)
+  fi
+  proxy_opts+=(-p "$SSH_JUMPHOST_PORT" -i "$SSH_JUMPHOST_KEY" -l "$SSH_JUMPHOST_USERNAME" "$SSH_JUMPHOST" -W %h:%p)
+  local proxy_cmd
+  printf -v proxy_cmd '%q ' "${proxy_opts[@]}"
+  printf 'ProxyCommand=ssh %s\n' "${proxy_cmd% }"
+}
+
 _scp() {
   local scp_opts=(-o ControlMaster=no)
   local known_hosts_type="${SSH_KNOWN_HOSTS_TYPE_OVERRIDE:-default}"
@@ -530,30 +559,7 @@ _scp() {
   local extra_args=()
   if [[ -n "$SSH_JUMPHOST" ]]
   then
-    local proxy_opts=(-F /dev/null -o ConnectTimeout="$SSH_CONNECTION_TIMEOUT")
-    proxy_opts+=(-o "UserKnownHostsFile=${known_hosts_file}")
-    if [[ "$known_hosts_file" == /dev/null ]]
-    then
-      proxy_opts+=(-o StrictHostKeyChecking=no)
-      if [[ -n "$FORCE" && -n "$RUN_ONCE" ]]
-      then
-        proxy_opts+=(-o GlobalKnownHostsFile=/dev/null)
-      fi
-    else
-      proxy_opts+=(-o StrictHostKeyChecking=yes)
-    fi
-    if [[ -n "$FORCE_IPV4" ]]
-    then
-      proxy_opts+=(-4)
-    elif [[ -n "$FORCE_IPV6" ]]
-    then
-      proxy_opts+=(-6)
-    fi
-    proxy_opts+=(-p "$SSH_JUMPHOST_PORT" -i "$SSH_JUMPHOST_KEY" -l "$SSH_JUMPHOST_USERNAME" "$SSH_JUMPHOST" -W %h:%p)
-    local proxy_cmd
-    printf -v proxy_cmd '%q ' "${proxy_opts[@]}"
-    proxy_cmd=${proxy_cmd% }
-    extra_args=(-o "ProxyCommand=ssh ${proxy_cmd}")
+    extra_args=(-o "$(_jumphost_proxy_command "$known_hosts_file")")
   fi
 
   scp -F /dev/null \
@@ -767,6 +773,15 @@ check_initrd_checksum() {
   elif [[ -n "$known_hosts_file" ]]
   then
     checksum_args+=(--known-hosts-file "$known_hosts_file")
+  fi
+
+  if [[ -n "$SSH_JUMPHOST" ]]
+  then
+    local default_known_hosts_file
+    default_known_hosts_file=$(_known_hosts_path default) || return 1
+    checksum_args+=(
+      --ssh-option "$(_jumphost_proxy_command "${default_known_hosts_file:-/dev/null}")"
+    )
   fi
 
   if [[ -n "$PARANOID" ]]
