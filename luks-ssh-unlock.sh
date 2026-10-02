@@ -436,7 +436,7 @@ log-notify() {
         echo
         echo "Script: $0"
         echo "Env:"
-        printenv
+        printenv | redact_env
       fi
 
     } | {
@@ -1177,6 +1177,66 @@ fetch_initrd_checksum() {
   return 0
 }
 
+# Replace the LUKS passphrase in stdin, and strip terminal noise (ANSI
+# escapes, backspaces and other control characters, password mask bullets)
+# that would otherwise end up in the journal as binary blobs or reveal the
+# passphrase length.
+sanitize_output() {
+  local line
+
+  while IFS= read -r line || [[ -n "$line" ]]
+  do
+    if [[ -n "$LUKS_PASSPHRASE" ]]
+    then
+      line=${line//"$LUKS_PASSPHRASE"/[REDACTED]}
+    fi
+    printf '%s\n' "$line"
+  done | LC_ALL=C sed -E \
+    -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
+    -e 's/[\x01-\x08\x0b-\x1f\x7f]//g' \
+    -e 's/(\xe2\x80\xa2|\*){2,}//g' \
+    -e 's/[[:space:]]+$//' | \
+    grep -v '^$'
+}
+
+# Redact values of secret-looking environment variables (debug emails).
+redact_env() {
+  sed -E 's/^([^=]*(PASS|SECRET|TOKEN|KEY|CREDENTIAL)[^=]*)=.*/\1=[REDACTED]/I' | \
+    sanitize_output
+}
+
+# Log remote unlock output (debug level only) and remember its last line so
+# a failure can be reported with context. Never logs the passphrase.
+UNLOCK_OUTPUT_TAIL=''
+log_unlock_output() {
+  local output
+  output=$(sanitize_output <<< "$1")
+
+  if [[ -z "$output" ]]
+  then
+    return 0
+  fi
+
+  UNLOCK_OUTPUT_TAIL=$(tail -n 1 <<< "$output")
+
+  local line
+  while IFS= read -r line
+  do
+    log -d "${SSH_HOSTNAME}: ${line}"
+  done <<< "$output"
+}
+
+# Run CMD... with the passphrase on stdin; output goes through
+# log_unlock_output instead of straight to the journal.
+run_with_passphrase() {
+  local output
+  local rc=0
+
+  output=$("$@" 2>&1 <<< "$LUKS_PASSPHRASE") || rc=$?
+  log_unlock_output "$output"
+  return "$rc"
+}
+
 systemd-tty-unlock() {
   local ready_marker="LUKS-SSH-UNLOCK-READY-${BASHPID}-${RANDOM}"
   local remote_command="stty -echo && printf '\\n%s\\n' '${ready_marker}' && exec systemd-tty-ask-password-agent"
@@ -1185,7 +1245,7 @@ systemd-tty-unlock() {
   local ready=0
 
   coproc ask_password_agent {
-    _ssh -tt "$remote_command"
+    _ssh -o LogLevel=ERROR -tt "$remote_command" 2>&1
   }
 
   local ssh_pid="$!"
@@ -1202,16 +1262,13 @@ systemd-tty-unlock() {
       break
     fi
 
-    if [[ -n "$line" ]]
-    then
-      printf '%s\n' "$line" >&2
-    fi
+    log_unlock_output "$line"
   done
 
   if [[ "$ready" -ne 1 ]]
   then
     wait "$ssh_pid" || ssh_status=$?
-    echo "Failed to prepare the remote terminal for the LUKS passphrase" >&2
+    log -w "Failed to prepare the remote terminal on ${SSH_HOSTNAME} for the LUKS passphrase"
     if [[ "$ssh_status" -eq 0 ]]
     then
       ssh_status=1
@@ -1223,12 +1280,7 @@ systemd-tty-unlock() {
 
   while IFS= read -r -u "$output_fd" line
   do
-    line=${line%$'\r'}
-    if [[ -n "$LUKS_PASSPHRASE" ]]
-    then
-      line=${line//"$LUKS_PASSPHRASE"/[REDACTED]}
-    fi
-    printf '%s\n' "$line" >&2
+    log_unlock_output "$line"
   done
 
   wait "$ssh_pid"
@@ -1239,7 +1291,7 @@ luks_unlock() {
 
   case "$LUKS_TYPE" in
     raw|direct)
-      _ssh <<< "$LUKS_PASSPHRASE"
+      run_with_passphrase _ssh
       ;;
     systemd-tool|arch)
       local disk
@@ -1251,7 +1303,7 @@ luks_unlock() {
 
       if [[ -z "$mapper" ]]
       then
-        echo "Failed to determine root mapper name" >&2
+        log -w "Failed to determine the root mapper name on ${SSH_HOSTNAME}"
         return 1
       fi
 
@@ -1261,17 +1313,21 @@ luks_unlock() {
 
       if [[ -z "$disk" ]]
       then
-        echo "Failed to determine root disk path" >&2
+        log -w "Failed to determine the root disk path on ${SSH_HOSTNAME}"
         return 1
       fi
 
-      if ! _ssh cryptsetup luksOpen "$disk" "$mapper" - <<< "$LUKS_PASSPHRASE"
+      if ! run_with_passphrase _ssh cryptsetup luksOpen "$disk" "$mapper" -
       then
-        echo "Failed to unlock disk $disk" >&2
+        log -w "cryptsetup could not open ${disk} on ${SSH_HOSTNAME}"
         return 1
       fi
 
-      _ssh systemctl restart "systemd-cryptsetup@${mapper}"
+      local restart_output
+      restart_output=$(_ssh systemctl restart "systemd-cryptsetup@${mapper}" 2>&1)
+      local restart_rc=$?
+      log_unlock_output "$restart_output"
+      return "$restart_rc"
       ;;
 
     # https://github.com/gsauthof/dracut-sshd/issues/32
@@ -1281,7 +1337,7 @@ luks_unlock() {
 
     # https://github.com/pschmitt/luks-mount.sh
     luks-mount)
-      _ssh luks-mount <<< "$LUKS_PASSPHRASE"
+      run_with_passphrase _ssh luks-mount
       ;;
   esac
 }
@@ -1397,8 +1453,13 @@ run_tick() {
 
   if ! luks_unlock
   then
+    local reason=''
+    if [[ -n "$UNLOCK_OUTPUT_TAIL" ]]
+    then
+      reason=" Last output from ${SSH_HOSTNAME}: ${UNLOCK_OUTPUT_TAIL}."
+    fi
     log_state --notify unlock-failed failure \
-      "Failed to unlock ${SSH_HOSTNAME}: sending the LUKS passphrase did not succeed (method: ${LUKS_TYPE}). Retrying every ${SLEEP_INTERVAL}s"
+      "Failed to unlock ${SSH_HOSTNAME}: sending the LUKS passphrase did not succeed (method: ${LUKS_TYPE}).${reason} Retrying every ${SLEEP_INTERVAL}s"
     return 1
   fi
 
