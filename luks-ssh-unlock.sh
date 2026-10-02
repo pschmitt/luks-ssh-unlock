@@ -995,7 +995,7 @@ check_initrd_checksum() {
 }
 
 format_status_date() {
-  date --date="$1" '+%d %b %Y, %H:%M:%S %Z' 2>/dev/null || printf '%s\n' "$1"
+  LC_ALL=C date --date="$1" '+%d %b %Y, %H:%M:%S %Z' 2>/dev/null || printf '%s\n' "$1"
 }
 
 show_status() {

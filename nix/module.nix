@@ -118,7 +118,7 @@ let
               -n 1) || last_unlock=
             if [[ -n "$last_unlock" ]]
             then
-              last_unlock=$(date --date="''${last_unlock%% *}" '+%d %b %Y, %H:%M:%S %Z')
+              last_unlock=$(LC_ALL=C date --date="''${last_unlock%% *}" '+%d %b %Y, %H:%M:%S %Z')
               printf '\nLast successful unlock: %s\n' "$last_unlock"
             else
               printf '\nLast successful unlock: none recorded\n'
