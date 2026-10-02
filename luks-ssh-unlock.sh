@@ -994,6 +994,10 @@ check_initrd_checksum() {
   return 1
 }
 
+format_status_date() {
+  date --date="$1" '+%d %b %Y, %H:%M:%S %Z' 2>/dev/null || printf '%s\n' "$1"
+}
+
 show_status() {
   local reset='' green='' yellow='' red='' cyan='' blue='' magenta='' dim=''
   local key_check='not configured' signature_check='optional'
@@ -1035,7 +1039,7 @@ show_status() {
   printf '  %-19s %s%s%s\n' 'Host-key checks' "$key_color" "$key_check" "$reset"
   if [[ -n "$INITRD_CHECKSUM_FILE" && -r "$INITRD_CHECKSUM_FILE" ]]
   then
-    printf '  %-19s %s%s%s\n' 'Baseline refreshed' "$yellow" "$(stat -c '%y' "$INITRD_CHECKSUM_FILE")" "$reset"
+    printf '  %-19s %s%s%s\n' 'Baseline refreshed' "$yellow" "$(format_status_date "$(stat -c '%y' "$INITRD_CHECKSUM_FILE")")" "$reset"
   else
     printf '  %-19s %s%s%s\n' 'Baseline refreshed' "$yellow" 'not available' "$reset"
   fi
@@ -1137,7 +1141,7 @@ show_remote_metadata() {
   fi
 
   printf '  %-19s %s%s%s\n' 'Target uptime' "$value_color" "$target_uptime" "$reset"
-  printf '  %-19s %s%s%s\n' 'Checksum date' "$date_color" "$target_checksum_time" "$reset"
+  printf '  %-19s %s%s%s\n' 'Checksum date' "$date_color" "$(format_status_date "$target_checksum_time")" "$reset"
 }
 
 fetch_initrd_checksum() {
