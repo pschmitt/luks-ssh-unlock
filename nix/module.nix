@@ -34,7 +34,10 @@ let
     name: instance:
     pkgs.writeShellApplication {
       name = "luks-ssh-unlock-${name}";
-      runtimeInputs = [ pkgs.systemd ];
+      runtimeInputs = [
+        pkgs.coreutils
+        pkgs.systemd
+      ];
       text = ''
         if [[ "$EUID" -ne 0 ]]
         then
@@ -115,9 +118,10 @@ let
               -n 1) || last_unlock=
             if [[ -n "$last_unlock" ]]
             then
-              printf '\nLast reported unlock for ${name}: %s\n' "$last_unlock"
+              last_unlock=$(date --date="''${last_unlock%% *}" '+%Y-%m-%d %H:%M:%S %Z')
+              printf '\nLast successful unlock: %s\n' "$last_unlock"
             else
-              printf '\nLast reported unlock for ${name}: no successful unlock recorded\n'
+              printf '\nLast successful unlock: none recorded\n'
             fi
             printf '\nRecent daemon logs for ${name}:\n'
             log_lines=$(journalctl _SYSTEMD_UNIT=luks-ssh-unlock-${name}.service --no-pager --output=cat -n 5) || log_lines=
