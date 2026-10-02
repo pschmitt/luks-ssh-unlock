@@ -120,7 +120,7 @@ let
               printf '\nLast reported unlock for ${name}: no successful unlock recorded\n'
             fi
             printf '\nRecent daemon logs for ${name}:\n'
-            log_lines=$(journalctl --unit=luks-ssh-unlock-${name}.service --no-pager --output=cat -n 5) || log_lines=
+            log_lines=$(journalctl _SYSTEMD_UNIT=luks-ssh-unlock-${name}.service --no-pager --output=cat -n 5) || log_lines=
             log_color=
             log_reset=
             if [[ -n "''${FORCE_COLOR:-}" || ( -t 1 && "''${TERM:-}" != dumb ) ]]
