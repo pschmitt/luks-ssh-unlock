@@ -198,8 +198,109 @@ usage() {
   echo "                 Env var: EMAIL_SUBJECT"
 }
 
+# Usage: log [-d|-i|-w|-e] MESSAGE...
+# Under systemd, journald already timestamps every line, so we emit a syslog
+# priority prefix instead (journalctl then colors/filters by level).
 log() {
-  echo "$(date -Iseconds) $*" >&2
+  local level=info
+
+  case "$1" in
+    -d|--debug)
+      level=debug
+      shift
+      ;;
+    -i|--info)
+      shift
+      ;;
+    -w|--warning)
+      level=warning
+      shift
+      ;;
+    -e|--error)
+      level=error
+      shift
+      ;;
+  esac
+
+  if [[ "$level" == debug && -z "$DEBUG" ]]
+  then
+    return 0
+  fi
+
+  local prefix=''
+  local label=''
+
+  case "$level" in
+    debug)
+      prefix='<7>'
+      label='debug: '
+      ;;
+    warning)
+      prefix='<4>'
+      label='warning: '
+      ;;
+    error)
+      prefix='<3>'
+      label='error: '
+      ;;
+    *)
+      prefix='<6>'
+      ;;
+  esac
+
+  if [[ -z "${JOURNAL_STREAM:-}" ]]
+  then
+    prefix="$(date -Iseconds) "
+  fi
+
+  printf '%s%s%s\n' "$prefix" "$label" "$*" >&2
+}
+
+_state_file() {
+  printf '%s/luks-ssh-unlock-%s.state' "${TMPDIR%/}" "$SSH_HOSTNAME"
+}
+
+previous_state() {
+  local state_file
+  state_file=$(_state_file)
+
+  if [[ -r "$state_file" ]]
+  then
+    printf '%s' "$(< "$state_file")"
+  fi
+}
+
+# Usage: log_state [--notify] STATE LEVEL MESSAGE
+# Log MESSAGE only when the target's state differs from the previous tick, so
+# a steady state (booted, unreachable, ...) is reported once instead of every
+# SLEEP_INTERVAL. Ticks run in a subshell, hence the state file.
+log_state() {
+  local notify=''
+
+  if [[ "$1" == --notify ]]
+  then
+    notify=1
+    shift
+  fi
+
+  local state="$1"
+  local level="$2"
+  local message="$3"
+
+  if [[ "$state" == "$(previous_state)" && -z "$RUN_ONCE" ]]
+  then
+    log -d "${message} (unchanged)"
+    return 1
+  fi
+
+  printf '%s\n' "$state" > "$(_state_file)"
+
+  if [[ -n "$notify" ]]
+  then
+    log-notify "--${level}" "$message"
+  else
+    log "--${level}" "$message"
+  fi
 }
 
 template-msg() {
@@ -261,7 +362,17 @@ log-notify() {
   local event="$*"
 
   # Stdout
-  log "$event"
+  case "$event_type" in
+    warning)
+      log -w "$event"
+      ;;
+    failure)
+      log -e "$event"
+      ;;
+    *)
+      log "$event"
+      ;;
+  esac
 
   # Events file
   if [[ -n "$EVENTS_FILE" ]]
@@ -665,21 +776,47 @@ check_ssh_port() {
   # that some implementations of nc do not support the -4 and -6 flags.
   local resolved_hostname
   resolved_hostname=$(resolve-hostname)
-  log "Resolved $SSH_HOSTNAME to $resolved_hostname"
+  log -d "Resolved $SSH_HOSTNAME to $resolved_hostname"
 
   if [[ -n "$SSH_JUMPHOST" ]]
   then
-    echo | _ssh_jumphost nc "$resolved_hostname" "$SSH_PORT" 2>&1 | \
-      grep -iE "^SSH-"
+    _ssh_jumphost nc "$resolved_hostname" "$SSH_PORT" <<< "" 2>&1 | \
+      grep -qiE "^SSH-"
     return "$?"
   fi
 
   nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$resolved_hostname}" "$SSH_PORT"
 }
 
+# Return 0 if the target is in its initrd, 1 if it definitely is not, and 2
+# if we could not tell because SSH itself failed (bad key, host key mismatch,
+# jumphost down, ...). The SSH error is stored in INITRD_SSH_ERROR.
 is_initrd() {
-  SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd \
-    _ssh test -e /etc/initrd-release >/dev/null 2>&1
+  local output
+  local rc=0
+
+  INITRD_SSH_ERROR=''
+  output=$(
+    SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd \
+      _ssh test -e /etc/initrd-release 2>&1
+  ) || rc=$?
+
+  case "$rc" in
+    0)
+      return 0
+      ;;
+    1)
+      return 1
+      ;;
+  esac
+
+  INITRD_SSH_ERROR=$(
+    grep -v '^Warning: Permanently added' <<< "$output" | \
+      grep -v '^[[:space:]]*$' | \
+      tail -n 1
+  )
+  INITRD_SSH_ERROR="${INITRD_SSH_ERROR:-ssh exited with code ${rc}}"
+  return 2
 }
 
 verify_initrd_checksum_signature() {
@@ -880,9 +1017,15 @@ show_status() {
   then
     show_remote_metadata initrd
     printf '  %s✅ Initrd SSH is reachable%s\n' "$yellow" "$reset"
-    if ! is_initrd
+    local initrd_rc=0
+    is_initrd || initrd_rc=$?
+    if [[ "$initrd_rc" -eq 1 ]]
     then
       printf '  %s⚠️  /etc/initrd-release is absent; target is not in initrd%s\n' "$yellow" "$reset"
+      return 1
+    elif [[ "$initrd_rc" -ne 0 ]]
+    then
+      printf '  %s❌ Initrd check failed: %s%s\n' "$red" "$INITRD_SSH_ERROR" "$reset"
       return 1
     fi
     printf '  %s✅ Initrd environment detected%s\n' "$green" "$reset"
@@ -979,7 +1122,7 @@ fetch_initrd_checksum() {
 
   if [[ "$old_checksum" != "$new_checksum" ]]
   then
-    log "✅ Initrd checksum baseline updated for ${SSH_HOSTNAME}"
+    log "Updated the stored initrd checksum baseline of ${SSH_HOSTNAME}"
   elif [[ -n "$DEBUG" ]]
   then
     log "Initrd checksum baseline unchanged for ${SSH_HOSTNAME}"
@@ -1102,85 +1245,111 @@ luks_unlock() {
   esac
 }
 
-run_tick() {
-  # One-shot invocations must also avoid trying to unlock a host that is
-  # already booted. A failed healthcheck is only a signal to check the initrd;
-  # /etc/initrd-release is the explicit test before any unlock attempt.
+# Describe how we reach the target, for log messages.
+target_route() {
+  local route="${SSH_USERNAME}@${SSH_HOSTNAME}:${SSH_PORT}"
+
+  if [[ -n "$SSH_JUMPHOST" ]]
+  then
+    route+=" via ${SSH_JUMPHOST}"
+  fi
+
+  printf '%s' "$route"
+}
+
+# Return 0 if the target is booted and unlocked.
+healthcheck() {
   if [[ -n "$HEALTHCHECK_PORT" ]]
   then
     if nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$SSH_HOSTNAME}" "$HEALTHCHECK_PORT"
     then
-      fetch_initrd_checksum
-      log "✅ Healthcheck OK for ${SSH_HOSTNAME}"
-      if [[ -n "$RUN_ONCE" ]]
-      then
-        log "Host ${SSH_HOSTNAME} is already booted; skipping unlock attempt"
-      fi
       return 0
     fi
+    log -d "Healthcheck port ${HEALTHCHECK_PORT} on ${SSH_HOSTNAME} is closed"
   fi
 
-  if [[ -n "$HEALTHCHECK_REMOTE_CMD" ]]
+  if [[ -z "$HEALTHCHECK_REMOTE_CMD" ]]
   then
-    local healthcheck_output
-    if healthcheck_output=$(
-      SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
-        SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
-        SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
-        _ssh_remote_command "$HEALTHCHECK_REMOTE_CMD" 2>&1
-    )
-    then
-      fetch_initrd_checksum
-      log "✅ Healthcheck OK for ${SSH_HOSTNAME}"
-      if [[ -n "$RUN_ONCE" ]]
-      then
-        log "Host ${SSH_HOSTNAME} is already booted; skipping unlock attempt"
-      elif [[ -n "$DEBUG" ]]
-      then
-        log "Healthcheck output: ${healthcheck_output}"
-      fi
-      return 0
-    else
-      log "⚠️  Healthcheck failed for ${SSH_HOSTNAME}; checking initrd access"
-      if [[ -n "$DEBUG" && -n "$healthcheck_output" ]]
-      then
-        log "Healthcheck output: ${healthcheck_output}"
-      fi
-    fi
+    return 1
+  fi
+
+  local healthcheck_output
+  if healthcheck_output=$(
+    SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
+      SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
+      SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
+      _ssh_remote_command "$HEALTHCHECK_REMOTE_CMD" 2>&1
+  )
+  then
+    log -d "Healthcheck output: ${healthcheck_output}"
+    return 0
+  fi
+
+  log -d "Healthcheck failed for ${SSH_HOSTNAME}: ${healthcheck_output:-no output}"
+  return 1
+}
+
+run_tick() {
+  # One-shot invocations must also avoid trying to unlock a host that is
+  # already booted. A failed healthcheck is only a signal to check the initrd;
+  # /etc/initrd-release is the explicit test before any unlock attempt.
+  if healthcheck
+  then
+    fetch_initrd_checksum
+    log_state booted info "${SSH_HOSTNAME} is up and unlocked (healthcheck passed); nothing to do"
+    return 0
   fi
 
   if [[ -z "$SKIP_SSH_PORT_CHECK" ]] && ! check_ssh_port
   then
-    log "$SSH_HOSTNAME is not reachable on port $SSH_PORT" >&2
+    log_state unreachable warning \
+      "${SSH_HOSTNAME} is down: SSH on $(target_route) is not reachable. Retrying every ${SLEEP_INTERVAL}s"
     return 1
-  else
-    if ! is_initrd
-    then
-      log "✅ /etc/initrd-release is absent on ${SSH_HOSTNAME}; skipping unlock attempt"
-      return 0
-    fi
-
-    if [[ -n "$FORCE" ]]
-    then
-      log "WARNING: forced unlock bypassing initrd checksum/signature and SSH host-key validation for ${SSH_HOSTNAME}; client-key authentication remains enabled"
-    elif ! check_initrd_checksum
-    then
-      return 1
-    else
-      log "✅ Initrd checksum/signature validated for ${SSH_HOSTNAME}"
-    fi
-
-    log "Trying to unlock remotely ${SSH_HOSTNAME}"
-
-    if luks_unlock
-    then
-      log-notify -s "LUKS unlocked host at $SSH_HOSTNAME"
-    else
-      log-notify -f "Failed to unlock $SSH_HOSTNAME" >&2
-      return 1
-    fi
   fi
 
+  local initrd_rc=0
+  is_initrd || initrd_rc=$?
+
+  case "$initrd_rc" in
+    1)
+      log_state not-initrd warning \
+        "${SSH_HOSTNAME} answers on SSH but is not in its initrd (no /etc/initrd-release) and the healthcheck failed. Not unlocking; is it still booting or shutting down?"
+      return 0
+      ;;
+    2)
+      log_state --notify initrd-ssh-failed error \
+        "Cannot tell whether ${SSH_HOSTNAME} is waiting for its LUKS passphrase: SSH login to $(target_route) failed: ${INITRD_SSH_ERROR}. If it is in initrd, check that this unlocker's key and host keys are set up for the initrd SSH server"
+      return 1
+      ;;
+  esac
+
+  # Keep a failed unlock as the current state while we retry, so a host that
+  # keeps rejecting the passphrase is reported once, not on every tick.
+  if [[ "$(previous_state)" != unlock-failed ]]
+  then
+    log_state initrd info "${SSH_HOSTNAME} is waiting in initrd for its LUKS passphrase"
+  fi
+
+  if [[ -n "$FORCE" ]]
+  then
+    log -w "Forced unlock: skipping initrd checksum/signature and SSH host-key checks for ${SSH_HOSTNAME} (client-key authentication still applies)"
+  elif ! check_initrd_checksum
+  then
+    return 1
+  else
+    log "Initrd checksum and signature of ${SSH_HOSTNAME} are valid"
+  fi
+
+  log "Sending LUKS passphrase to ${SSH_HOSTNAME} (method: ${LUKS_TYPE})"
+
+  if ! luks_unlock
+  then
+    log_state --notify unlock-failed failure \
+      "Failed to unlock ${SSH_HOSTNAME}: sending the LUKS passphrase did not succeed (method: ${LUKS_TYPE}). Retrying every ${SLEEP_INTERVAL}s"
+    return 1
+  fi
+
+  log_state --notify unlocked success "Unlocked ${SSH_HOSTNAME}; it should finish booting shortly"
   return 0
 }
 
@@ -1208,12 +1377,7 @@ run_action() {
     return 2
   fi
 
-  local msg="LUKS rigmarole started (type: $LUKS_TYPE). I'll be trying to unlock ${SSH_HOSTNAME}"
-  if [[ -n "$SSH_JUMPHOST" ]]
-  then
-    msg+=" through ${SSH_JUMPHOST}"
-  fi
-  log "$msg"
+  log "Watching ${SSH_HOSTNAME} ($(target_route), LUKS method: ${LUKS_TYPE}), checking every ${SLEEP_INTERVAL}s"
 
   if [[ -n "$RUN_ONCE" ]]
   then
@@ -1231,7 +1395,7 @@ run_action() {
     do
       if (( count >= TICK_TIMEOUT ))
       then
-        log "Tick timed out after ${TICK_TIMEOUT}s, killing..."
+        log -w "Check of ${SSH_HOSTNAME} took longer than ${TICK_TIMEOUT}s; aborting it"
         kill "$pid"
 
         # Wait a bit for it to die
@@ -1242,7 +1406,7 @@ run_action() {
           ((kill_wait++))
           if (( kill_wait > 10 ))
           then
-            log "Tick process $pid refused to die, sending SIGKILL"
+            log -w "Check process $pid did not exit; sending SIGKILL"
             kill -9 "$pid"
             break
           fi
