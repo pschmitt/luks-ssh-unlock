@@ -36,6 +36,11 @@ let
       name = "luks-ssh-unlock-${name}";
       runtimeInputs = [ pkgs.systemd ];
       text = ''
+        if [[ "$EUID" -ne 0 ]]
+        then
+          exec /run/wrappers/bin/sudo -- "$0" "$@"
+        fi
+
         credential_properties=()
         ${optionalString (instance.passphraseFile != null) ''
           credential_properties+=(--property=${escapeShellArg "LoadCredential=luks-passphrase:${toString instance.passphraseFile}"})
@@ -72,6 +77,7 @@ let
             fi
             systemd-run \
               --system \
+              --quiet \
               --wait \
               --pipe \
               --collect \
@@ -102,6 +108,7 @@ let
             fi
             printf '\nUnlock service: %s%s%s\n' "$service_color" "$service_label" "$service_reset"
             last_unlock=$(journalctl \
+              --quiet \
               --grep=${escapeShellArg "LUKS unlocked host at ${name}"} \
               --no-pager \
               --output=short-iso \
@@ -134,6 +141,7 @@ let
 
         exec systemd-run \
           --system \
+          --quiet \
           --wait \
           --pipe \
           --collect \
