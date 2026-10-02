@@ -15,10 +15,19 @@ let
     optional (instance.passphraseFile != null) "luks-passphrase:${toString instance.passphraseFile}";
   pathOrStr = types.either types.path types.str;
   nullPathOrStr = types.nullOr pathOrStr;
+  # The bundle must hold a real binary per target arch, not the controller's
+  # own busybox twice; use a native package set for the foreign arch so it
+  # comes from the binary cache.
+  staticBusyboxFor =
+    system:
+    if pkgs.stdenv.hostPlatform.system == system then
+      pkgs.pkgsStatic.busybox
+    else
+      (import pkgs.path { inherit system; }).pkgsStatic.busybox;
   package = pkgs.callPackage ./package.nix {
     busyboxBundle = pkgs.callPackage ./busybox.nix {
-      busyboxAmd64 = pkgs.pkgsStatic.busybox;
-      busyboxArm64 = pkgs.pkgsStatic.busybox;
+      busyboxAmd64 = staticBusyboxFor "x86_64-linux";
+      busyboxArm64 = staticBusyboxFor "aarch64-linux";
     };
   };
   adHocUnlockers = mapAttrsToList (

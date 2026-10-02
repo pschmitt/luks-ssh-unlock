@@ -509,6 +509,9 @@ ensure_remote_script() {
     exit 1
   fi
 
+  # Callers run this copy as `bash <script>`: under Nix its shebang points
+  # at the controller's bash store path, which doesn't exist on the target
+  # (e.g. an aarch64 initrd checked from an x86_64 controller).
   scpio "$SCRIPT_PATH" "$host" "$ssh_user" "$remote_path" "+x"
 
   REMOTE_SCRIPT_PATH=$remote_path
@@ -576,7 +579,7 @@ measure_remote_live_root() {
   remote_script=$REMOTE_SCRIPT_PATH
 
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
-    "${remote_env[@]}" "$remote_script" __internal-remote-live-root
+    "${remote_env[@]}" bash "$remote_script" __internal-remote-live-root
 }
 
 measure_remote_initrd_image() {
@@ -593,7 +596,7 @@ measure_remote_initrd_image() {
   remote_script=$REMOTE_SCRIPT_PATH
 
   ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
-    "${remote_env[@]}" "$remote_script" __internal-remote-initrd-image "$initrd_path"
+    "${remote_env[@]}" bash "$remote_script" __internal-remote-initrd-image "$initrd_path"
 }
 
 diff_hashes() {
