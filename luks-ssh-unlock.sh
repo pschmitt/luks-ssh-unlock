@@ -140,7 +140,7 @@ usage() {
   echo "                 LUKS type to use (raw, systemd, systemd-tool, luks-mount)"
   echo "                 Env var: LUKS_TYPE"
   echo "  --luks-passphrase, --luks-password, --password, -p PASSWORD"
-  echo "                 LUKS password to use"
+  echo "                 LUKS password to use (insecure: visible in ps; prefer -F)"
   echo "                 Env var: LUKS_PASSPHRASE"
   echo "  --luks-passphrase-file, --luks-password-file, -F FILE"
   echo "                 LUKS password file to use"
@@ -1636,6 +1636,7 @@ main() {
         ;;
       --luks-passphrase|--luks-password|--password|-p)
         LUKS_PASSPHRASE="$2"
+        log -w "Passing the LUKS passphrase on the command line exposes it to other users (ps, /proc/*/cmdline) and shell history; use --luks-passphrase-file or LUKS_PASSPHRASE_FILE instead"
         shift 2
         ;;
       --luks-passphrase-file|--luks-password-file|-F)

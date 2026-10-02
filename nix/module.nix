@@ -295,6 +295,19 @@ in
         nameValuePair "luks-ssh-unlock/${name}.initrd_known_hosts" { text = instance.initrdKnownHosts; }
       ) (filterAttrs (_: instance: instance.initrdKnownHosts != "") cfg.instances));
 
+    warnings = concatLists (
+      mapAttrsToList (
+        name: instance:
+        optional (instance.passphrase != "") ''
+          services.luks-ssh-unlock.instances.${name}.passphrase is set: the LUKS
+          passphrase is written in plain text to an EnvironmentFile in the
+          world-readable Nix store (and into every system closure that contains it).
+          Use passphraseFile with a secret path (e.g. sops-nix or agenix) instead;
+          it is passed to the service as a systemd credential.
+        ''
+      ) cfg.instances
+    );
+
     assertions =
       (mapAttrsToList (name: instance: {
         assertion = !(instance.sshKnownHosts != "" && instance.sshKnownHostsFile != null);
@@ -519,7 +532,10 @@ in
             passphrase = mkOption {
               type = types.str;
               default = "";
-              description = "Passphrase for LUKS.";
+              description = ''
+                Passphrase for LUKS. Insecure: it ends up in plain text in the
+                world-readable Nix store. Prefer {option}`passphraseFile`.
+              '';
             };
             passphraseFile = mkOption {
               type = nullPathOrStr;
