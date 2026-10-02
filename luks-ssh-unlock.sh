@@ -570,8 +570,9 @@ _ssh() {
   if [[ -n "$SSH_JUMPHOST" ]]
   then
     # We can't use JumpHost here since it does not inherit the
-    # StrictHostKeyChecking settings etc
-    extra_args=(-o "ProxyCommand=ssh ${ssh_opts[*]} -W %h:%p -p '${SSH_JUMPHOST_PORT}' -i '${SSH_JUMPHOST_KEY}' '${SSH_JUMPHOST_USERNAME}@${SSH_JUMPHOST}'")
+    # StrictHostKeyChecking settings etc. Target-only options (HostName,
+    # HostKeyAlias) must not leak into the jumphost connection.
+    extra_args=(-o "$(_jumphost_proxy_command "$known_hosts_file")")
   fi
 
   ssh -F /dev/null \
@@ -788,6 +789,35 @@ check_ssh_port() {
   nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$resolved_hostname}" "$SSH_PORT"
 }
 
+# With FORCE_IPV4/FORCE_IPV6, resolve the target once per tick and connect to
+# that address, keeping the hostname for host-key checks. Otherwise a jumphost
+# resolves "-W host:port" itself and may try stale AAAA records first (each
+# costing a connect timeout), regardless of our -4/-6.
+pin_connect_address() {
+  if [[ -n "$SSH_CONNECT_ADDRESS" ]] || is-an-ip-address "$SSH_HOSTNAME"
+  then
+    return 0
+  fi
+
+  if [[ -z "$FORCE_IPV4" && -z "$FORCE_IPV6" ]]
+  then
+    return 0
+  fi
+
+  local address
+  address=$(resolve-hostname)
+
+  if ! is-an-ip-address "$address"
+  then
+    log -d "Could not resolve ${SSH_HOSTNAME}; connecting by name"
+    return 0
+  fi
+
+  SSH_CONNECT_ADDRESS="$address"
+  SSH_HOSTKEY_ALIAS="${SSH_HOSTKEY_ALIAS:-$SSH_HOSTNAME}"
+  log -d "Connecting to ${SSH_HOSTNAME} at ${SSH_CONNECT_ADDRESS}"
+}
+
 # Return 0 if the target is in its initrd, 1 if it definitely is not, and 2
 # if we could not tell because SSH itself failed (bad key, host key mismatch,
 # jumphost down, ...). The SSH error is stored in INITRD_SSH_ERROR.
@@ -912,6 +942,15 @@ check_initrd_checksum() {
     checksum_args+=(--known-hosts-file "$known_hosts_file")
   fi
 
+  if [[ -n "$SSH_CONNECT_ADDRESS" ]]
+  then
+    checksum_args+=(--ssh-option "HostName=${SSH_CONNECT_ADDRESS}")
+  fi
+  if [[ -n "$SSH_HOSTKEY_ALIAS" ]]
+  then
+    checksum_args+=(--ssh-option "HostKeyAlias=${SSH_HOSTKEY_ALIAS}")
+  fi
+
   if [[ -n "$SSH_JUMPHOST" ]]
   then
     local default_known_hosts_file
@@ -989,6 +1028,8 @@ show_status() {
     printf '  %-19s %s\n' 'Baseline refreshed' 'not available'
   fi
   printf '\n%sTarget state%s\n' "$cyan" "$reset"
+
+  pin_connect_address
 
   if [[ -n "$HEALTHCHECK_PORT" ]] && nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$SSH_HOSTNAME}" "$HEALTHCHECK_PORT"
   then
@@ -1273,9 +1314,19 @@ healthcheck() {
     return 1
   fi
 
+  local connect_address="$SSH_CONNECT_ADDRESS"
+  local hostkey_alias="$SSH_HOSTKEY_ALIAS"
+  if [[ -n "$HEALTHCHECK_REMOTE_HOSTNAME" && "$HEALTHCHECK_REMOTE_HOSTNAME" != "$SSH_HOSTNAME" ]]
+  then
+    connect_address=''
+    hostkey_alias=''
+  fi
+
   local healthcheck_output
   if healthcheck_output=$(
-    SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
+    SSH_CONNECT_ADDRESS="$connect_address" \
+      SSH_HOSTKEY_ALIAS="$hostkey_alias" \
+      SSH_HOSTNAME=${HEALTHCHECK_REMOTE_HOSTNAME:-$SSH_HOSTNAME} \
       SSH_USERNAME=${HEALTHCHECK_REMOTE_USERNAME:-$SSH_USERNAME} \
       SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
       _ssh_remote_command "$HEALTHCHECK_REMOTE_CMD" 2>&1
@@ -1293,6 +1344,8 @@ run_tick() {
   # One-shot invocations must also avoid trying to unlock a host that is
   # already booted. A failed healthcheck is only a signal to check the initrd;
   # /etc/initrd-release is the explicit test before any unlock attempt.
+  pin_connect_address
+
   if healthcheck
   then
     fetch_initrd_checksum
