@@ -995,8 +995,9 @@ check_initrd_checksum() {
 }
 
 show_status() {
-  local reset='' green='' yellow='' red='' cyan='' dim=''
-  local key_check='not configured'
+  local reset='' green='' yellow='' red='' cyan='' blue='' magenta='' dim=''
+  local key_check='not configured' signature_check='optional'
+  local key_color='' signature_color=''
 
   if [[ -n "$FORCE_COLOR" || ( -t 1 && "${TERM:-}" != dumb ) ]]
   then
@@ -1005,27 +1006,38 @@ show_status() {
     yellow=$'\033[33m'
     red=$'\033[31m'
     cyan=$'\033[36m'
+    blue=$'\033[34m'
+    magenta=$'\033[35m'
     dim=$'\033[2m'
+  fi
+
+  key_color=$yellow
+  signature_color=$yellow
+  if [[ -n "$INITRD_CHECKSUM_REQUIRE_SIGNATURE" ]]
+  then
+    signature_check=required
+    signature_color=$green
   fi
 
   if [[ -n "$SSH_KNOWN_HOSTS_FILE" || -n "$SSH_KNOWN_HOSTS" ]] &&
     [[ -n "$SSH_INITRD_KNOWN_HOSTS_FILE" || -n "$SSH_INITRD_KNOWN_HOSTS" ]]
   then
     key_check='regular and initrd keys configured'
+    key_color=$green
   fi
 
   printf '%sLUKS SSH unlock: %s%s\n' "$cyan" "$SSH_HOSTNAME" "$reset"
-  printf '  %-19s %s@%s:%s\n' 'SSH target' "$SSH_USERNAME" "$SSH_HOSTNAME" "$SSH_PORT"
-  printf '  %-19s %s\n' 'LUKS type' "$LUKS_TYPE"
-  printf '  %-19s %s\n' 'Healthcheck' "${HEALTHCHECK_REMOTE_CMD:-not configured}"
-  printf '  %-19s %s\n' 'Initrd checksum' "${INITRD_CHECKSUM_FILE:-not configured}"
-  printf '  %-19s %s\n' 'Signature check' "$([[ -n "$INITRD_CHECKSUM_REQUIRE_SIGNATURE" ]] && printf required || printf optional)"
-  printf '  %-19s %s\n' 'Host-key checks' "$key_check"
+  printf '  %-19s %s%s@%s:%s%s\n' 'SSH target' "$cyan" "$SSH_USERNAME" "$SSH_HOSTNAME" "$SSH_PORT" "$reset"
+  printf '  %-19s %s%s%s\n' 'LUKS type' "$magenta" "$LUKS_TYPE" "$reset"
+  printf '  %-19s %s%s%s\n' 'Healthcheck' "$blue" "${HEALTHCHECK_REMOTE_CMD:-not configured}" "$reset"
+  printf '  %-19s %s%s%s\n' 'Initrd checksum' "$cyan" "${INITRD_CHECKSUM_FILE:-not configured}" "$reset"
+  printf '  %-19s %s%s%s\n' 'Signature check' "$signature_color" "$signature_check" "$reset"
+  printf '  %-19s %s%s%s\n' 'Host-key checks' "$key_color" "$key_check" "$reset"
   if [[ -n "$INITRD_CHECKSUM_FILE" && -r "$INITRD_CHECKSUM_FILE" ]]
   then
-    printf '  %-19s %s\n' 'Baseline refreshed' "$(stat -c '%y' "$INITRD_CHECKSUM_FILE")"
+    printf '  %-19s %s%s%s\n' 'Baseline refreshed' "$yellow" "$(stat -c '%y' "$INITRD_CHECKSUM_FILE")" "$reset"
   else
-    printf '  %-19s %s\n' 'Baseline refreshed' 'not available'
+    printf '  %-19s %s%s%s\n' 'Baseline refreshed' "$yellow" 'not available' "$reset"
   fi
   printf '\n%sTarget state%s\n' "$cyan" "$reset"
 
@@ -1033,7 +1045,7 @@ show_status() {
 
   if [[ -n "$HEALTHCHECK_PORT" ]] && nc -z -w 2 "${SSH_CONNECT_ADDRESS:-$SSH_HOSTNAME}" "$HEALTHCHECK_PORT"
   then
-    show_remote_metadata default
+    show_remote_metadata default "$cyan" "$yellow" "$reset"
     printf '  %s✅ Unlocked; healthcheck port %s is open%s\n' "$green" "$HEALTHCHECK_PORT" "$reset"
     return 0
   fi
@@ -1045,7 +1057,7 @@ show_status() {
       SSH_KNOWN_HOSTS_TYPE_OVERRIDE=${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default} \
       _ssh_remote_command "$HEALTHCHECK_REMOTE_CMD" >/dev/null 2>&1
     then
-      show_remote_metadata "${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default}"
+      show_remote_metadata "${SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE:-default}" "$cyan" "$yellow" "$reset"
       printf '  %s✅ Unlocked; normal-boot healthcheck passed%s\n' "$green" "$reset"
       return 0
     fi
@@ -1056,7 +1068,7 @@ show_status() {
 
   if SSH_KNOWN_HOSTS_TYPE_OVERRIDE=initrd _ssh true >/dev/null 2>&1
   then
-    show_remote_metadata initrd
+    show_remote_metadata initrd "$cyan" "$yellow" "$reset"
     printf '  %s✅ Initrd SSH is reachable%s\n' "$yellow" "$reset"
     local initrd_rc=0
     is_initrd || initrd_rc=$?
@@ -1101,6 +1113,7 @@ show_status() {
 
 show_remote_metadata() {
   local known_hosts_type="$1"
+  local value_color="${2:-}" date_color="${3:-}" reset="${4:-}"
   local target_uptime='unavailable'
   local target_checksum_time='unavailable'
 
@@ -1123,8 +1136,8 @@ show_remote_metadata() {
     target_checksum_time='unavailable'
   fi
 
-  printf '  %-19s %s\n' 'Target uptime' "$target_uptime"
-  printf '  %-19s %s\n' 'Target checksum' "$target_checksum_time"
+  printf '  %-19s %s%s%s\n' 'Target uptime' "$value_color" "$target_uptime" "$reset"
+  printf '  %-19s %s%s%s\n' 'Checksum date' "$date_color" "$target_checksum_time" "$reset"
 }
 
 fetch_initrd_checksum() {
@@ -1747,3 +1760,5 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
   main "$@"
 fi
+
+# vim: set ft=sh et ts=2 sw=2 :
