@@ -10,6 +10,7 @@
   dig,
   jq,
   gnugrep,
+  gnused,
   msmtp,
   netcat-gnu,
   openssh,
@@ -47,6 +48,7 @@ stdenv.mkDerivation {
         dig
         curl
         gnugrep
+        gnused
         jq
         msmtp # for sendmail TODO: allow overriding this via build var
         netcat-gnu
