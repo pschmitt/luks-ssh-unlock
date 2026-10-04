@@ -1266,8 +1266,14 @@ systemd-tty-unlock() {
   }
 
   local ssh_pid="$!"
-  local output_fd="${ask_password_agent[0]}"
-  local input_fd="${ask_password_agent[1]}"
+  local output_fd
+  local input_fd
+
+  # Bash closes the coprocess' original descriptors when its child exits.
+  # Keep our own duplicates so reads after the remote agent exits see EOF
+  # instead of failing with "invalid file descriptor".
+  exec {output_fd}<&"${ask_password_agent[0]}"
+  exec {input_fd}>&"${ask_password_agent[1]}"
 
   # Do not send the passphrase until the remote PTY has disabled echo.
   while IFS= read -r -u "$output_fd" line
@@ -1285,6 +1291,8 @@ systemd-tty-unlock() {
   if [[ "$ready" -ne 1 ]]
   then
     wait "$ssh_pid" || ssh_status=$?
+    exec {output_fd}<&-
+    exec {input_fd}>&-
     log -w "Failed to prepare the remote terminal on ${SSH_HOSTNAME} for the LUKS passphrase"
     if [[ "$ssh_status" -eq 0 ]]
     then
@@ -1300,7 +1308,10 @@ systemd-tty-unlock() {
     log_unlock_output "$line"
   done
 
-  wait "$ssh_pid"
+  wait "$ssh_pid" || ssh_status=$?
+  exec {output_fd}<&-
+  exec {input_fd}>&-
+  return "$ssh_status"
 }
 
 luks_unlock() {
