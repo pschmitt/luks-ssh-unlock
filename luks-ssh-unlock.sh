@@ -258,13 +258,11 @@ log() {
   printf '%s%s%s\n' "$prefix" "$label" "$*" >&2
 }
 
-# Describes what happens after a failed tick: one-shot runs never retry.
+# Retry notice for failed ticks; empty for one-shot runs, which never retry.
 retry_hint() {
-  if [[ -n "$RUN_ONCE" ]]
+  if [[ -z "$RUN_ONCE" ]]
   then
-    printf 'Not retrying (one-shot run)'
-  else
-    printf 'Retrying every %ss' "$SLEEP_INTERVAL"
+    printf ' Retrying every %ss' "$SLEEP_INTERVAL"
   fi
 }
 
@@ -1455,7 +1453,7 @@ run_tick() {
   if [[ -z "$SKIP_SSH_PORT_CHECK" ]] && ! check_ssh_port
   then
     log_state unreachable warning \
-      "${SSH_HOSTNAME} is down: SSH on $(target_route) is not reachable. $(retry_hint)"
+      "${SSH_HOSTNAME} is down: SSH on $(target_route) is not reachable.$(retry_hint)"
     return 1
   fi
 
@@ -1500,7 +1498,7 @@ run_tick() {
       reason=" Last output from ${SSH_HOSTNAME}: ${UNLOCK_OUTPUT_TAIL}."
     fi
     log_state --notify unlock-failed failure \
-      "Failed to unlock ${SSH_HOSTNAME}: sending the LUKS passphrase did not succeed (method: ${LUKS_TYPE}).${reason} $(retry_hint)"
+      "Failed to unlock ${SSH_HOSTNAME}: sending the LUKS passphrase did not succeed (method: ${LUKS_TYPE}).${reason}$(retry_hint)"
     return 1
   fi
 
