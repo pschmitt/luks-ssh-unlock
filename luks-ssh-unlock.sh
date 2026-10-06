@@ -199,8 +199,9 @@ usage() {
 }
 
 # Usage: log [-d|-i|-w|-e] MESSAGE...
-# Under systemd, journald already timestamps every line, so we emit a syslog
-# priority prefix instead (journalctl then colors/filters by level).
+# Messages carry no timestamp of their own: under systemd, journald already
+# timestamps every line, so we emit a syslog priority prefix instead
+# (journalctl then colors/filters by level).
 log() {
   local level=info
 
@@ -248,9 +249,10 @@ log() {
       ;;
   esac
 
+  # Outside journald there is no syslog priority parser: drop the prefix
   if [[ -z "${JOURNAL_STREAM:-}" ]]
   then
-    prefix="$(date -Iseconds) "
+    prefix=''
   fi
 
   printf '%s%s%s\n' "$prefix" "$label" "$*" >&2
