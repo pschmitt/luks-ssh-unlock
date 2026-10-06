@@ -917,6 +917,8 @@ check_initrd_checksum() {
     return 1
   fi
 
+  log "Starting initrd checksum and signature check for ${SSH_HOSTNAME}"
+
   if ! verify_initrd_checksum_signature
   then
     log-notify -w "Skipping unlock attempt for ${SSH_HOSTNAME} due to initrd checksum signature failure"
@@ -982,6 +984,7 @@ check_initrd_checksum() {
     then
       log "$checksum_output"
     fi
+    log "Initrd checksum and signature check passed for ${SSH_HOSTNAME}"
     return 0
   fi
 
@@ -1473,8 +1476,6 @@ run_tick() {
   elif ! check_initrd_checksum
   then
     return 1
-  else
-    log "Initrd checksum and signature of ${SSH_HOSTNAME} are valid"
   fi
 
   log "Sending LUKS passphrase to ${SSH_HOSTNAME} (method: ${LUKS_TYPE})"
