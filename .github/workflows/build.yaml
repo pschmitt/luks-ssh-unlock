@@ -2,16 +2,70 @@ name: Build
 
 on:
   push:
+    branches:
+      - main
+  pull_request:
   schedule:
-    - cron:  '* 16 * * *'
+    - cron: '* 16 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  image_name: pschmitt/luks-ssh-unlock
+  platforms: linux/amd64,linux/arm64/v8
 
 jobs:
   build:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
     runs-on: ubuntu-latest
-    env:
-      image_name: pschmitt/luks-ssh-unlock
-      platforms: linux/amd64,linux/arm64/v8
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: ${{ env.platforms }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          version: latest
+          use: true
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.image_name }}
+            ghcr.io/${{ env.image_name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build multi-arch image without publishing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ env.platforms }}
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
@@ -35,11 +89,9 @@ jobs:
           platforms: ${{ env.platforms }}
 
       - name: Set up Docker Buildx
-        id: buildx
         uses: docker/setup-buildx-action@v4
         with:
           version: latest
-          install: true
           use: true
 
       - name: Extract metadata (tags, labels)
@@ -50,6 +102,7 @@ jobs:
             ${{ env.image_name }}
             ghcr.io/${{ env.image_name }}
           tags: |
+            type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push multi-arch image
@@ -57,7 +110,7 @@ jobs:
         with:
           context: .
           platforms: ${{ env.platforms }}
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
