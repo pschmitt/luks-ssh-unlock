@@ -1,0 +1,11 @@
+name: nix-flake-lock
+on:
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  update:
+    uses: pschmitt/ci-workflows/.github/workflows/nix-flake-lock.yaml@main
