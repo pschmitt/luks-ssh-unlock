@@ -9,8 +9,12 @@ Tags: `latest` and `main` follow the main branch, `sha-<commit>` pins one
 build. The GHCR image carries a build provenance attestation:
 
 ```sh
-gh attestation verify oci://ghcr.io/pschmitt/luks-ssh-unlock:latest -R pschmitt/luks-ssh-unlock
+gh attestation verify oci://ghcr.io/pschmitt/luks-ssh-unlock:latest \
+  -R pschmitt/luks-ssh-unlock --signer-repo pschmitt/ci-workflows
 ```
+
+The attestation is signed by the shared build workflow in
+`pschmitt/ci-workflows`, hence `--signer-repo`.
 
 ## Run
 
