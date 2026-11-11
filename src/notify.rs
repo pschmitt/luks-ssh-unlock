@@ -125,10 +125,11 @@ impl Ctx {
             if let Some(title) = &n.apprise_title {
                 body["title"] = self.template(title, event, message).into();
             }
-            let agent = ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(15))
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
                 .user_agent(concat!("luks-ssh-unlock/", env!("CARGO_PKG_VERSION")))
-                .build();
+                .build()
+                .into();
             if let Err(e) = agent.post(url).send_json(body) {
                 self.log.warn(format!("Apprise notification failed: {e}"));
             }
