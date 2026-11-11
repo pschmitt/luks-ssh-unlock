@@ -52,6 +52,8 @@ options and the container interface are compatible.
   (about 150 KB every 30 s per target); it is now copied only when its
   fingerprint (sizes, modification times, signature) changes.
 - The daily image rebuild ran every minute between 16:00 and 16:59.
+- `nixosModules.default` can be imported by several modules of one system;
+  it is imported once.
 - The module's `status` looked for a log message that was never written, so
   the last successful unlock was always "none recorded".
 

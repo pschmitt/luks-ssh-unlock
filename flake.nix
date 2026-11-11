@@ -61,6 +61,8 @@
                   inherit system;
                   modules = [
                     self.nixosModules.default
+                    # Importing it twice (nixos-config does) must not define the package twice.
+                    self.nixosModules.default
                     {
                       services.luks-ssh-unlock = {
                         enable = true;
@@ -131,14 +133,21 @@
       };
 
       # The flake's own package is the default, so the module needs no overlay.
-      nixosModules.default =
-        { lib, pkgs, ... }:
-        {
-          imports = [ ./nix/module.nix ];
-          services.luks-ssh-unlock.package =
-            lib.mkDefault
-              self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-        };
+      # The key makes NixOS import it once, however many modules import it.
+      nixosModules.default = {
+        key = "github:pschmitt/luks-ssh-unlock#nixosModules.default";
+        imports = [
+          ./nix/module.nix
+          (
+            { lib, pkgs, ... }:
+            {
+              services.luks-ssh-unlock.package =
+                lib.mkDefault
+                  self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+            }
+          )
+        ];
+      };
       nixosModules.luks-ssh-unlock = self.nixosModules.default;
     };
 }
