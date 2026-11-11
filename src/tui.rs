@@ -1073,10 +1073,22 @@ impl App {
             )));
         } else if let Some(r) = &t.report {
             let (icon, label, color) = summary(t);
-            lines.push(Line::from(Span::styled(
+            let mut head = vec![Span::styled(
                 format!("{icon} {label}"),
                 Style::new().fg(color).bold(),
-            )));
+            )];
+            // The healthcheck is what tells a booted host from one still
+            // waiting, so its result belongs next to the state.
+            if r.healthcheck.is_some() {
+                let ok = matches!(r.state, TargetState::Unlocked(_));
+                head.push(Span::raw("   "));
+                head.push(Span::styled(
+                    "●",
+                    Style::new().fg(if ok { Color::Green } else { Color::Red }),
+                ));
+                head.push(Span::raw(" healthcheck"));
+            }
+            lines.push(Line::from(head));
             let detail = match &r.state {
                 TargetState::Unlocked(d) | TargetState::Initrd(d) | TargetState::SshFailed(d) => {
                     d.clone()
@@ -1084,7 +1096,10 @@ impl App {
                 TargetState::NotInitrd => "SSH answers, but this is not the initrd".into(),
                 TargetState::Unreachable => "nothing answers on SSH".into(),
             };
-            lines.push(Line::from(Span::raw(detail)));
+            // "healthcheck passed" is the indicator above.
+            if !matches!(r.state, TargetState::Unlocked(_)) {
+                lines.push(Line::from(Span::raw(detail)));
+            }
             lines.push(Line::default());
             lines.push(row("Route", r.route.clone(), Style::new().cyan()));
             lines.push(row(
@@ -1191,14 +1206,14 @@ impl App {
                     Level::Error => Style::new().red(),
                 };
                 Line::from(vec![
-                    Span::styled(
-                        format!(
-                            "{} {} ",
-                            l.at.format("%H:%M:%S"),
-                            if l.service { "svc" } else { "tui" }
-                        ),
-                        Style::new().dim(),
-                    ),
+                    Span::styled(format!("{} ", l.at.format("%H:%M:%S")), Style::new().dim()),
+                    // Magenta for what the service logged, blue for what this
+                    // dashboard did, so the two streams are easy to tell apart.
+                    if l.service {
+                        Span::styled("svc ", Style::new().magenta())
+                    } else {
+                        Span::styled("tui ", Style::new().light_blue())
+                    },
                     Span::styled(l.message.clone(), style),
                 ])
             })

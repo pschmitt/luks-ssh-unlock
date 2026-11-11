@@ -25,6 +25,9 @@ options and the container interface are compatible.
   and key hints are shortened. The target list is sized to its content, the
   borders between panes can be dragged with the mouse, `Shift`+arrows or `Tab`
   move the focus between panes, and `l` shows the activity full screen.
+  The details show the healthcheck result as a green or red dot next to the
+  state, instead of repeating the command; the activity marks service lines
+  (magenta) and dashboard lines (blue) with different colors.
 - When run interactively without the permissions to read keys, passphrases
   or the target configuration, the command re-runs itself with `sudo`
   (`--no-sudo` or `LUKS_SSH_UNLOCK_NO_SUDO=1` disable this). Without a

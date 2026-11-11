@@ -141,10 +141,8 @@ impl Ctx {
                 s.healthcheck.known_hosts
             };
             (report.uptime, report.remote_baseline_date) = self.remote_metadata(kind)?;
-            report.state = TargetState::Unlocked(match &report.healthcheck {
-                Some(h) => format!("healthcheck {h} passed"),
-                None => "healthcheck passed".into(),
-            });
+            // The command itself is shown once, in the "Healthcheck" row.
+            report.state = TargetState::Unlocked("healthcheck passed".into());
         } else {
             if s.healthcheck.port.is_none() && s.healthcheck.command.is_none() {
                 note(
