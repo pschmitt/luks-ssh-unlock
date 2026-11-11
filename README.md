@@ -1,5 +1,5 @@
 <div align="center">
-  <a href="assets/fresco.png"><img src="assets/fresco.jpg" width="800" alt="A medieval fresco: a procession rides to the LUKS castle, led by a banner reading SSH, a knight with a terminal and a knight with a Tux shield, while a crowned king raises a golden key towards the padlocked gate"></a>
+  <a href="assets/fresco-full.jpg"><img src="assets/fresco.jpg" width="800" alt="A medieval fresco: a procession rides to the LUKS castle, led by a banner reading SSH, a knight with a terminal and a knight with a Tux shield, while a crowned king raises a golden key towards the padlocked gate"></a>
   <p align="right"><sub><em>Per clavem secretam, porta aperitur.</em></sub></p>
   <h1 align="center">luks-ssh-unlock</h1>
   <p>
