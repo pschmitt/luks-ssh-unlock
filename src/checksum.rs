@@ -151,14 +151,39 @@ impl Ctx {
         Ok(ChecksumResult::Failed(reason))
     }
 
+    /// A small fingerprint of the target's baseline (sizes, mtimes and the
+    /// signature), so the whole baseline is only copied when it changed.
+    fn remote_baseline_fingerprint(&self) -> Result<Option<String>> {
+        let remote = "cd /etc/initrd-checksum && stat -c '%n %s %Y' checksum checksum.sig meta.json 2>/dev/null; cat checksum.sig 2>/dev/null";
+        let out = self.exec(
+            self.ssh(&self.endpoint(), KnownHostsKind::Default, &[], Some(remote)),
+            None,
+        )?;
+        let text = out.stdout.trim();
+        Ok((!text.is_empty()).then(|| text.to_string()))
+    }
+
     /// Copy `/etc/initrd-checksum/` from the booted target into
     /// `<dir>/<hostname>/`, so the next boot can be verified against it.
+    /// Skipped while the target's baseline fingerprint is unchanged.
     pub fn fetch_initrd_checksum(&self) -> Result<()> {
         let Some(dir) = &self.s.initrd.dir else {
             return Ok(());
         };
         let host_dir = dir.join(&self.s.hostname);
         let checksum = host_dir.join("initrd-checksum").join("checksum");
+        let stamp = host_dir.join(".fingerprint");
+        let fingerprint = self.remote_baseline_fingerprint()?;
+        if let Some(fp) = &fingerprint
+            && checksum.is_file()
+            && fs::read_to_string(&stamp).ok().as_deref() == Some(fp.as_str())
+        {
+            self.log.debug(format!(
+                "Initrd baseline of {} unchanged; not fetching",
+                self.s.hostname
+            ));
+            return Ok(());
+        }
         let before = fs::read(&checksum).ok();
         if let Err(e) = fs::create_dir_all(&host_dir) {
             self.log
@@ -176,6 +201,12 @@ impl Ctx {
                 out.error_line().unwrap_or_else(|| "scp failed".into())
             ));
             return Ok(());
+        }
+        if let Some(fp) = &fingerprint
+            && let Err(e) = fs::write(&stamp, fp)
+        {
+            self.log
+                .warn(format!("Cannot write {}: {e}", stamp.display()));
         }
         if fs::read(&checksum).ok() != before {
             self.log.info(format!(

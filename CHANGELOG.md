@@ -48,6 +48,9 @@ options and the container interface are compatible.
 - `dig +short` output starting with a CNAME made the jumphost probe connect
   to the CNAME's name.
 - The container entrypoint failed when no msmtp configuration was mounted.
+- While a host was up, its whole initrd baseline was copied on every check
+  (about 150 KB every 30 s per target); it is now copied only when its
+  fingerprint (sizes, modification times, signature) changes.
 - The daily image rebuild ran every minute between 16:00 and 16:59.
 - The module's `status` looked for a log message that was never written, so
   the last successful unlock was always "none recorded".
@@ -63,6 +66,7 @@ options and the container interface are compatible.
   too open for OpenSSH.
 - The jumphost's host key is checked against both known_hosts sets.
 - Debug mail no longer includes the environment.
+- The README is a short overview; the details moved to `docs/`.
 - Status probes (CLI `status` and the dashboard) never send notifications.
   The dashboard skips the initrd checksum while probing; it always runs
   before an unlock.

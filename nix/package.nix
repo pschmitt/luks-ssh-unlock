@@ -68,8 +68,10 @@ let
       ../src
     ];
   };
-  # Tools the unlocker runs: OpenSSH for every connection, msmtp as sendmail.
+  # Tools the unlocker runs: OpenSSH for every connection, msmtp as sendmail,
+  # and coreutils for msmtp's `passwordeval` commands (usually `cat FILE`).
   runtimePath = lib.makeBinPath [
+    coreutils
     openssh
     msmtp
   ];
