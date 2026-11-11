@@ -3,8 +3,10 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -29,6 +31,8 @@ use crate::settings::{GlobalOpts, Settings, parse_env_file};
 use crate::status::{Report, Severity, TargetState};
 
 const LOG_LINES: usize = 500;
+/// Minimum time between two checks triggered by new journal lines.
+const EVENT_PROBE_GAP: Duration = Duration::from_secs(2);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const WHEEL_LINES: usize = 3;
 pub const DEFAULT_CONFIG_DIR: &str = "/etc/luks-ssh-unlock";
@@ -87,7 +91,6 @@ pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
 enum Cmd {
     Probe,
     Unlock { force: bool },
-    Journal,
 }
 
 enum Msg {
@@ -95,7 +98,67 @@ enum Msg {
     Log(usize, LogLine),
     Busy(usize, Option<&'static str>),
     Done(usize, Option<State>),
+    /// The service journal's recent history, once at start.
     Journal(usize, Vec<String>),
+    /// One new line of the service journal.
+    JournalLine(usize, String),
+    Unit(usize, Option<UnitInfo>),
+}
+
+/// What systemd says about the target's service.
+struct UnitInfo {
+    load: String,
+    active: String,
+    sub: String,
+    enabled: String,
+}
+
+impl UnitInfo {
+    fn query(unit: &str) -> Option<Self> {
+        let out = Command::new("systemctl")
+            .args([
+                "show",
+                "--property=LoadState,ActiveState,SubState,UnitFileState",
+                unit,
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let get = |k: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(k)?.strip_prefix('='))
+                .unwrap_or_default()
+                .to_string()
+        };
+        Some(Self {
+            load: get("LoadState"),
+            active: get("ActiveState"),
+            sub: get("SubState"),
+            enabled: get("UnitFileState"),
+        })
+    }
+
+    /// Why the service will not unlock this target on its own, if it won't.
+    fn warning(&self) -> Option<String> {
+        if self.load == "not-found" {
+            return None; // not run as a service here
+        }
+        if self.active != "active" {
+            return Some(format!("service {} ({})", self.active, self.sub));
+        }
+        match self.enabled.as_str() {
+            "disabled" | "masked" => Some(format!(
+                "service is {} and will not start at boot",
+                self.enabled
+            )),
+            _ => None,
+        }
+    }
 }
 
 struct Target {
@@ -106,7 +169,8 @@ struct Target {
     busy: Option<&'static str>,
     last_unlock: Option<(Instant, Option<State>)>,
     logs: VecDeque<LogLine>,
-    journal: Option<Vec<String>>,
+    journal: Option<VecDeque<String>>,
+    unit: Option<UnitInfo>,
     tx: Option<Sender<Cmd>>,
 }
 
@@ -182,6 +246,7 @@ fn worker(
                     }
                     Err(e) => ctx.log.error(format!("Status check failed: {e:#}")),
                 }
+                let _ = tx.send(Msg::Unit(idx, UnitInfo::query(&unit)));
                 next = Instant::now() + refresh;
             }
             Cmd::Unlock { force } => {
@@ -208,22 +273,79 @@ fn worker(
                 let _ = tx.send(Msg::Done(idx, state));
                 next = Instant::now();
             }
-            Cmd::Journal => {
-                let lines = Command::new("journalctl")
-                    .args(["--no-pager", "--output=short-iso", "-n", "200", "-u", &unit])
-                    .output()
-                    .map(|o| {
-                        String::from_utf8_lossy(&o.stdout)
-                            .lines()
-                            .map(str::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_else(|e| vec![format!("journalctl failed: {e}")]);
-                let _ = tx.send(Msg::Journal(idx, lines));
-            }
         }
         let _ = tx.send(Msg::Busy(idx, None));
     }
+}
+
+/// Show the service's journal live, and re-check the target whenever the
+/// service logs something: it only logs on state changes and unlocks, so
+/// this catches them without waiting for the next periodic check.
+fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>) {
+    let history = Command::new("journalctl")
+        .args(["--no-pager", "--output=short-iso", "-n", "200", "-u", &unit])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|e| vec![format!("journalctl failed: {e}")]);
+    let _ = tx.send(Msg::Journal(idx, history));
+
+    let mut cmd = Command::new("journalctl");
+    cmd.args([
+        "--no-pager",
+        "--output=short-iso",
+        "-n",
+        "0",
+        "-f",
+        "-u",
+        &unit,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    // Do not leave journalctl running when the dashboard exits.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(Msg::JournalLine(idx, format!("journalctl failed: {e}")));
+            return;
+        }
+    };
+    let Some(out) = child.stdout.take() else {
+        return;
+    };
+    let mut last_probe: Option<Instant> = None;
+    for line in BufReader::new(out).lines().map_while(Result::ok) {
+        let marker = line.starts_with("-- ");
+        if tx.send(Msg::JournalLine(idx, line)).is_err() {
+            break;
+        }
+        if !marker && last_probe.is_none_or(|t| t.elapsed() >= EVENT_PROBE_GAP) {
+            last_probe = Some(Instant::now());
+            if probe.send(Cmd::Probe).is_err() {
+                break;
+            }
+        }
+    }
+    let _ = child.kill();
+    let status = child.wait();
+    let _ = tx.send(Msg::JournalLine(
+        idx,
+        format!(
+            "journal follow ended ({}); checks fall back to the periodic refresh (root or systemd-journal group needed)",
+            status.map_or("unknown".into(), |s| s.to_string())
+        ),
+    ));
 }
 
 pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result<()> {
@@ -260,6 +382,7 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
             last_unlock: None,
             logs: VecDeque::new(),
             journal: None,
+            unit: None,
             tx: None,
         };
         match settings.and_then(|mut s| {
@@ -270,7 +393,11 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
                 let (ctx_tx, ctx_rx) = mpsc::channel();
                 let tx = tx.clone();
                 let unit = format!("luks-ssh-unlock-{}.service", src.name);
-                thread::spawn(move || worker(idx, ctx, unit, ctx_rx, tx, refresh));
+                let msg_tx = tx.clone();
+                let worker_unit = unit.clone();
+                thread::spawn(move || worker(idx, ctx, worker_unit, ctx_rx, tx, refresh));
+                let probe_tx = ctx_tx.clone();
+                thread::spawn(move || follow_journal(idx, unit, probe_tx, msg_tx));
                 target.tx = Some(ctx_tx);
             }
             Err(e) => {
@@ -352,10 +479,24 @@ impl App {
                 while logs.len() > LOG_LINES {
                     logs.pop_front();
                 }
+                if self.log_scroll > 0 && i == self.selected() && self.pane == Pane::Logs {
+                    self.log_scroll += 1; // keep the scrolled view in place
+                }
             }
             Msg::Busy(i, b) => self.targets[i].busy = b,
             Msg::Done(i, state) => self.targets[i].last_unlock = Some((Instant::now(), state)),
-            Msg::Journal(i, lines) => self.targets[i].journal = Some(lines),
+            Msg::Journal(i, lines) => self.targets[i].journal = Some(lines.into()),
+            Msg::Unit(i, unit) => self.targets[i].unit = unit,
+            Msg::JournalLine(i, line) => {
+                let journal = self.targets[i].journal.get_or_insert_with(VecDeque::new);
+                journal.push_back(line);
+                while journal.len() > LOG_LINES {
+                    journal.pop_front();
+                }
+                if self.log_scroll > 0 && i == self.selected() && self.pane == Pane::Journal {
+                    self.log_scroll += 1; // keep the scrolled view in place
+                }
+            }
         }
     }
 
@@ -398,10 +539,7 @@ impl App {
     fn toggle_pane(&mut self) {
         self.log_scroll = 0;
         self.pane = match self.pane {
-            Pane::Logs => {
-                self.send(self.selected(), Cmd::Journal);
-                Pane::Journal
-            }
+            Pane::Logs => Pane::Journal,
             Pane::Journal => Pane::Logs,
         };
     }
@@ -486,8 +624,13 @@ impl App {
             Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
                 .areas(body);
         let [details, logs] =
-            Layout::vertical([Constraint::Length(14), Constraint::Min(3)]).areas(right);
+            Layout::vertical([Constraint::Length(16), Constraint::Min(3)]).areas(right);
 
+        let inactive = self
+            .targets
+            .iter()
+            .filter(|t| t.unit.as_ref().is_some_and(|u| u.warning().is_some()))
+            .count();
         f.render_widget(
             Line::from(vec![
                 " luks-ssh-unlock ".bold().reversed(),
@@ -498,6 +641,13 @@ impl App {
                     chrono::Local::now().format("%H:%M:%S")
                 )
                 .dim(),
+                if inactive > 0 {
+                    format!("  ⚠ {inactive} service(s) not running")
+                        .yellow()
+                        .bold()
+                } else {
+                    Span::raw("")
+                },
             ]),
             header,
         );
@@ -539,11 +689,15 @@ impl App {
             .iter()
             .map(|t| {
                 let (icon, label, color) = summary(t);
+                let mut title = vec![
+                    Span::styled(format!("{icon} "), Style::new().fg(color)),
+                    Span::styled(t.name.clone(), Style::new().bold()),
+                ];
+                if t.unit.as_ref().is_some_and(|u| u.warning().is_some()) {
+                    title.push(Span::styled(" ⚠ service", Style::new().yellow().bold()));
+                }
                 ListItem::new(vec![
-                    Line::from(vec![
-                        Span::styled(format!("{icon} "), Style::new().fg(color)),
-                        Span::styled(t.name.clone(), Style::new().bold()),
-                    ]),
+                    Line::from(title),
                     Line::from(Span::styled(format!("   {label}"), Style::new().fg(color))),
                 ])
             })
@@ -569,6 +723,15 @@ impl App {
                 Span::styled(v, style),
             ])
         };
+        if let Some(w) = t.unit.as_ref().and_then(UnitInfo::warning) {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "⚠ {w}: this target will not be unlocked automatically (systemctl start luks-ssh-unlock-{}.service)",
+                    t.name
+                ),
+                Style::new().yellow().bold(),
+            )));
+        }
         if let Some(err) = &t.error {
             lines.push(Line::from(Span::styled(
                 format!("Configuration error: {err}"),
@@ -699,7 +862,7 @@ impl App {
                     .collect(),
             ),
             Pane::Journal => (
-                " Service journal ",
+                " Service journal (live) ",
                 match &t.journal {
                     Some(j) => j.iter().map(|l| Line::from(l.clone())).collect(),
                     None => vec![Line::from("loading…".dim())],

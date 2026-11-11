@@ -61,5 +61,12 @@ confirmation dialog has clickable **Yes** and **Cancel** buttons), scroll the
 wheel over the target list or the log pane, and click the log pane's title
 to switch between activity and journal.
 
+The dashboard follows each service's journal live (this needs root or the
+`systemd-journal` group) and checks a target again as soon as its service logs
+something, so state changes show up within a couple of seconds rather than at
+the next periodic check. A target whose service is stopped, failed, disabled
+or masked is marked with a warning, since nothing will unlock it
+automatically.
+
 The periodic checks never send notifications and skip the initrd checksum,
 which can be slow in paranoid mode. An unlock always runs it first.

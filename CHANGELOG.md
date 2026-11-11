@@ -17,6 +17,10 @@ options and the container interface are compatible.
   pane, and click the log pane's title to switch between activity and
   journal. The activity pane logs every check result (state changes and
   manual refreshes), so it is no longer empty before the first unlock.
+  The dashboard follows each service's journal live and re-checks a target
+  as soon as its service logs something, instead of waiting for the next
+  periodic check. It warns (in the list, the header and the details) when a
+  target's systemd service is stopped, failed, disabled or masked.
 - `status --json`, and a `status` exit status that tells whether the host is
   up or can be unlocked.
 - `completions SHELL`; the Nix package installs bash, zsh and fish
