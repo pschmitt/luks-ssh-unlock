@@ -34,7 +34,7 @@ COPY src ./src
 RUN cargo build --release --locked \
     && install -Dm755 target/release/luks-ssh-unlock /out/luks-ssh-unlock
 
-FROM docker.io/library/alpine:3.23
+FROM docker.io/library/alpine:3.24
 # OpenSSH for every connection, msmtp as sendmail, and what initrd-checksum
 # needs (bash, coreutils, cpio, gzip, zstd).
 # hadolint ignore=DL3018
