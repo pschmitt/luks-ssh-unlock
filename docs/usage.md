@@ -45,6 +45,10 @@ Started as a normal user in a terminal, the command re-runs itself with
 `sudo` when it cannot read them (`--no-sudo` or `LUKS_SSH_UNLOCK_NO_SUDO=1`
 turn this off). Services and scripts never do this.
 
+On a narrow or tall terminal (under 80 columns, or taller than about two
+thirds of its width, such as a phone) the panes are stacked instead: targets
+on top, then the details, then the activity.
+
 The left pane lists the targets and their state, the right pane shows the
 selected target's details and its activity: the service's journal
 (`journalctl -u luks-ssh-unlock-<name>.service`, live) interleaved with what

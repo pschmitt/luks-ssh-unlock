@@ -240,6 +240,8 @@ struct App {
     quit: bool,
     /// Lines scrolled up from the bottom of the log pane.
     log_scroll: usize,
+    /// Narrow or tall terminal (a phone): panes are stacked.
+    portrait: bool,
     /// Screen areas of the last frame, for mouse hit-testing.
     hit: Hit,
     last_click: Option<(Instant, usize)>,
@@ -478,6 +480,7 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
         refresh,
         quit: false,
         log_scroll: 0,
+        portrait: false,
         hit: Hit::default(),
         last_click: None,
     };
@@ -666,11 +669,31 @@ impl App {
             Constraint::Length(1),
         ])
         .areas(f.area());
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
-                .areas(body);
-        let [details, logs] =
-            Layout::vertical([Constraint::Length(16), Constraint::Min(3)]).areas(right);
+        let area = f.area();
+        // Cells are about twice as tall as wide: below this the side-by-side
+        // layout is cramped, so stack the panes instead.
+        self.portrait = area.width < 80 || u32::from(area.width) * 2 < u32::from(area.height) * 3;
+        let (left, details, logs) = if self.portrait {
+            // Two rows per target, but never more than a third of the screen.
+            let list_h = (self.targets.len() as u16)
+                .saturating_mul(2)
+                .saturating_add(2)
+                .clamp(4, (body.height / 3).max(4));
+            let [l, d, g] = Layout::vertical([
+                Constraint::Length(list_h),
+                Constraint::Percentage(45),
+                Constraint::Min(4),
+            ])
+            .areas(body);
+            (l, d, g)
+        } else {
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
+                    .areas(body);
+            let [details, logs] =
+                Layout::vertical([Constraint::Length(16), Constraint::Min(3)]).areas(right);
+            (left, details, logs)
+        };
 
         let inactive = self
             .targets
@@ -680,17 +703,32 @@ impl App {
         f.render_widget(
             Line::from(vec![
                 " luks-ssh-unlock ".bold().reversed(),
-                format!(
-                    "  {} target(s) · refresh every {}s · {}",
-                    self.targets.len(),
-                    self.refresh.as_secs(),
-                    chrono::Local::now().format("%H:%M:%S")
-                )
+                if self.portrait {
+                    format!(
+                        " {} · {}",
+                        self.targets.len(),
+                        chrono::Local::now().format("%H:%M:%S")
+                    )
+                } else {
+                    format!(
+                        "  {} target(s) · refresh every {}s · {}",
+                        self.targets.len(),
+                        self.refresh.as_secs(),
+                        chrono::Local::now().format("%H:%M:%S")
+                    )
+                }
                 .dim(),
                 if inactive > 0 {
-                    format!("  ⚠ {inactive} service(s) not running")
-                        .yellow()
-                        .bold()
+                    format!(
+                        "  ⚠ {inactive} {}",
+                        if self.portrait {
+                            "svc down"
+                        } else {
+                            "service(s) not running"
+                        }
+                    )
+                    .yellow()
+                    .bold()
                 } else {
                     Span::raw("")
                 },
@@ -715,11 +753,29 @@ impl App {
         }
 
         let hints = if self.confirm.is_some() {
-            Line::from(" y/click Yes confirms · any other key or click cancels".yellow())
+            Line::from(
+                pick(
+                    footer.width,
+                    &[
+                        " y/click Yes confirms · any other key or click cancels",
+                        " y = yes · anything else cancels",
+                        " y = yes · else cancel",
+                    ],
+                )
+                .yellow(),
+            )
         } else {
             Line::from(
-                " ↑↓/jk/click select · r refresh · R refresh all · u/⏎/double-click unlock · F force · wheel/PgUp/PgDn scroll activity · q quit"
-                    .dim(),
+                pick(
+                    footer.width,
+                    &[
+                        " ↑↓/jk/click select · r refresh · R refresh all · u/⏎/double-click unlock · F force · wheel/PgUp/PgDn scroll activity · q quit",
+                        " ↑↓ select · r/R refresh · u unlock · F force · PgUp/PgDn scroll · q quit",
+                        " ↑↓ select · r refresh · u unlock · q quit",
+                        " ↑↓ · r · u · q",
+                    ],
+                )
+                .dim(),
             )
         };
         f.render_widget(hints, footer);
@@ -763,9 +819,10 @@ impl App {
     fn draw_details(&self, f: &mut Frame, area: Rect, idx: usize) {
         let t = &self.targets[idx];
         let mut lines: Vec<Line> = Vec::new();
+        let key_width = if self.portrait { 16 } else { 18 };
         let row = |k: &str, v: String, style: Style| {
             Line::from(vec![
-                Span::styled(format!("{k:<18}"), Style::new().dim()),
+                Span::styled(format!("{k:<key_width$}"), Style::new().dim()),
                 Span::styled(v, style),
             ])
         };
@@ -1003,6 +1060,15 @@ fn describe(r: &Report) -> String {
     }
 }
 
+/// The first text that fits in `width` columns, else the last (shortest).
+fn pick<'a>(width: u16, options: &[&'a str]) -> &'a str {
+    options
+        .iter()
+        .copied()
+        .find(|o| o.chars().count() <= usize::from(width))
+        .unwrap_or_else(|| options[options.len() - 1])
+}
+
 fn summary(t: &Target) -> (&'static str, String, Color) {
     if t.error.is_some() {
         return ("✖", "config error".into(), Color::Red);
@@ -1031,4 +1097,87 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         w,
         h,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn app(n: usize) -> App {
+        App {
+            targets: (0..n)
+                .map(|i| Target {
+                    name: format!("host{i}"),
+                    host: format!("h{i}.example"),
+                    error: None,
+                    report: None,
+                    busy: None,
+                    last_unlock: None,
+                    logs: VecDeque::new(),
+                    unit: None,
+                    tx: None,
+                })
+                .collect(),
+            list: ListState::default().with_selected(Some(0)),
+            confirm: None,
+            refresh: Duration::from_secs(30),
+            quit: false,
+            log_scroll: 0,
+            portrait: false,
+            hit: Hit::default(),
+            last_click: None,
+        }
+    }
+
+    fn render(app: &mut App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        term.backend().to_string()
+    }
+
+    #[test]
+    fn wide_terminal_is_side_by_side() {
+        let mut a = app(2);
+        render(&mut a, 120, 30);
+        assert!(!a.portrait);
+        assert!(a.hit.logs.x > a.hit.list.x);
+    }
+
+    #[test]
+    fn phone_is_stacked() {
+        let mut a = app(2);
+        let out = render(&mut a, 45, 40);
+        assert!(a.portrait);
+        assert_eq!(a.hit.list.x, a.hit.logs.x);
+        assert!(a.hit.logs.y > a.hit.list.y);
+        assert!(out.contains("host0"));
+    }
+
+    #[test]
+    fn any_size_renders() {
+        for (w, h) in [
+            (1, 1),
+            (10, 5),
+            (30, 8),
+            (20, 60),
+            (45, 40),
+            (80, 24),
+            (200, 10),
+        ] {
+            render(&mut app(5), w, h);
+            render(&mut app(0), w, h);
+            let mut a = app(3);
+            a.confirm = Some((1, true));
+            render(&mut a, w, h);
+        }
+    }
+
+    #[test]
+    fn footer_hint_fits() {
+        assert_eq!(pick(5, &["long text", "short"]), "short");
+        assert_eq!(pick(3, &["long text", "short"]), "short");
+        assert_eq!(pick(20, &["long text", "short"]), "long text");
+    }
 }
