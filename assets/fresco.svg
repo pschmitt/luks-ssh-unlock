@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" width="1200" height="520" role="img" aria-labelledby="title desc">
+  <title id="title">luks-ssh-unlock fresco</title>
+  <desc id="desc">A medieval fresco: a herald carries a golden key along a winding road to a sleeping tower with a padlocked gate, while a monk checks a wax seal against his ledger.</desc>
+  <defs>
+    <!-- Plaster grain, multiplied over the paint. -->
+    <filter id="plaster" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" seed="7" result="grain"/>
+      <feColorMatrix in="grain" type="matrix" values="0 0 0 0 0.93  0 0 0 0 0.88  0 0 0 0 0.78  0.35 0.35 0.35 0 0.35" result="tint"/>
+      <feBlend in="SourceGraphic" in2="tint" mode="multiply"/>
+    </filter>
+    <!-- Hand-painted, slightly unsteady edges. -->
+    <filter id="wobble" x="-2%" y="-2%" width="104%" height="104%">
+      <feTurbulence type="turbulence" baseFrequency="0.035" numOctaves="2" seed="3" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="3.5" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <!-- Flaked-off pigment: blotches of bare plaster. -->
+    <filter id="loss" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.012 0.02" numOctaves="4" seed="11" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -18 5.1" result="mask"/>
+      <feFlood flood-color="#e9dcc0"/>
+      <feComposite in2="mask" operator="in"/>
+    </filter>
+    <radialGradient id="fade" cx="50%" cy="50%" r="75%">
+      <stop offset="55%" stop-color="#e9dcc0" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#e9dcc0" stop-opacity="0.55"/>
+    </radialGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3f5f86"/>
+      <stop offset="1" stop-color="#7b93a8"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e8c25a"/>
+      <stop offset="0.5" stop-color="#c79a2e"/>
+      <stop offset="1" stop-color="#9c7420"/>
+    </linearGradient>
+    <pattern id="bricks" width="28" height="16" patternUnits="userSpaceOnUse">
+      <rect width="28" height="16" fill="#c9a27a"/>
+      <path d="M0 0.5H28M0 8.5H28M7 0.5V8.5M21 8.5V16" stroke="#8a6646" stroke-width="1.2" fill="none"/>
+    </pattern>
+  </defs>
+
+  <g filter="url(#plaster)">
+    <!-- Wall -->
+    <rect width="1200" height="520" fill="#e3d2b0"/>
+
+    <g filter="url(#wobble)">
+      <!-- Sky with stars -->
+      <rect x="34" y="34" width="1132" height="300" fill="url(#sky)"/>
+      <g fill="#e8c25a" opacity="0.85">
+        <path id="star" d="M0 -7L2 -2L7 -2L3 1L5 7L0 3L-5 7L-3 1L-7 -2L-2 -2Z"/>
+        <use href="#star" x="120" y="70"/><use href="#star" x="210" y="120"/>
+        <use href="#star" x="470" y="60"/><use href="#star" x="560" y="130"/>
+        <use href="#star" x="660" y="80"/><use href="#star" x="780" y="140"/>
+        <use href="#star" x="1000" y="70"/><use href="#star" x="1100" y="125"/>
+        <use href="#star" x="330" y="160"/><use href="#star" x="900" y="175"/>
+      </g>
+      <!-- Crescent moon -->
+      <path d="M1060 205a38 38 0 1 1 -10 -62a30 30 0 1 0 10 62z" fill="#efe0b2"/>
+
+      <!-- Rolling hills and ground -->
+      <path d="M34 300C180 250 300 270 420 300C560 335 700 250 860 270C980 285 1080 255 1166 270V486H34Z" fill="#6f7d4f"/>
+      <path d="M34 350C220 320 420 360 600 345C800 330 980 360 1166 340V486H34Z" fill="#8a9a5e"/>
+      <g fill="#b2442f">
+        <circle cx="90" cy="440" r="5"/><circle cx="160" cy="462" r="4"/><circle cx="520" cy="452" r="5"/>
+        <circle cx="610" cy="470" r="4"/><circle cx="760" cy="448" r="5"/><circle cx="1090" cy="458" r="4"/>
+      </g>
+      <g fill="#efe0b2">
+        <circle cx="120" cy="458" r="3.5"/><circle cx="575" cy="438" r="3.5"/><circle cx="1050" cy="440" r="3.5"/>
+      </g>
+
+      <!-- The road: the secret channel, winding from the distant tower to the gate -->
+      <path d="M1110 300C1020 330 960 300 890 340C820 380 760 360 700 395C640 430 560 420 470 440C420 450 380 448 330 452" fill="none" stroke="#d9b886" stroke-width="22" stroke-linecap="round"/>
+      <path d="M1110 300C1020 330 960 300 890 340C820 380 760 360 700 395C640 430 560 420 470 440C420 450 380 448 330 452" fill="none" stroke="#a5835a" stroke-width="2" stroke-dasharray="2 14" stroke-linecap="round"/>
+
+      <!-- Distant tower of the unlocker, on the right horizon -->
+      <g stroke="#3b2a1e" stroke-width="2.5" stroke-linejoin="round">
+        <rect x="1095" y="220" width="40" height="82" fill="#d8bf98"/>
+        <path d="M1090 220h50v-12h-8v6h-8v-6h-10v6h-8v-6h-8v6h-8z" fill="#d8bf98"/>
+        <path d="M1108 302v-26a7 7 0 0 1 14 0v26z" fill="#3b2a1e"/>
+        <rect x="1110" y="236" width="10" height="14" fill="#e8c25a"/>
+      </g>
+
+      <!-- The sleeping tower with its padlocked gate -->
+      <g stroke="#3b2a1e" stroke-width="3" stroke-linejoin="round">
+        <rect x="120" y="150" width="200" height="300" fill="url(#bricks)"/>
+        <path d="M108 150h224v-26h-22v14h-24v-14h-26v14h-26v-14h-26v14h-26v-14h-26v14h-24v-14h-24z" fill="#c9a27a"/>
+        <path d="M150 124v-50l70 -46l70 46v50z" fill="#9c3b2a"/>
+        <!-- Gate -->
+        <path d="M168 450v-120a52 52 0 0 1 104 0v120z" fill="#5b3a24"/>
+        <path d="M185 450v-118M203 450v-132M220 450v-136M237 450v-132M255 450v-118" stroke="#3b2a1e" stroke-width="2"/>
+        <!-- Padlock -->
+        <path d="M204 380v-14a16 16 0 0 1 32 0v14" fill="none" stroke="#9c7420" stroke-width="6"/>
+        <rect x="196" y="378" width="48" height="40" rx="5" fill="url(#gold)"/>
+        <path d="M220 392v12" stroke="#3b2a1e" stroke-width="4" stroke-linecap="round"/>
+        <!-- A sleeping window: closed eyes -->
+        <path d="M196 212v-24a24 24 0 0 1 48 0v24z" fill="#3f5f86"/>
+        <path d="M206 202q6 5 12 0M222 202q6 5 12 0" fill="none" stroke="#efe0b2" stroke-width="2.5" stroke-linecap="round"/>
+      </g>
+      <!-- Zzz -->
+      <g fill="none" stroke="#efe0b2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M262 150h14l-14 14h14"/>
+        <path d="M286 122h10l-10 10h10"/>
+      </g>
+
+      <!-- The herald with the key -->
+      <g stroke="#3b2a1e" stroke-width="3" stroke-linejoin="round">
+        <circle cx="470" cy="236" r="40" fill="none" stroke="url(#gold)" stroke-width="7"/>
+        <path d="M438 286C430 330 420 390 410 448h120c-8 -58 -16 -118 -26 -162z" fill="#a8432f"/>
+        <path d="M444 288C470 300 492 300 500 286l18 50c-18 30 -60 40 -92 22z" fill="#3d5a80"/>
+        <circle cx="470" cy="240" r="28" fill="#e0b48a"/>
+        <path d="M444 236c2 -24 50 -28 52 0c-6 -10 -44 -12 -52 0z" fill="#6b3e22"/>
+        <path d="M462 246q4 3 8 0M476 246q4 3 8 0" fill="none" stroke-width="2"/>
+        <path d="M466 258q6 4 12 0" fill="none" stroke-width="2"/>
+        <!-- Arm and key held forward towards the gate -->
+        <path d="M446 312c-26 6 -50 14 -66 26" fill="none" stroke-width="12" stroke="#a8432f"/>
+        <path d="M446 312c-26 6 -50 14 -66 26" fill="none" stroke-width="2"/>
+        <circle cx="376" cy="340" r="9" fill="#e0b48a"/>
+      </g>
+      <g stroke="#3b2a1e" stroke-width="2.5" stroke-linejoin="round">
+        <circle cx="390" cy="318" r="18" fill="none" stroke="url(#gold)" stroke-width="8"/>
+        <path d="M376 330l-58 52" stroke="url(#gold)" stroke-width="9" stroke-linecap="round" fill="none"/>
+        <path d="M336 366l-10 -12M324 377l-10 -12" stroke="url(#gold)" stroke-width="7" stroke-linecap="round" fill="none"/>
+      </g>
+
+      <!-- The monk at his lectern, checking the seal against the ledger -->
+      <g stroke="#3b2a1e" stroke-width="3" stroke-linejoin="round">
+        <circle cx="820" cy="236" r="38" fill="none" stroke="url(#gold)" stroke-width="7"/>
+        <path d="M786 280C778 330 770 392 764 448h116c-6 -56 -14 -118 -24 -168z" fill="#6b4a2e"/>
+        <path d="M790 270c14 -20 46 -20 62 0l6 24c-24 10 -50 10 -74 0z" fill="#5a3d25"/>
+        <circle cx="820" cy="242" r="26" fill="#e0b48a"/>
+        <path d="M800 232c4 -16 36 -16 40 0" fill="#e3d2b0"/>
+        <path d="M806 250q5 -3 10 0M824 250q5 -3 10 0" fill="none" stroke-width="2"/>
+        <path d="M814 262q6 2 12 0" fill="none" stroke-width="2"/>
+        <!-- Lectern and open ledger -->
+        <path d="M880 448v-90M860 448h40" fill="none" stroke-width="6"/>
+        <path d="M842 358l38 -22l76 18l-38 24z" fill="#8a5a36"/>
+        <path d="M850 352l30 -16l32 8l-28 18zM884 344l28 -8l36 10l-30 16z" fill="#efe0b2" stroke-width="2"/>
+        <path d="M862 349l18 -9M864 354l18 -9M896 346l22 -6M898 351l22 -6" stroke-width="1.2"/>
+        <!-- Raised hand with the wax seal -->
+        <path d="M790 310c-18 -6 -30 -20 -34 -36" fill="none" stroke-width="12" stroke="#6b4a2e"/>
+        <path d="M790 310c-18 -6 -30 -20 -34 -36" fill="none" stroke-width="2"/>
+        <circle cx="752" cy="264" r="10" fill="#e0b48a"/>
+        <circle cx="748" cy="238" r="20" fill="#9c2a22"/>
+        <path d="M748 226v24M736 238h24M740 230l16 16M756 230l-16 16" stroke="#e8c25a" stroke-width="2.5"/>
+      </g>
+
+      <!-- Banner across the top -->
+      <g stroke="#3b2a1e" stroke-width="3" stroke-linejoin="round">
+        <path d="M440 70h380l26 20l-26 20h-380l-26 -20z" fill="#efe0b2"/>
+        <path d="M414 90l-30 -14v42l30 -10zM846 90l30 -14v42l-30 -10z" fill="#d8bf98"/>
+      </g>
+      <text x="630" y="100" text-anchor="middle" font-family="'Cinzel', 'Trajan Pro', Georgia, 'Times New Roman', serif" font-size="26" letter-spacing="5" fill="#7a1f15">CLAVIS · PER · SSH</text>
+
+      <!-- Captions, as painted under the figures -->
+      <g font-family="'Cinzel', 'Trajan Pro', Georgia, 'Times New Roman', serif" font-size="14" letter-spacing="2" fill="#3b2a1e" text-anchor="middle">
+        <text x="220" y="478">HOSPES · DORMIT</text>
+        <text x="490" y="478">NVNTIVS · CLAVEM · FERT</text>
+        <text x="830" y="478">SIGILLVM · VERVM</text>
+      </g>
+    </g>
+
+    <!-- Painted border -->
+    <g filter="url(#wobble)">
+      <rect x="17" y="17" width="1166" height="486" fill="none" stroke="#9c3b2a" stroke-width="22"/>
+      <rect x="31" y="31" width="1138" height="458" fill="none" stroke="#3b2a1e" stroke-width="2.5"/>
+      <rect x="6" y="6" width="1188" height="508" fill="none" stroke="#3b2a1e" stroke-width="2"/>
+      <g fill="#efe0b2">
+        <circle cx="17" cy="17" r="4"/><circle cx="1183" cy="17" r="4"/><circle cx="17" cy="503" r="4"/><circle cx="1183" cy="503" r="4"/>
+      </g>
+      <path d="M60 17h1080" stroke="#efe0b2" stroke-width="3" stroke-dasharray="3 27" stroke-linecap="round"/>
+      <path d="M60 503h1080" stroke="#efe0b2" stroke-width="3" stroke-dasharray="3 27" stroke-linecap="round"/>
+      <path d="M17 60v400" stroke="#efe0b2" stroke-width="3" stroke-dasharray="3 27" stroke-linecap="round"/>
+      <path d="M1183 60v400" stroke="#efe0b2" stroke-width="3" stroke-dasharray="3 27" stroke-linecap="round"/>
+    </g>
+
+    <!-- Age: faded edges, flaked pigment, cracks -->
+    <rect width="1200" height="520" fill="url(#fade)"/>
+    <rect width="1200" height="520" filter="url(#loss)" opacity="0.55"/>
+    <g fill="none" stroke="#5a4632" stroke-width="1.3" opacity="0.45" stroke-linecap="round">
+      <path d="M640 34l-12 40l10 30l-16 44l8 36"/>
+      <path d="M628 74l-26 18"/>
+      <path d="M34 210l40 12l26 -6l30 20"/>
+      <path d="M1166 380l-46 -10l-20 16l-34 -4l-18 20"/>
+      <path d="M980 486l10 -30l-8 -24l14 -20"/>
+      <path d="M300 34l6 26l-10 22"/>
+    </g>
+  </g>
+</svg>
