@@ -2,7 +2,7 @@
 
 # Static BusyBox bundle (amd64 + arm64) that paranoid initrd checks upload to
 # the target.
-ARG NIX_VERSION=2.35.5
+ARG NIX_VERSION=2.35.6
 FROM docker.io/nixos/nix:${NIX_VERSION} AS busybox
 ENV NIX_CONFIG="experimental-features = nix-command flakes"
 WORKDIR /src
