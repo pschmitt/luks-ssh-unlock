@@ -1,62 +1,144 @@
 {
-  description = "Auto-unlock remote hosts via SSH and Kubernetes";
+  description = "Unlock LUKS-encrypted hosts remotely over SSH";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    # Builds the dependencies in their own derivation, so CI caches and hosts
+    # reuse them instead of recompiling every crate on each change.
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
     {
+      self,
       nixpkgs,
       flake-utils,
-      ...
+      crane,
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
-        busybox-static = pkgs.callPackage ./nix/busybox.nix {
+    let
+      # The target's busybox bundle holds a real binary per target arch, from
+      # a native package set so it comes from the binary cache.
+      busyboxFor =
+        pkgs:
+        pkgs.callPackage ./nix/busybox.nix {
           busyboxAmd64 = nixpkgs.legacyPackages.x86_64-linux.pkgsStatic.busybox;
           busyboxArm64 = nixpkgs.legacyPackages.aarch64-linux.pkgsStatic.busybox;
         };
-        luks-ssh-unlock = pkgs.callPackage ./nix/package.nix {
-          busyboxBundle = busybox-static;
+      packageFor =
+        pkgs:
+        pkgs.callPackage ./nix/package.nix {
+          craneLib = crane.mkLib pkgs;
+          busyboxBundle = busyboxFor pkgs;
         };
-        luks-ssh-unlock-entrypoint = pkgs.callPackage ./nix/entrypoint.nix { };
-      in
-      {
-        packages = {
-          inherit luks-ssh-unlock;
-          inherit busybox-static;
-          default = luks-ssh-unlock;
-          entrypoint = luks-ssh-unlock-entrypoint;
-        };
+      eachSystem = flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          luks-ssh-unlock = packageFor pkgs;
+        in
+        {
+          packages = {
+            default = luks-ssh-unlock;
+            inherit luks-ssh-unlock;
+            busybox-static = busyboxFor pkgs;
+            entrypoint = pkgs.callPackage ./nix/entrypoint.nix { };
+          };
 
-        devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            coreutils
-            findutils
-            util-linux
-            cpio
-            gzip
-            zstd
-            curl
-            dig
-            jq
-            gnugrep
-            msmtp
-            netcat-gnu
-            openssh
-          ];
-        };
-      }
-    )
+          apps.default = {
+            type = "app";
+            program = "${luks-ssh-unlock}/bin/luks-ssh-unlock";
+          };
+
+          # The package build runs the unit tests.
+          checks = {
+            inherit luks-ssh-unlock;
+            # Evaluates a NixOS system with one instance and checks the
+            # rendered units point at this flake's package.
+            nixos-module =
+              let
+                nixos = nixpkgs.lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.default
+                    {
+                      services.luks-ssh-unlock = {
+                        enable = true;
+                        instances.smoke = {
+                          hostname = "target.example.invalid";
+                          key = "/run/secrets/ssh_key";
+                          passphraseFile = "/run/secrets/luks";
+                          dhcpListener = {
+                            enable = true;
+                            interface = "any";
+                            clientHostname = "target";
+                          };
+                        };
+                      };
+                      boot.loader.grub.enable = false;
+                      fileSystems."/" = {
+                        device = "none";
+                        fsType = "tmpfs";
+                      };
+                      system.stateVersion = "25.05";
+                    }
+                  ];
+                };
+                inherit (nixos.config.systemd) services;
+                start = builtins.unsafeDiscardStringContext services.luks-ssh-unlock-smoke.serviceConfig.ExecStart;
+                dhcp = builtins.unsafeDiscardStringContext services.luks-ssh-unlock-dhcp-listener-smoke.serviceConfig.ExecStart;
+              in
+              assert start == builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock";
+              assert nixpkgs.lib.hasPrefix
+                (builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock-dhcp-listener")
+                dhcp;
+              pkgs.runCommand "luks-ssh-unlock-nixos-module-check" { } "touch $out";
+          };
+
+          formatter = pkgs.nixfmt;
+
+          devShells.default = pkgs.mkShell {
+            inputsFrom = [ luks-ssh-unlock ];
+            packages = with pkgs; [
+              cargo
+              rustc
+              clippy
+              rustfmt
+              cargo-deny
+              rust-analyzer
+              shellcheck
+              nixfmt
+              statix
+              deadnix
+              openssh
+            ];
+          };
+        }
+      );
+    in
+    eachSystem
     // {
-      # NixOS module
-      nixosModules = {
-        default = ./nix/module.nix;
-        luks-ssh-unlock = ./nix/module.nix;
+      # Linux package builds and checks run on the self-hosted nixbot.
+      # aarch64-linux builds natively on GitHub's arm runners (the nix-aarch64
+      # job of .github/workflows/build.yaml).
+      hydraJobs = nixpkgs.lib.genAttrs [ "x86_64-linux" ] (system: {
+        inherit (self.packages.${system}) luks-ssh-unlock entrypoint;
+        checks = self.checks.${system};
+      });
+
+      overlays.default = _final: prev: {
+        luks-ssh-unlock = packageFor prev;
       };
+
+      # The flake's own package is the default, so the module needs no overlay.
+      nixosModules.default =
+        { lib, pkgs, ... }:
+        {
+          imports = [ ./nix/module.nix ];
+          services.luks-ssh-unlock.package =
+            lib.mkDefault
+              self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        };
+      nixosModules.luks-ssh-unlock = self.nixosModules.default;
     };
 }

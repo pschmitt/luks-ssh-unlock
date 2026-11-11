@@ -1,0 +1,38 @@
+name: lint
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+permissions:
+  contents: read
+env:
+  RUST_BACKTRACE: 1
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  # rustfmt, clippy (warnings are errors) and cargo-deny.
+  lint:
+    uses: pschmitt/ci-workflows/.github/workflows/rust-lint.yaml@main
+    with:
+      deny: true
+  # initrd-checksum runs on the target hosts, so it stays a shell script.
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck initrd-checksum.sh entrypoint.sh
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      # @master + an explicit toolchain input, so this always tracks whatever
+      # Cargo.toml currently declares.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets

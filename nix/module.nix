@@ -15,21 +15,7 @@ let
     optional (instance.passphraseFile != null) "luks-passphrase:${toString instance.passphraseFile}";
   pathOrStr = types.either types.path types.str;
   nullPathOrStr = types.nullOr pathOrStr;
-  # The bundle must hold a real binary per target arch, not the controller's
-  # own busybox twice; use a native package set for the foreign arch so it
-  # comes from the binary cache.
-  staticBusyboxFor =
-    system:
-    if pkgs.stdenv.hostPlatform.system == system then
-      pkgs.pkgsStatic.busybox
-    else
-      (import pkgs.path { inherit system; }).pkgsStatic.busybox;
-  package = pkgs.callPackage ./package.nix {
-    busyboxBundle = pkgs.callPackage ./busybox.nix {
-      busyboxAmd64 = staticBusyboxFor "x86_64-linux";
-      busyboxArm64 = staticBusyboxFor "aarch64-linux";
-    };
-  };
+  inherit (cfg) package;
   adHocUnlockers = mapAttrsToList (
     name: instance:
     pkgs.writeShellApplication {
@@ -57,6 +43,10 @@ let
               --unit=luks-ssh-unlock-${name}.service \
               "$@" \
               --output=cat
+            ;;
+          tui|ui)
+            shift
+            exec ${package}/bin/luks-ssh-unlock tui "$@" /etc/luks-ssh-unlock/${name}.env
             ;;
           start|stop)
             if [[ $# -ne 1 ]]
@@ -112,7 +102,7 @@ let
             printf '\nUnlock service: %s%s%s\n' "$service_color" "$service_label" "$service_reset"
             last_unlock=$(journalctl \
               --quiet \
-              --grep=${escapeShellArg "LUKS unlocked host at ${name}"} \
+              --grep=${escapeShellArg "^Unlocked ${instance.hostname}; "} \
               --no-pager \
               --output=short-iso \
               -n 1) || last_unlock=
@@ -469,6 +459,14 @@ in
 
   options.services.luks-ssh-unlock = {
     enable = mkEnableOption "LUKS SSH Unlock Service";
+    package = mkOption {
+      type = types.package;
+      default =
+        pkgs.luks-ssh-unlock
+          or (throw "services.luks-ssh-unlock.package is not set: import the module through the luks-ssh-unlock flake (nixosModules.default) or add its overlay");
+      defaultText = literalExpression "the luks-ssh-unlock flake's package";
+      description = "luks-ssh-unlock package to run.";
+    };
     activationScript = {
       enable = mkEnableOption "Generate initrd checksum and metadata during activation";
       dir = mkOption {

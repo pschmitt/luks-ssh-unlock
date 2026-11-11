@@ -1,0 +1,220 @@
+//! luks-ssh-unlock: unlock LUKS-encrypted hosts by feeding their initrd the
+//! passphrase over SSH, after making sure it is the initrd we expect.
+
+mod checksum;
+mod ctx;
+mod daemon;
+mod dhcp;
+mod log;
+mod notify;
+mod probe;
+mod process;
+mod settings;
+mod status;
+mod tui;
+mod unlock;
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
+
+use anyhow::{Result, bail};
+use clap::{CommandFactory, Parser, Subcommand};
+
+use crate::ctx::{Ctx, Exit, Mode};
+use crate::log::Logger;
+use crate::settings::{GlobalOpts, Settings};
+
+/// Unlock LUKS-encrypted hosts over SSH.
+///
+/// Watches a host and, whenever it waits in its initrd, verifies that initrd
+/// (host keys, optional checksum baseline and signature) and sends it the
+/// passphrase. Every option can also be set through the environment variable
+/// named in its help.
+#[derive(Parser, Debug)]
+#[command(
+    name = "luks-ssh-unlock",
+    version,
+    propagate_version = true,
+    max_term_width = 100
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Cmd>,
+
+    #[command(flatten)]
+    opts: GlobalOpts,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Watch the target and unlock it when it waits in its initrd (default)
+    Run,
+    /// Show the configuration and what the target is doing, without unlocking
+    Status {
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Interactive dashboard of all targets
+    #[command(visible_alias = "ui")]
+    Tui {
+        /// Environment files or directories of targets
+        /// [default: /etc/luks-ssh-unlock/*.env, else the current options]
+        files: Vec<PathBuf>,
+        /// Seconds between two status checks of a target
+        #[arg(long, default_value_t = 30, value_name = "SECONDS")]
+        refresh: u64,
+    },
+    /// Print shell completions
+    Completions { shell: clap_complete::Shell },
+    /// Start a one-shot unlock when the target's initrd requests a DHCP lease
+    #[command(hide = true)]
+    DhcpListener(dhcp::DhcpArgs),
+}
+
+fn process_env(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
+fn context(opts: &GlobalOpts, mode: Mode) -> Result<Ctx> {
+    let settings = Settings::resolve(opts, &process_env).map_err(|e| Exit(2, format!("{e:#}")))?;
+    let log = Logger::stderr(settings.debug);
+    if settings.passphrase.is_some() && opts.luks_passphrase.is_some() {
+        log.warn(
+            "Passing the LUKS passphrase on the command line exposes it to other users (ps, /proc/*/cmdline) and shell history; use --luks-passphrase-file instead",
+        );
+    }
+    Ctx::new(settings, log, mode)
+}
+
+fn real_main() -> Result<bool> {
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Cmd::Run) {
+        Cmd::Run => {
+            let mut ctx = context(&cli.opts, Mode::Run)?;
+            if ctx.s.force && !ctx.s.once {
+                bail!(Exit(2, "--force can only be used with --once".into()));
+            }
+            if ctx.s.once {
+                ctx.run_once()
+            } else {
+                ctx.run_forever().map(|()| true)
+            }
+        }
+        Cmd::Status { json } => {
+            let mut ctx = context(&cli.opts, Mode::Status)?;
+            ctx.force = false;
+            let report = ctx.status(true)?;
+            if json {
+                let mut out = std::io::stdout().lock();
+                serde_json::to_writer_pretty(&mut out, &report)?;
+                writeln!(out)?;
+            } else {
+                status::print_text(&report);
+            }
+            Ok(report.ok())
+        }
+        Cmd::Tui { files, refresh } => {
+            let mut sources = tui::discover(&files)?;
+            if sources.is_empty()
+                && (cli.opts.host.is_some() || process_env("SSH_HOSTNAME").is_some())
+            {
+                let name = cli
+                    .opts
+                    .host
+                    .clone()
+                    .or_else(|| process_env("SSH_HOSTNAME"))
+                    .unwrap_or_default();
+                sources.push(tui::Source { name, env: None });
+            }
+            tui::run(sources, &cli.opts, Duration::from_secs(refresh.max(5)))?;
+            Ok(true)
+        }
+        Cmd::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "luks-ssh-unlock",
+                &mut std::io::stdout(),
+            );
+            Ok(true)
+        }
+        Cmd::DhcpListener(args) => {
+            let port = match cli.opts.port.as_deref().map(str::parse::<u16>) {
+                None => 22,
+                Some(Ok(p)) => p,
+                Some(Err(e)) => bail!(Exit(2, format!("--ssh-port: {e}"))),
+            };
+            dhcp::run(args, port, Logger::stderr(cli.opts.debug))?;
+            Ok(true)
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    match real_main() {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            if let Some(Exit(code, msg)) = e.downcast_ref::<Exit>() {
+                eprintln!("luks-ssh-unlock: {msg}");
+                return ExitCode::from(*code as u8);
+            }
+            eprintln!("luks-ssh-unlock: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn legacy_invocations_parse() {
+        for argv in [
+            vec!["luks-ssh-unlock"],
+            vec!["luks-ssh-unlock", "run", "--once", "-f"],
+            vec!["luks-ssh-unlock", "--once", "run"],
+            vec![
+                "luks-ssh-unlock",
+                "-H",
+                "h",
+                "-u",
+                "root",
+                "-J",
+                "jump",
+                "--jport",
+                "22",
+                "-t",
+                "systemd",
+            ],
+            vec![
+                "luks-ssh-unlock",
+                "status",
+                "--hc-host",
+                "x",
+                "--rcmd",
+                "true",
+            ],
+            vec![
+                "luks-ssh-unlock",
+                "--sleep-interval",
+                "5",
+                "--event-file",
+                "/tmp/e",
+                "--tag",
+                "t",
+            ],
+        ] {
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        }
+    }
+}

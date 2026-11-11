@@ -3,3 +3,5 @@ password.*
 result
 *shasum*
 checksum
+/target
+__pycache__/

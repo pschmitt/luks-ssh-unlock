@@ -1,15 +1,10 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
+set -eu
 
-if [[ -n "$DEBUG" ]]
+# Install the msmtp configuration where msmtp/sendmail look for it.
+if [ -n "${MSMTPRC:-}" ] && [ -r "$MSMTPRC" ] && [ "$MSMTPRC" != /etc/msmtprc ]
 then
-  set -x
+  install -m 400 "$MSMTPRC" /etc/msmtprc
 fi
 
-# Copy the msmtp config file to the default location
-if [[ -n "$MSMTPRC" && "$MSMTPRC" != /etc/msmtprc ]]
-then
-  mkdir -p /etc
-  install -o "$(whoami)" -m 400 "$MSMTPRC" /etc/msmtprc
-fi
-
-exec /usr/local/bin/luks-ssh-unlock.sh "$@"
+exec /usr/local/bin/luks-ssh-unlock "$@"

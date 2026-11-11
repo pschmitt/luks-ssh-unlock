@@ -1,117 +1,42 @@
-name: Build
-
+name: build
 on:
   push:
-    branches:
-      - main
-  pull_request:
-  schedule:
-    - cron: '* 16 * * *'
-  workflow_dispatch:
-
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
 permissions:
   contents: read
-
 env:
-  image_name: pschmitt/luks-ssh-unlock
-  platforms: linux/amd64,linux/arm64/v8
-
+  RUST_BACKTRACE: 1
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  # Static release binaries, natively per architecture. Nix packages and
+  # checks build on nixbot (nixbot.toml).
   build:
-    if: >-
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          platforms: ${{ env.platforms }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
         with:
-          version: latest
-          use: true
-
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v6
+          key: ${{ matrix.target }}
+      # ring's C code: the runner's own musl-gcc matches the target arch.
+      - run: TARGET_CC=musl-gcc cargo build --locked --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
         with:
-          images: |
-            ${{ env.image_name }}
-            ghcr.io/${{ env.image_name }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build multi-arch image without publishing
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: ${{ env.platforms }}
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  publish:
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Docker login
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: ${{ env.platforms }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-        with:
-          version: latest
-          use: true
-
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: |
-            ${{ env.image_name }}
-            ghcr.io/${{ env.image_name }}
-          tags: |
-            type=ref,event=branch
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push multi-arch image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: ${{ env.platforms }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          name: luks-ssh-unlock-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/luks-ssh-unlock
+          if-no-files-found: error

@@ -1,91 +1,65 @@
-# hadolint ignore=DL3002
+# syntax=docker/dockerfile:1
+
+# Static BusyBox bundle (amd64 + arm64) that paranoid initrd checks upload to
+# the target.
 ARG NIX_VERSION=2.35.5
-FROM nixos/nix:${NIX_VERSION} AS busybox-builder
+FROM docker.io/nixos/nix:${NIX_VERSION} AS busybox
+ENV NIX_CONFIG="experimental-features = nix-command flakes"
+WORKDIR /src
+COPY flake.nix flake.lock ./
+COPY nix ./nix
+RUN nix --option filter-syscalls false build '.#busybox-static' --out-link /tmp/busybox \
+    && mkdir -p /out \
+    && cp -aL /tmp/busybox/. /out
 
-SHELL ["/bin/sh", "-euxo", "pipefail", "-c"]
+# cargo-chef splits dependency compilation into its own layer, keyed only on
+# the dependency graph, so the layer cache skips rebuilding dependencies when
+# only our own sources change. Alpine's Rust targets musl: a static binary.
+FROM docker.io/library/rust:1.99-alpine AS chef
+# hadolint ignore=DL3018
+RUN apk add --no-cache musl-dev \
+    && cargo install cargo-chef --locked --version 0.1.78
+WORKDIR /build
 
-ENV NIX_CONFIG="experimental-features = nix-command flakes" \
-    PATH="/nix/var/nix/profiles/default/bin:${PATH}"
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
 
-WORKDIR /tmp/build
-COPY . .
+FROM chef AS build
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --locked \
+    && install -Dm755 target/release/luks-ssh-unlock /out/luks-ssh-unlock
 
-# Build busybox bundle (amd64 + arm64) via flake output
-RUN nix --option filter-syscalls false build '.#busybox-static' --out-link /tmp/busybox && \
-    mkdir -p /out && \
-    cp -a /tmp/busybox/. /out
-
-# hadolint ignore=DL3007
-FROM alpine:latest
-
-SHELL ["/bin/sh", "-eux", "-c"]
-
+FROM docker.io/library/alpine:3.23
+# OpenSSH for every connection, msmtp as sendmail, and what initrd-checksum
+# needs (bash, coreutils, cpio, gzip, zstd).
 # hadolint ignore=DL3018
 RUN apk add --no-cache \
-    bash \
-    curl \
-    bind-tools \
-    jq \
-    msmtp \
-    openssh-client \
-    coreutils \
-    findutils \
-    util-linux \
-    cpio \
-    gzip \
-    zstd \
-    netcat-openbsd && \
-  ln -sf /usr/bin/msmtp /usr/sbin/sendmail && \
-  mkdir -p /data/events /data/initrd-checksum
+      bash \
+      coreutils \
+      cpio \
+      diffutils \
+      findutils \
+      gzip \
+      msmtp \
+      openssh-client \
+      util-linux \
+      zstd \
+    && ln -sf /usr/bin/msmtp /usr/sbin/sendmail \
+    && mkdir -p /data/events /data/initrd-checksum
 
-WORKDIR /app
+COPY --from=build /out/luks-ssh-unlock /usr/local/bin/luks-ssh-unlock
+COPY --chmod=0755 initrd-checksum.sh /usr/local/bin/initrd-checksum
+COPY --chmod=0755 entrypoint.sh /entrypoint.sh
+COPY --from=busybox /out /busybox
 
-COPY entrypoint.sh /entrypoint.sh
-COPY luks-ssh-unlock.sh initrd-checksum.sh /usr/local/bin/
-COPY --from=busybox-builder /out /busybox
+ENV INITRD_CHECKSUM_DIR=/data/initrd-checksum \
+    INITRD_CHECKSUM_BUSYBOX_DIR=/busybox \
+    MSMTPRC=/config/msmtprc
 
-RUN chmod +x /entrypoint.sh /usr/local/bin/luks-ssh-unlock.sh /usr/local/bin/initrd-checksum.sh
-
-ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    SSH_HOSTNAME=example.com \
-    SSH_KEY=/run/secrets/ssh_key \
-    SSH_PORT=22 \
-    FORCE_IPV4= \
-    FORCE_IPV6= \
-    SSH_KNOWN_HOSTS= \
-    SSH_KNOWN_HOSTS_FILE= \
-    SSH_INITRD_KNOWN_HOSTS= \
-    SSH_INITRD_KNOWN_HOSTS_FILE= \
-    SSH_JUMPHOST= \
-    SSH_JUMPHOST_USERNAME= \
-    SSH_JUMPHOST_PORT= \
-    SSH_JUMPHOST_KEY= \
-    SSH_USERNAME=root \
-    LUKS_PASSPHRASE= \
-    LUKS_PASSPHRASE_FILE= \
-    LUKS_TYPE=raw \
-    EVENTS_FILE= \
-    SLEEP_INTERVAL=5 \
-    TICK_TIMEOUT=120 \
-    HEALTHCHECK_PORT= \
-    HEALTHCHECK_REMOTE_HOSTNAME= \
-    HEALTHCHECK_REMOTE_USERNAME= \
-    HEALTHCHECK_REMOTE_CMD= \
-    INITRD_CHECKSUM_DIR=/data/initrd-checksum \
-    INITRD_CHECKSUM_FILE= \
-    INITRD_CHECKSUM_SCRIPT=/usr/local/bin/initrd-checksum.sh \
-    PARANOID= \
-    APPRISE_URL= \
-    APPRISE_TAG= \
-    APPRISE_TITLE= \
-    EMAIL_FROM= \
-    EMAIL_RECIPIENT= \
-    EMAIL_SUBJECT= \
-    MSMTPRC=/config/msmtprc \
-    MSMTP_ACCOUNT=
-
-VOLUME /config
-VOLUME /data
-VOLUME /data/events
-
+VOLUME ["/config", "/data"]
 ENTRYPOINT ["/entrypoint.sh"]

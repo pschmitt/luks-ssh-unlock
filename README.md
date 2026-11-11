@@ -1,124 +1,216 @@
 # 🔐 luks-ssh-unlock
 
-`luks-ssh-unlock` unlocks remote disks by SSHing into a host's initrd or live system and feeding the LUKS passphrase automatically. It supports optional jumphosts, host key pinning, health checks, notifications, and initrd integrity validation.
+`luks-ssh-unlock` unlocks LUKS-encrypted hosts remotely. It watches a host,
+and when the host waits in its initrd for the disk passphrase, it checks that
+this is the initrd it expects (pinned SSH host keys, an optional checksum
+baseline and its signature) before it sends the passphrase over SSH.
+
+It runs as a service, as a one-shot command, or as an interactive dashboard
+for all your hosts.
 
 ## ⚡️ Quick start
-- Provide the target host, SSH key, and a passphrase or passphrase file.
-- Run the main script directly:
-  ```bash
-  ./luks-ssh-unlock.sh --host 10.0.0.5 --ssh-key ~/.ssh/id_ed25519 \
-    --luks-passphrase-file /run/secrets/luks_password_10.0.0.5
-  ```
-- For verbose logging, add `--debug`.
 
-## 🧭 CLI reference
-The main entry point is `luks-ssh-unlock.sh`. It exposes flags for SSH connectivity, jumphosts, LUKS parameters, notifications, health checks, and initrd validation. See `--help` for the full list of options.
-
-## 🧩 Environment variables and flags
-
-| Category | Environment variable | Default | Related flags | Description |
-| --- | --- | --- | --- | --- |
-| SSH | `SSH_HOSTNAME` | `example.com` | `--host`, `--ssh-host`, `-H` | Target host to unlock over SSH. |
-| SSH | `SSH_PORT` | `22` | `--port`, `--ssh-port` | SSH port. |
-| SSH | `SSH_USERNAME` | `root` | `--username`, `--user`, `-u` | SSH login user. |
-| SSH | `SSH_KEY` | `/run/secrets/ssh_key` | `--ssh-key`, `--key`, `--private-key`, `--pkey` | Private key for authentication. |
-| SSH | `SSH_CONNECTION_TIMEOUT` | `5` | _n/a_ | Connection timeout in seconds. |
-| SSH | `SSH_KNOWN_HOSTS` | _(empty)_ | `--ssh-known-hosts` | Inline `known_hosts` content to pin the target host keys. |
-| SSH | `SSH_KNOWN_HOSTS_FILE` | _(empty)_ | `--ssh-known-hosts-file` | Path to `known_hosts` enforcing host keys. |
-| SSH | `SSH_INITRD_KNOWN_HOSTS` | _(empty)_ | `--ssh-initrd-known-hosts` | `known_hosts` content specifically for initrd host keys. |
-| SSH | `SSH_INITRD_KNOWN_HOSTS_FILE` | _(empty)_ | `--ssh-initrd-known-hosts-file` | File containing initrd-only host keys. |
-| SSH | `FORCE_IPV4` | _(empty)_ | `--force-ipv4`, `--ipv4`, `-4` | Prefer IPv4. |
-| SSH | `FORCE_IPV6` | _(empty)_ | `--force-ipv6`, `--ipv6`, `-6` | Prefer IPv6. |
-| Jumphost | `SSH_JUMPHOST` | _(empty)_ | `--ssh-jumphost`, `--jumphost`, `-J` | Optional bastion to reach the target. |
-| Jumphost | `SSH_JUMPHOST_USERNAME` | `root` | `--ssh-jumphost-username`, `--jusername`, `--ju`, `-U` | Jumphost SSH user. |
-| Jumphost | `SSH_JUMPHOST_PORT` | Inherits `SSH_PORT` | `--ssh-jumphost-port`, `--jport`, `--jp` | Jumphost SSH port. |
-| Jumphost | `SSH_JUMPHOST_KEY` | Inherits `SSH_KEY` | `--ssh-jumphost-key`, `--jkey`, `--jk`, `-K` | Jumphost SSH key. |
-| LUKS | `LUKS_TYPE` | `raw` | `--luks-type`, `--type`, `-t` | Unlock strategy (`raw`, `systemd`, `systemd-tool`, `luks-mount`). |
-| LUKS | `LUKS_PASSPHRASE` | _(empty)_ | `--luks-passphrase`, `--luks-password`, `--password`, `-p` | Plaintext passphrase. |
-| LUKS | `LUKS_PASSPHRASE_FILE` | `/run/secrets/luks_password_<host>` | `--luks-passphrase-file`, `--luks-password-file`, `-F` | File containing the passphrase. |
-| Initrd validation | `INITRD_CHECKSUM_FILE` | _(empty)_ | `--initrd-checksum-file` | Expected checksum snapshot to verify before unlocking. |
-| Initrd validation | `INITRD_CHECKSUM_DIR` | _(empty)_ | `--initrd-checksum-dir` | Directory to store fetched checksum snapshots. |
-| Initrd validation | `INITRD_CHECKSUM_SCRIPT` | `/app/bin/initrd-checksum` | _n/a_ | Helper used to collect initrd hashes. |
-| Initrd validation | `PARANOID` | _(empty)_ | `PARANOID=1` / `--paranoid` | Hardened initrd-checksum mode using a minimal remote bundle. |
-| Initrd validation | `INITRD_CHECKSUM_REQUIRE_SIGNATURE` | _(empty)_ | `INITRD_CHECKSUM_REQUIRE_SIGNATURE=1` | Fail closed unless the fetched baseline has a valid `ssh-keygen -Y` signature from the host's SSH key. |
-| Health checks | `HEALTHCHECK_PORT` | _(empty)_ | _n/a_ | Optional TCP port probe before attempting unlock. |
-| Health checks | `HEALTHCHECK_REMOTE_CMD` | _(empty)_ | `--remote-check`, `--healthcheck-remote-cmd`, `--remote-command`, `--remote-cmd`, `--rcmd` | Remote command used to confirm reachability. |
-| Health checks | `HEALTHCHECK_REMOTE_HOSTNAME` | _(empty)_ | `--healthcheck-host`, `--hc-host` | Hostname used by the remote check. |
-| Health checks | `HEALTHCHECK_REMOTE_USERNAME` | _(empty)_ | `--healthcheck-user`, `--hc-user` | SSH user for the remote check. |
-| Health checks | `SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE` | `default` | `--healthcheck-known-hosts-type` | Which host key set to use for health-check SSH (`default` or `initrd`). |
-| Notifications | `APPRISE_URL` | _(empty)_ | `--apprise-url`, `--apprise`, `-a` | Apprise endpoint for push notifications. |
-| Notifications | `APPRISE_TAG` | _(empty)_ | `--apprise-tag`, `--tag` | Apprise tag value. |
-| Notifications | `APPRISE_TITLE` | _(empty)_ | `--apprise-title`, `--title` | Notification title. |
-| Email | `MSMTP_ACCOUNT` | _(empty)_ | `--msmtp-email-account`, `--email-account` | Named msmtp account to use when sending mail. |
-| Email | `EMAIL_RECIPIENT` | _(empty)_ | `--email-recipient`, `--email-to` | Recipient email address. |
-| Email | `EMAIL_FROM` | _(empty)_ | `--email-from`, `--email-sender` | Sender email address. |
-| Email | `EMAIL_SUBJECT` | _(empty)_ | `--email-subject` | Subject used in email notifications. |
-| Logging & control | `DEBUG` | _(empty)_ | `--debug`, `-D` | Verbose logging and debug output. |
-| Logging & control | `EVENTS_FILE` | _(empty)_ | `--event-file`, `--event`, `-e` | File path to append unlock events. |
-| Logging & control | `SLEEP_INTERVAL` | `10` | `--sleep-interval`, `--sleep`, `--interval`, `-i` | Seconds to wait between retries. |
-| Logging & control | `SKIP_SSH_PORT_CHECK` | _(empty)_ | `--skip-ssh-port-check`, `--skip-port-check` | Skip preflight SSH port probing. |
-| Runtime | `TMPDIR` | `/tmp` | _n/a_ | Working directory for temporary files. |
-
-## 🐳 Docker
-The repository includes a multi-stage Docker build that bundles the scripts with their dependencies. You can either build locally or pull the published images:
-
-- GitHub Container Registry: `ghcr.io/pschmitt/luks-ssh-unlock`
-- Docker Hub: `docker.io/pschmitt/luks-ssh-unlock`
-
-### 🛠️ Build
 ```bash
-docker build -t luks-ssh-unlock:latest .
+luks-ssh-unlock --host 10.0.0.5 --ssh-key ~/.ssh/id_ed25519 \
+  --ssh-known-hosts-file ~/.ssh/known_hosts \
+  --luks-passphrase-file /run/secrets/luks_password_10.0.0.5 \
+  --healthcheck-cmd 'systemctl is-system-running --wait'
 ```
 
-### ▶️ Run
-Mount your secrets and pass the relevant variables. For example:
+Without a subcommand it watches the host forever (`run`). The subcommands:
+
+| Command | What it does |
+| --- | --- |
+| `run` | Watch the target and unlock it whenever it waits in its initrd (default). With `--once`, make one attempt; the exit status tells whether the host is up. |
+| `status [--json]` | Show the configuration and what the target is doing right now (booted, waiting in initrd, unreachable, …) without sending anything. Exit status 0 if the host is up or can be unlocked. |
+| `tui [FILES…]` | Interactive dashboard of all targets (see below). |
+| `completions SHELL` | Shell completions for bash, zsh, fish, elvish or PowerShell. |
+
+Add `--debug` for verbose logs.
+
+## 🖥️ Dashboard
+
 ```bash
-docker run --rm -it \
+sudo luks-ssh-unlock tui                    # every /etc/luks-ssh-unlock/*.env
+luks-ssh-unlock tui hosts/*.env --refresh 10
+luks-ssh-unlock tui --host 10.0.0.5 …       # one target from the options
+```
+
+The dashboard lists every target with its live state, the details of the
+selected one, and its activity. Keys:
+
+| Key | Action |
+| --- | --- |
+| `↑`/`↓`, `j`/`k` | Select a target |
+| `r` / `R` | Check the selected / every target now |
+| `u` or `⏎` | Unlock the selected target (asks first; all checks still apply) |
+| `F` | Force unlock: skips the checksum and host-key checks (asks first) |
+| `l` or `⇥` | Switch between the activity log and the service's journal |
+| `q` | Quit |
+
+Targets are described by environment files (`KEY=value`, systemd
+`EnvironmentFile=` syntax), the same files the NixOS module writes. Reading
+SSH keys and passphrases usually needs root.
+
+## 🛡️ How an unlock is decided
+
+Each check (every `--interval` seconds, aborted after `--tick-timeout`):
+
+1. **Healthcheck.** If `HEALTHCHECK_PORT` is open or `HEALTHCHECK_REMOTE_CMD`
+   succeeds over SSH, the host is up: nothing to do. When
+   `INITRD_CHECKSUM_DIR` is set, the host's current checksum baseline
+   (`/etc/initrd-checksum/`) is copied to `INITRD_CHECKSUM_DIR/<host>/`.
+2. **SSH port.** If the port does not answer, the host is down.
+3. **Initrd test.** Log in with the initrd host keys and test for
+   `/etc/initrd-release`. A failed healthcheck alone never leads to an
+   unlock.
+4. **Integrity.** With `INITRD_CHECKSUM_FILE`, verify the baseline's
+   `ssh-keygen -Y` signature (made by the host with its regular host key)
+   and compare the running initrd with it, using the `initrd-checksum`
+   helper. A mismatch refuses the unlock.
+5. **Unlock.** Send the passphrase with the configured method.
+
+States are logged once when they change, not on every check. Failures
+(SSH login, integrity, unlock) are also sent as notifications.
+
+LUKS methods (`--luks-type`):
+
+| Method | Aliases | How |
+| --- | --- | --- |
+| `raw` | `direct` | Write the passphrase to the SSH session (dropbear, `cryptroot-unlock` as forced command). |
+| `systemd` | `dracut`, `dracut-sshd`, `dracut-systemd`, `alt` | Answer `systemd-tty-ask-password-agent` on a remote TTY, once echo is off. |
+| `systemd-tool` | `arch` | `cryptsetup luksOpen` the device of the `systemd-cryptsetup@` unit, then restart that unit. |
+| `luks-mount` | | Pipe the passphrase into [`luks-mount`](https://github.com/pschmitt/luks-mount.sh). |
+
+The passphrase never appears in logs, notifications or the process list
+(unless you pass `--luks-passphrase` yourself). Remote output is logged at
+debug level with the passphrase, terminal escapes and password masks
+removed. SSH runs in batch mode, so a missing key fails instead of
+prompting.
+
+## 🧩 Options and environment variables
+
+Every option can also be set through its environment variable. The command
+line wins. Boolean variables are off when empty, `0`, `false`, `no` or
+`off`.
+
+| Category | Variable | Default | Flags | Description |
+| --- | --- | --- | --- | --- |
+| General | `DEBUG` | off | `--debug`, `-D` | Debug logging. |
+| General | `RUN_ONCE` | off | `--once` | One attempt, then exit. |
+| General | `FORCE` | off | `--force`, `-f` | Skip the checksum/signature and host-key checks (needs `--once`). Client-key authentication still applies. |
+| General | `SLEEP_INTERVAL` | `10` | `--interval`, `--sleep`, `-i` | Seconds between checks. |
+| General | `TICK_TIMEOUT` | `120` | `--tick-timeout`, `--timeout` | Abort a check that takes longer. |
+| General | `EVENTS_FILE` | | `--events-file`, `-e` | Append notification events to this file. |
+| SSH | `SSH_HOSTNAME` | (required) | `--host`, `--ssh-host`, `-H` | Target host. |
+| SSH | `SSH_PORT` | `22` | `--port`, `--ssh-port`, `-P` | SSH port. |
+| SSH | `SSH_USERNAME` | `root` | `--username`, `--user`, `-u` | SSH user. |
+| SSH | `SSH_KEY` | `/run/secrets/ssh_key` | `--ssh-key`, `--key`, `-k` | Private key. Copied to a private 0400 file if its permissions are too open for OpenSSH. |
+| SSH | `SSH_CONNECTION_TIMEOUT` | `5` | `--connect-timeout` | SSH connect timeout in seconds. |
+| SSH | `SSH_KNOWN_HOSTS` / `SSH_KNOWN_HOSTS_FILE` | | `--ssh-known-hosts[-file]` | Host keys of the booted system (inline or file). Also the allowed signers of the baseline signature. |
+| SSH | `SSH_INITRD_KNOWN_HOSTS` / `SSH_INITRD_KNOWN_HOSTS_FILE` | | `--ssh-initrd-known-hosts[-file]` | Host keys of the initrd SSH server. |
+| SSH | `FORCE_IPV4` / `FORCE_IPV6` | off | `-4` / `-6` | Use one address family; the target is resolved once per check and pinned. |
+| SSH | `SKIP_SSH_PORT_CHECK` | off | `--skip-ssh-port-check` | Skip the TCP probe of the SSH port. |
+| SSH | `SSH_CONNECT_ADDRESS` / `SSH_HOSTKEY_ALIAS` | | | Connect to this address but verify host keys under this name (set by the DHCP listener). |
+| Jumphost | `SSH_JUMPHOST` | | `--jumphost`, `-J` | Reach the target through this host. |
+| Jumphost | `SSH_JUMPHOST_USERNAME` | `root` | `--jumphost-username`, `-U` | Jumphost user. |
+| Jumphost | `SSH_JUMPHOST_PORT` | the SSH port | `--jumphost-port`, `--jport` | Jumphost port. |
+| Jumphost | `SSH_JUMPHOST_KEY` | the SSH key | `--jumphost-key`, `-K` | Jumphost key. Its host key is checked against both known_hosts sets. |
+| LUKS | `LUKS_TYPE` | `raw` | `--luks-type`, `-t` | Unlock method, see above. |
+| LUKS | `LUKS_PASSPHRASE_FILE` | `/run/secrets/luks_password_<host>` | `--luks-passphrase-file`, `-F` | Passphrase file. Empty disables the default. A systemd credential `luks-passphrase` takes precedence. |
+| LUKS | `LUKS_PASSPHRASE` | | `--luks-passphrase`, `-p` | The passphrase itself (insecure on the command line). |
+| Initrd validation | `INITRD_CHECKSUM_FILE` | | `--initrd-checksum-file` | Baseline the running initrd must match. |
+| Initrd validation | `INITRD_CHECKSUM_DIR` | | `--initrd-checksum-dir` | Where baselines fetched from the booted host are stored. |
+| Initrd validation | `INITRD_CHECKSUM_SCRIPT` | `initrd-checksum` next to the binary | `--initrd-checksum-script` | The checksum helper. |
+| Initrd validation | `INITRD_CHECKSUM_BUSYBOX_DIR` | packaged bundle | | BusyBox bundle for paranoid mode. |
+| Initrd validation | `PARANOID` | off | `--paranoid` | Hash with a minimal BusyBox bundle uploaded to the target. |
+| Initrd validation | `INITRD_CHECKSUM_REQUIRE_SIGNATURE` | off | `--require-signature` | Refuse unless the baseline has a valid signature. |
+| Healthcheck | `HEALTHCHECK_PORT` | | `--healthcheck-port` | TCP port that only opens once the host has booted. |
+| Healthcheck | `HEALTHCHECK_REMOTE_CMD` | | `--healthcheck-cmd`, `--remote-check`, `--rcmd` | Command that only succeeds on the booted system. |
+| Healthcheck | `HEALTHCHECK_REMOTE_HOSTNAME` | the target | `--healthcheck-host`, `--hc-host` | Host to run it on. |
+| Healthcheck | `HEALTHCHECK_REMOTE_USERNAME` | the SSH user | `--healthcheck-user`, `--hc-user` | User to run it as. |
+| Healthcheck | `SSH_HEALTHCHECK_KNOWN_HOSTS_TYPE` | `default` | `--healthcheck-known-hosts-type` | Host keys for the healthcheck: `default` or `initrd`. |
+| Notifications | `APPRISE_URL` | | `--apprise-url`, `-a` | Apprise API endpoint. |
+| Notifications | `APPRISE_TAG` | | `--apprise-tag` | Apprise tag. |
+| Notifications | `APPRISE_TITLE` | | `--apprise-title` | Title; see placeholders below. |
+| Notifications | `EMAIL_RECIPIENT` | | `--email-recipient`, `--email-to` | Mail notifications to this address. |
+| Notifications | `EMAIL_FROM` | | `--email-from` | Sender address. |
+| Notifications | `EMAIL_SUBJECT` | `luks-ssh-unlock: <host> <event>` | `--email-subject` | Subject; see placeholders below. |
+| Notifications | `MSMTP_ACCOUNT` | | `--msmtp-email-account` | Send with `msmtp -a ACCOUNT` instead of `sendmail`. |
+| Runtime | `TMPDIR` | `/tmp` | | Where the private scratch directory is created. |
+
+Titles and subjects may contain `#hostname`, `#username`, `#port`,
+`#jumphost`, `#jusername`, `#jport`, `#luks_type`, `#event`, `#event_type`,
+`#sleep_interval`, `#remote_cmd`, `#remote_hostname` and `#remote_username`.
+
+## ❄️ Nix
+
+```bash
+nix build .#luks-ssh-unlock   # the binary, initrd-checksum, the DHCP listener, completions
+nix develop                   # cargo, clippy, rustfmt, cargo-deny, nixfmt, …
+nix flake check               # package build with unit tests, NixOS module check
+```
+
+The package is built with [crane](https://github.com/ipetkov/crane): its
+dependencies are a derivation of their own, so source changes and version
+bumps reuse them from the cache.
+
+### NixOS module
+
+Import `nixosModules.default` from this flake; it uses the flake's package
+(`services.luks-ssh-unlock.package`).
+
+- `services.luks-ssh-unlock.instances.<name>` defines a target. Each instance
+  gets an environment file `/etc/luks-ssh-unlock/<name>.env` and a service
+  `luks-ssh-unlock-<name>`. `passphraseFile` is passed as a systemd
+  credential.
+- Each instance also gets a `luks-ssh-unlock-<name>` command (it runs sudo
+  itself when needed): no argument makes one validated unlock attempt;
+  `--force`/`-f` skips the checksum/signature and host-key checks; `status`
+  shows the target, the service and its recent logs; `tui` opens the
+  dashboard; `logs`/`l` follows the journal; `start`/`stop` control the
+  service.
+- `dhcpListener.enable` watches DHCP on an interface and starts a one-shot
+  unlock as soon as the target's initrd gets a lease and answers on SSH
+  (needs `CAP_NET_RAW`, which the unit grants).
+- `activationScript.enable` computes the initrd checksum baseline of the host
+  itself on activation and signs it with its SSH host key, so that an
+  unlocker elsewhere can verify it. Enable `initrdCheck.requireSignature` on
+  the unlocker once every target has a signed baseline.
+
+See `nix/module.nix` for every option.
+
+## 🐳 Container
+
+```bash
+docker run --rm \
   -v /path/to/secrets:/run/secrets:ro \
   -e SSH_HOSTNAME=10.0.0.5 \
   -e SSH_KEY=/run/secrets/id_ed25519 \
+  -e SSH_KNOWN_HOSTS_FILE=/run/secrets/known_hosts \
   -e LUKS_PASSPHRASE_FILE=/run/secrets/luks_password_10.0.0.5 \
   ghcr.io/pschmitt/luks-ssh-unlock:latest
 ```
-The container entrypoint copies `msmtprc` into place when provided and then execs the main script, so all flags can be passed as CLI arguments or environment variables.
 
-### 🧱 docker-compose
-`docker-compose.yaml` now demonstrates multiple unlock targets with health checks, notifications, jumphosts, and initrd validation. Key points:
+Images: `ghcr.io/pschmitt/luks-ssh-unlock` and
+`docker.io/pschmitt/luks-ssh-unlock` (amd64, arm64). An msmtp configuration
+mounted at `/config/msmtprc` is installed for mail notifications.
+`docker-compose.yaml` shows several targets with health checks,
+notifications, a jumphost and initrd validation.
 
-- Secrets are provided via the Compose `secrets` feature so SSH keys and passphrases stay off the command line.
-- Each service mounts a shared `events/` directory for audit logs and exposes health checks via environment variables.
-- Jumphost settings, Apprise URLs, and msmtp email metadata are wired in to show how notifications integrate.
-- Initrd checksum validation is enabled for one service to illustrate paranoid startup checks.
-- When health checks succeed and `INITRD_CHECKSUM_DIR` is set, the initrd snapshot from `/etc/initrd-checksum` is downloaded into `INITRD_CHECKSUM_DIR/<hostname>/` (for example `events/initrd-checksum/vault-east/`) so you can diff future boots.
+## 🤝 Development
 
-See the inline comments in the Compose file for guidance when adapting it to your environment.
+```bash
+nix develop -c cargo test
+nix develop -c cargo clippy --all-targets -- -D warnings
+nix develop -c cargo fmt
+nix develop -c cargo deny check
+shellcheck initrd-checksum.sh entrypoint.sh
+```
 
-## ❄️ Nix
-A flake is provided for reproducible builds, development shells, and a NixOS module.
-
-- Build the main package: `nix build .#luks-ssh-unlock`
-- Build the entrypoint helper: `nix build .#entrypoint`
-- Enter a shell with all required tools: `nix develop`
-- Pull in static BusyBox utilities: `nix build .#busybox-static`
-
-### 🧩 NixOS module
-The `nix/module.nix` output offers a `services.luks-ssh-unlock` module for declarative deployments. Highlights:
-
-- `services.luks-ssh-unlock.enable` toggles the service and packages the CLI.
-- `services.luks-ssh-unlock.instances` lets you define multiple targets; each instance emits an environment file under `/etc/luks-ssh-unlock/<name>.env` and a matching systemd unit `luks-ssh-unlock-<name>`.
-- Each instance also adds a `luks-ssh-unlock-<name>` command. With no arguments it makes one unlock attempt using that instance's configured credentials; `logs`/`l` tails that instance's systemd journal. `--force`/`-f` skips initrd checksum/signature validation and SSH host-key verification; client-key authentication remains enabled. Use it only when you intend to bypass both checks. Wrappers automatically invoke sudo when run as a regular user, using the host's existing sudo policy. Transient systemd runs suppress their unit announcements and resource summaries while preserving command output and exit status. For example: `luks-ssh-unlock-rofl-10 --force`.
-- Each instance supports SSH (host, user, key, port, force IPv4/IPv6), jumphosts, LUKS type and passphrase inputs, optional initrd checksum validation, and health checks.
-- A failed normal-boot healthcheck only triggers an initrd check; the module confirms `/etc/initrd-release` over initrd SSH before attempting an unlock. NixOS systemd initrds and dracut initrds provide this marker.
-- Instances configured with `passphraseFile` load the passphrase through systemd credentials for the daemon, manual shim runs, and DHCP-triggered one-shot runs. The shims keep `status`, `logs`/`l`, `start`, and `stop` behavior.
-- Notification helpers include email fields (`recipient`, `sender`, `subject`) and msmtp wiring, plus host key pinning for both normal and initrd unlock flows.
-- `services.luks-ssh-unlock.activationScript.enable` can precompute initrd checksums during activation by using the packaged `initrd-checksum` helper.
-- The activation script also signs the checksum baseline (`checksum.sig`) with the host's own `/etc/ssh/ssh_host_ed25519_key`, using `ssh-keygen -Y sign`. Since `fetch_initrd_checksum` already pulls the whole `/etc/initrd-checksum/` directory, the signature travels with the baseline automatically. Set `services.luks-ssh-unlock.instances.<name>.initrdCheck.requireSignature = true` to fail closed if that signature is missing or doesn't verify against the host's known SSH public key (`sshKnownHosts`/`sshKnownHostsFile`) — this protects the locally cached baseline from being swapped out after it's fetched. Only enable it once every target host has redeployed with a signed baseline and a fresh copy has been fetched.
-
-Refer to `nix/module.nix` for the full option list and defaults; each option is documented inline in the module for quick reference.
-
-## 🤝 Contributing
-- Bash scripts follow strict shell practices; please run `shellcheck` before submitting changes.
-- Keep option documentation in sync between the script usage and the environment table above.
+`initrd-checksum.sh` stays a shell script: it copies itself to the target
+and runs there, in initrds that have nothing but a shell.
 
 ## 📜 License
-This project is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
+
+GNU General Public License v3.0. See [LICENSE](LICENSE).

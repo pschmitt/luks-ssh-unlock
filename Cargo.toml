@@ -1,0 +1,27 @@
+[package]
+name = "luks-ssh-unlock"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Unlock LUKS-encrypted hosts remotely by feeding their initrd the passphrase over SSH"
+license = "GPL-3.0-only"
+repository = "https://github.com/pschmitt/luks-ssh-unlock"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+clap_complete = "4"
+libc = "0.2"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+zeroize = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

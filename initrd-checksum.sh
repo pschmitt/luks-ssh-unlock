@@ -392,6 +392,7 @@ hash_tree() {
       done
       for ignore_glob in "${IGNORE_GLOBS[@]}"
       do
+        # shellcheck disable=SC2254 # IGNORE_GLOBS are patterns on purpose
         case "$abs_path" in
           $ignore_glob)
             continue 2
