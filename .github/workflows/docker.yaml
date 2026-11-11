@@ -12,131 +12,19 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-env:
-  IMAGE: pschmitt/luks-ssh-unlock
 jobs:
-  # Each architecture builds natively (no QEMU: compiling Rust under emulation
-  # takes ages) and pushes its image by digest; `merge` joins them into one
-  # multi-arch manifest. Pull requests only build.
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
-    env:
-      PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@v7
-      - id: platform
-        run: |
-          platform="${{ matrix.platform }}"
-          echo "pair=${platform//\//-}" >> "$GITHUB_OUTPUT"
-          echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v4
-      - if: env.PUBLISH == 'true'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      - if: env.PUBLISH == 'true'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      # Layers (notably cargo-chef's dependency layer) are cached per
-      # architecture in the GitHub Actions cache.
-      - id: build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          labels: |
-            org.opencontainers.image.version=${{ steps.platform.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          outputs: ${{ env.PUBLISH == 'true' && format('type=image,"name=docker.io/{0},ghcr.io/{0}",push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=cacheonly' }}
-          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
-          sbom: ${{ env.PUBLISH == 'true' }}
-          cache-from: type=gha,scope=docker-${{ steps.platform.outputs.pair }}
-          cache-to: type=gha,mode=max,scope=docker-${{ steps.platform.outputs.pair }}
-      - if: env.PUBLISH == 'true'
-        run: |
-          mkdir -p "${{ runner.temp }}/digests"
-          digest="${{ steps.build.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
-      - if: env.PUBLISH == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: digests-${{ steps.platform.outputs.pair }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-  merge:
-    needs: build
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+  # Native amd64 and arm64 builds (no QEMU), published from main only.
+  docker:
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        registry: [docker.io, ghcr.io]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          path: ${{ runner.temp }}/digests
-          pattern: digests-*
-          merge-multiple: true
-      - id: meta
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
-          image="${{ matrix.registry }}/${{ env.IMAGE }}"
-          {
-            echo "image=${image}"
-            echo "version=${version}"
-            echo "tags=-t ${image}:latest -t ${image}:main -t ${image}:sha-${{ github.sha }}"
-          } >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v4
-      - if: matrix.registry == 'docker.io'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      - if: matrix.registry == 'ghcr.io'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - working-directory: ${{ runner.temp }}/digests
-        run: |
-          # shellcheck disable=SC2046,SC2086
-          docker buildx imagetools create ${{ steps.meta.outputs.tags }} \
-            --annotation "index:org.opencontainers.image.version=${{ steps.meta.outputs.version }}" \
-            --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
-            $(printf '${{ steps.meta.outputs.image }}@sha256:%s ' *)
-      - id: digest
-        if: matrix.registry == 'ghcr.io'
-        run: |
-          digest=$(docker buildx imagetools inspect "${{ steps.meta.outputs.image }}:latest" --format '{{json .Manifest}}' | jq -r .digest)
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-      # Build provenance for the GHCR image; verify with
-      # `gh attestation verify oci://ghcr.io/pschmitt/luks-ssh-unlock:latest -R pschmitt/luks-ssh-unlock`.
-      - if: matrix.registry == 'ghcr.io'
-        uses: actions/attest@v4
-        with:
-          subject-name: ${{ steps.meta.outputs.image }}
-          subject-digest: ${{ steps.digest.outputs.digest }}
-          push-to-registry: true
+    uses: pschmitt/ci-workflows/.github/workflows/docker-native.yaml@main
+    with:
+      image-name: pschmitt/luks-ssh-unlock
+      registries: '["docker.io", "ghcr.io"]'
+      publish: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    secrets:
+      dockerhub_username: ${{ secrets.DOCKER_USERNAME }}
+      dockerhub_password: ${{ secrets.DOCKER_PASSWORD }}
