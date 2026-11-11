@@ -1,5 +1,12 @@
 # 🔐 luks-ssh-unlock
 
+<p>
+  <a href="https://nixbot.brkn.lol/repos/github/pschmitt/luks-ssh-unlock"><img src="https://nixbot.brkn.lol/repos/github/pschmitt/luks-ssh-unlock/badge.svg?branch=main" alt="nixbot"></a>
+  <a href="https://github.com/pschmitt/luks-ssh-unlock/actions/workflows/build.yaml"><img src="https://github.com/pschmitt/luks-ssh-unlock/actions/workflows/build.yaml/badge.svg" alt="build"></a>
+  <a href="https://github.com/pschmitt/luks-ssh-unlock/actions/workflows/test.yaml"><img src="https://github.com/pschmitt/luks-ssh-unlock/actions/workflows/test.yaml/badge.svg" alt="test"></a>
+  <a href="https://github.com/pschmitt/luks-ssh-unlock/actions/workflows/docker.yaml"><img src="https://github.com/pschmitt/luks-ssh-unlock/actions/workflows/docker.yaml/badge.svg" alt="docker"></a>
+</p>
+
 `luks-ssh-unlock` unlocks LUKS-encrypted hosts remotely. It watches a host,
 and when the host waits in its initrd for the disk passphrase, it checks that
 this is the initrd it expects (pinned SSH host keys, an optional checksum

@@ -122,7 +122,7 @@
       # aarch64-linux builds natively on GitHub's arm runners (the nix-aarch64
       # job of .github/workflows/build.yaml).
       hydraJobs = nixpkgs.lib.genAttrs [ "x86_64-linux" ] (system: {
-        inherit (self.packages.${system}) luks-ssh-unlock entrypoint;
+        packages = self.packages.${system};
         checks = self.checks.${system};
       });
 
