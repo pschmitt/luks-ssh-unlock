@@ -22,7 +22,9 @@ options and the container interface are compatible.
   periodic check. It warns (in the list, the header and the details) when a
   target's systemd service is stopped, failed, disabled or masked.
   On a narrow or tall terminal (a phone) the panes are stacked and the header
-  and key hints are shortened.
+  and key hints are shortened. The target list is sized to its content, the
+  borders between panes can be dragged with the mouse, `Shift`+arrows or `Tab`
+  move the focus between panes, and `l` shows the activity full screen.
 - When run interactively without the permissions to read keys, passphrases
   or the target configuration, the command re-runs itself with `sudo`
   (`--no-sudo` or `LUKS_SSH_UNLOCK_NO_SUDO=1` disable this). Without a

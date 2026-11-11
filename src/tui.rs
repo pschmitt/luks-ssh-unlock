@@ -232,6 +232,31 @@ impl Entry {
     }
 }
 
+/// Which pane keyboard input is aimed at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    List,
+    Details,
+    Activity,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// A pane border that can be dragged with the mouse.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    /// Between the target list and the details.
+    List,
+    /// Between the details and the activity.
+    Details,
+}
+
 struct App {
     targets: Vec<Target>,
     list: ListState,
@@ -242,6 +267,17 @@ struct App {
     log_scroll: usize,
     /// Narrow or tall terminal (a phone): panes are stacked.
     portrait: bool,
+    focus: Focus,
+    /// The activity fills the whole screen (`l`).
+    logs_full: bool,
+    drag: Option<Edge>,
+    /// Pane sizes set by dragging the borders (otherwise sized to their
+    /// content): landscape list width and height of the top row; portrait
+    /// list height; and the portrait details height in percent.
+    land_list_w: Option<u16>,
+    land_top_h: Option<u16>,
+    port_list_h: Option<u16>,
+    port_details_pct: u16,
     /// Screen areas of the last frame, for mouse hit-testing.
     hit: Hit,
     last_click: Option<(Instant, usize)>,
@@ -249,8 +285,12 @@ struct App {
 
 #[derive(Default)]
 struct Hit {
+    body: Rect,
     list: Rect,
+    details: Rect,
     logs: Rect,
+    edge_list: Rect,
+    edge_details: Rect,
     yes: Rect,
     cancel: Rect,
     dialog: Rect,
@@ -481,6 +521,13 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
         quit: false,
         log_scroll: 0,
         portrait: false,
+        focus: Focus::List,
+        logs_full: false,
+        drag: None,
+        land_list_w: None,
+        land_top_h: None,
+        port_list_h: None,
+        port_details_pct: 45,
         hit: Hit::default(),
         last_click: None,
     };
@@ -570,11 +617,43 @@ impl App {
         }
         let n = self.targets.len();
         let sel = self.selected();
+        let shift = mods.contains(KeyModifiers::SHIFT);
+        let dir = match code {
+            KeyCode::Left => Some(Dir::Left),
+            KeyCode::Right => Some(Dir::Right),
+            KeyCode::Up => Some(Dir::Up),
+            KeyCode::Down => Some(Dir::Down),
+            _ => None,
+        };
         match code {
+            // Shift+arrows always move the focus; plain arrows act inside
+            // the focused pane and move the focus where the pane has no use
+            // for them.
+            _ if shift && dir.is_some() => self.move_focus(dir.expect("checked")),
+            KeyCode::Char('l') if n > 0 => {
+                self.logs_full = !self.logs_full;
+                self.focus = Focus::Activity;
+            }
+            KeyCode::Esc if self.logs_full => self.logs_full = false,
+            KeyCode::Tab => self.cycle_focus(true),
+            KeyCode::BackTab => self.cycle_focus(false),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Down | KeyCode::Char('j') if n > 0 => self.select((sel + 1) % n),
-            KeyCode::Up | KeyCode::Char('k') if n > 0 => self.select((sel + n - 1) % n),
+            KeyCode::Down | KeyCode::Char('j') if n > 0 && self.focus == Focus::List => {
+                self.select((sel + 1) % n)
+            }
+            KeyCode::Up | KeyCode::Char('k') if n > 0 && self.focus == Focus::List => {
+                self.select((sel + n - 1) % n)
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.focus == Focus::Activity => {
+                self.scroll_logs(false, 1)
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.focus == Focus::Activity => {
+                self.scroll_logs(true, 1)
+            }
+            KeyCode::Home if self.focus == Focus::Activity => self.scroll_logs(true, usize::MAX),
+            KeyCode::End if self.focus == Focus::Activity => self.log_scroll = 0,
+            _ if dir.is_some() => self.move_focus(dir.expect("checked")),
             KeyCode::PageUp => self.scroll_logs(true, self.hit.logs.height as usize),
             KeyCode::PageDown => self.scroll_logs(false, self.hit.logs.height as usize),
             KeyCode::Char('r') => self.send(sel, Cmd::Probe),
@@ -584,6 +663,70 @@ impl App {
             }
             KeyCode::Char('F') if n > 0 && self.targets[sel].tx.is_some() => {
                 self.confirm = Some((sel, true))
+            }
+            _ => {}
+        }
+    }
+
+    fn border(&self, pane: Focus) -> Style {
+        if self.focus == pane {
+            Style::new().cyan().bold()
+        } else {
+            Style::new()
+        }
+    }
+
+    /// Focus the neighbouring pane in a direction (the layout decides which
+    /// that is).
+    fn move_focus(&mut self, dir: Dir) {
+        if self.logs_full {
+            return;
+        }
+        self.focus = match (self.portrait, self.focus, dir) {
+            (false, Focus::List, Dir::Right) => Focus::Details,
+            (false, Focus::Details | Focus::Activity, Dir::Left) => Focus::List,
+            (false, Focus::List, Dir::Down) => Focus::Activity,
+            (true, Focus::Details, Dir::Up) => Focus::List,
+            (true, Focus::List, Dir::Down) => Focus::Details,
+            (_, Focus::Details, Dir::Down) => Focus::Activity,
+            (_, Focus::Activity, Dir::Up) => Focus::Details,
+            (_, f, _) => f,
+        };
+    }
+
+    fn cycle_focus(&mut self, forward: bool) {
+        if self.logs_full {
+            return;
+        }
+        self.focus = match (self.focus, forward) {
+            (Focus::List, true) | (Focus::Activity, false) => Focus::Details,
+            (Focus::Details, true) | (Focus::List, false) => Focus::Activity,
+            (Focus::Activity, true) | (Focus::Details, false) => Focus::List,
+        };
+    }
+
+    /// Move the dragged border to the pointer.
+    fn resize(&mut self, x: u16, y: u16) {
+        let body = self.hit.body;
+        if body.width == 0 || body.height == 0 {
+            return;
+        }
+        match (self.portrait, self.drag) {
+            (false, Some(Edge::List)) => {
+                let w = x.saturating_sub(body.x) + 1;
+                self.land_list_w = Some(w.clamp(15, body.width.saturating_sub(20).max(15)));
+            }
+            (false, Some(Edge::Details)) => {
+                let h = y.saturating_sub(body.y) + 1;
+                self.land_top_h = Some(h.clamp(6, body.height.saturating_sub(4).max(6)));
+            }
+            (true, Some(Edge::List)) => {
+                let h = y.saturating_sub(body.y) + 1;
+                self.port_list_h = Some(h.clamp(4, body.height.saturating_sub(8).max(4)));
+            }
+            (true, Some(Edge::Details)) => {
+                let h = (u32::from(y) + 1).saturating_sub(u32::from(self.hit.details.y));
+                self.port_details_pct = (h * 100 / u32::from(body.height)).clamp(15, 70) as u16;
             }
             _ => {}
         }
@@ -618,6 +761,33 @@ impl App {
                 }
             }
             return;
+        }
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.drag = if contains(self.hit.edge_list, x, y) {
+                    Some(Edge::List)
+                } else if contains(self.hit.edge_details, x, y) {
+                    Some(Edge::Details)
+                } else {
+                    None
+                };
+                if self.drag.is_some() {
+                    return;
+                }
+                if contains(self.hit.list, x, y) {
+                    self.focus = Focus::List;
+                } else if contains(self.hit.details, x, y) {
+                    self.focus = Focus::Details;
+                } else if contains(self.hit.logs, x, y) {
+                    self.focus = Focus::Activity;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.drag.is_some() => {
+                self.resize(x, y);
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.drag = None,
+            _ => {}
         }
         let n = self.targets.len();
         if n == 0 {
@@ -670,30 +840,69 @@ impl App {
         ])
         .areas(f.area());
         let area = f.area();
+        self.hit.edge_list = Rect::default();
+        self.hit.edge_details = Rect::default();
         // Cells are about twice as tall as wide: below this the side-by-side
         // layout is cramped, so stack the panes instead.
         self.portrait = area.width < 80 || u32::from(area.width) * 2 < u32::from(area.height) * 3;
         let (left, details, logs) = if self.portrait {
-            // Two rows per target, but never more than a third of the screen.
-            let list_h = (self.targets.len() as u16)
+            // Two rows per target, but never more than a third of the screen
+            // unless dragged there.
+            let auto = (self.targets.len() as u16)
                 .saturating_mul(2)
                 .saturating_add(2)
                 .clamp(4, (body.height / 3).max(4));
+            let list_h = self
+                .port_list_h
+                .map_or(auto, |h| h.clamp(4, body.height.saturating_sub(8).max(4)));
             let [l, d, g] = Layout::vertical([
                 Constraint::Length(list_h),
-                Constraint::Percentage(45),
+                Constraint::Percentage(self.port_details_pct),
                 Constraint::Min(4),
             ])
             .areas(body);
+            self.hit.edge_list = Rect::new(body.x, l.bottom().saturating_sub(1), body.width, 2);
+            self.hit.edge_details = Rect::new(body.x, d.bottom().saturating_sub(1), body.width, 2);
             (l, d, g)
         } else {
-            let [left, right] =
-                Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
-                    .areas(body);
-            let [details, logs] =
-                Layout::vertical([Constraint::Length(16), Constraint::Min(3)]).areas(right);
+            // The list is as wide as its content needs, next to the details;
+            // the activity gets the full width below.
+            let content_w = self
+                .targets
+                .iter()
+                .map(|t| {
+                    let warn = t.unit.as_ref().is_some_and(|u| u.warning().is_some());
+                    let title = 2 + t.name.chars().count() + if warn { 10 } else { 0 };
+                    title.max(3 + summary(t).1.chars().count())
+                })
+                .max()
+                .unwrap_or(0) as u16
+                + 4; // borders and the highlight symbol
+            let list_w = self
+                .land_list_w
+                .map_or(content_w.clamp(24, (body.width * 2 / 5).max(24)), |w| {
+                    w.clamp(15, body.width.saturating_sub(20).max(15))
+                });
+            let auto_h = ((self.targets.len() as u16)
+                .saturating_mul(2)
+                .saturating_add(2))
+            .clamp(14, (body.height / 2).max(14));
+            let top_h = self
+                .land_top_h
+                .map_or(auto_h, |h| h.clamp(6, body.height.saturating_sub(4).max(6)))
+                .min(body.height.saturating_sub(3))
+                .max(3);
+            let [top, logs] =
+                Layout::vertical([Constraint::Length(top_h), Constraint::Min(3)]).areas(body);
+            let [left, details] =
+                Layout::horizontal([Constraint::Length(list_w), Constraint::Min(10)]).areas(top);
+            self.hit.edge_list = Rect::new(left.right().saturating_sub(1), top.y, 2, top.height);
+            self.hit.edge_details =
+                Rect::new(body.x, top.bottom().saturating_sub(1), body.width, 2);
             (left, details, logs)
         };
+        self.hit.body = body;
+        self.hit.details = details;
 
         let inactive = self
             .targets
@@ -746,13 +955,31 @@ impl App {
                 body,
             );
         } else {
-            self.draw_list(f, left);
             let sel = self.selected();
-            self.draw_details(f, details, sel);
-            self.draw_logs(f, logs, sel);
+            if self.logs_full {
+                self.hit.list = Rect::default();
+                self.hit.details = Rect::default();
+                self.draw_logs(f, body, sel);
+            } else {
+                self.draw_list(f, left);
+                self.draw_details(f, details, sel);
+                self.draw_logs(f, logs, sel);
+            }
         }
 
-        let hints = if self.confirm.is_some() {
+        let hints = if self.logs_full && self.confirm.is_none() {
+            Line::from(
+                pick(
+                    footer.width,
+                    &[
+                        " ↑↓/PgUp/PgDn/wheel scroll · Home/End oldest/newest · l/Esc back · q quit",
+                        " ↑↓ scroll · l/Esc back · q quit",
+                        " l back · q quit",
+                    ],
+                )
+                .dim(),
+            )
+        } else if self.confirm.is_some() {
             Line::from(
                 pick(
                     footer.width,
@@ -769,8 +996,8 @@ impl App {
                 pick(
                     footer.width,
                     &[
-                        " ↑↓/jk/click select · r refresh · R refresh all · u/⏎/double-click unlock · F force · wheel/PgUp/PgDn scroll activity · q quit",
-                        " ↑↓ select · r/R refresh · u unlock · F force · PgUp/PgDn scroll · q quit",
+                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · r/R refresh · u/⏎/double-click unlock · F force · l full-screen activity · q quit",
+                        " ↑↓ select · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · l log · q quit",
                         " ↑↓ select · r refresh · u unlock · q quit",
                         " ↑↓ · r · u · q",
                     ],
@@ -805,7 +1032,11 @@ impl App {
             })
             .collect();
         let list = List::new(items)
-            .block(Block::bordered().title(" Targets "))
+            .block(
+                Block::bordered()
+                    .title(" Targets ")
+                    .border_style(self.border(Focus::List)),
+            )
             .highlight_style(
                 Style::new()
                     .bg(Color::DarkGray)
@@ -931,9 +1162,11 @@ impl App {
             None => format!(" {} ", t.name),
         };
         f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title(title)),
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(self.border(Focus::Details)),
+            ),
             area,
         );
     }
@@ -942,7 +1175,11 @@ impl App {
         self.hit.logs = area;
         let t = &self.targets[idx];
         let height = area.height.saturating_sub(2) as usize;
-        let title = " Activity · service journal and this dashboard ";
+        let title = if self.logs_full {
+            format!(" Activity · {} · l or Esc closes ", t.name)
+        } else {
+            " Activity · service journal and this dashboard ".to_string()
+        };
         let lines: Vec<Line> = t
             .logs
             .iter()
@@ -978,9 +1215,11 @@ impl App {
             title.to_string()
         };
         f.render_widget(
-            Paragraph::new(window)
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title(title)),
+            Paragraph::new(window).wrap(Wrap { trim: false }).block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(self.border(Focus::Activity)),
+            ),
             area,
         );
     }
@@ -1126,6 +1365,13 @@ mod tests {
             quit: false,
             log_scroll: 0,
             portrait: false,
+            focus: Focus::List,
+            logs_full: false,
+            drag: None,
+            land_list_w: None,
+            land_top_h: None,
+            port_list_h: None,
+            port_details_pct: 45,
             hit: Hit::default(),
             last_click: None,
         }
@@ -1142,7 +1388,12 @@ mod tests {
         let mut a = app(2);
         render(&mut a, 120, 30);
         assert!(!a.portrait);
-        assert!(a.hit.logs.x > a.hit.list.x);
+        // List and details side by side, the activity below at full width.
+        assert!(a.hit.details.x > a.hit.list.x);
+        assert!(a.hit.logs.y > a.hit.details.y);
+        assert_eq!(a.hit.logs.width, 120);
+        // The list is as wide as its content, not a third of the screen.
+        assert!(a.hit.list.width < 40, "{}", a.hit.list.width);
     }
 
     #[test]
@@ -1171,7 +1422,130 @@ mod tests {
             let mut a = app(3);
             a.confirm = Some((1, true));
             render(&mut a, w, h);
+            a.logs_full = true;
+            render(&mut a, w, h);
         }
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn drag(a: &mut App, from: (u16, u16), to: (u16, u16)) {
+        a.mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            from.0,
+            from.1,
+        ));
+        a.mouse(mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1));
+        a.mouse(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1));
+    }
+
+    #[test]
+    fn shift_arrows_move_focus_by_layout() {
+        let mut a = app(2);
+        render(&mut a, 120, 30);
+        a.key(KeyCode::Right, KeyModifiers::SHIFT);
+        assert!(a.focus == Focus::Details);
+        a.key(KeyCode::Down, KeyModifiers::SHIFT);
+        assert!(a.focus == Focus::Activity);
+        a.key(KeyCode::Left, KeyModifiers::SHIFT);
+        assert!(a.focus == Focus::List);
+        a.key(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(a.focus == Focus::Details);
+        a.key(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert!(a.focus == Focus::List);
+
+        let mut p = app(2);
+        render(&mut p, 45, 40);
+        p.key(KeyCode::Down, KeyModifiers::SHIFT);
+        assert!(p.focus == Focus::Details);
+        p.key(KeyCode::Down, KeyModifiers::SHIFT);
+        assert!(p.focus == Focus::Activity);
+        p.key(KeyCode::Up, KeyModifiers::SHIFT);
+        assert!(p.focus == Focus::Details);
+    }
+
+    #[test]
+    fn plain_arrows_act_in_the_focused_pane() {
+        let mut a = app(3);
+        render(&mut a, 120, 30);
+        a.key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(a.selected(), 1);
+        a.key(KeyCode::Right, KeyModifiers::NONE);
+        assert!(a.focus == Focus::Details);
+        a.key(KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.focus == Focus::Activity);
+        a.key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(a.log_scroll, 1);
+        assert_eq!(a.selected(), 1);
+    }
+
+    #[test]
+    fn dragging_borders_resizes_landscape() {
+        let mut a = app(2);
+        render(&mut a, 120, 30);
+        let before = a.hit.list.width;
+        let edge = a.hit.edge_list;
+        drag(&mut a, (edge.x, 10), (60, 10));
+        render(&mut a, 120, 30);
+        assert!(a.hit.list.width > before, "{} > {before}", a.hit.list.width);
+
+        let edge = a.hit.edge_details;
+        drag(&mut a, (edge.x + 5, edge.y), (edge.x + 5, 20));
+        render(&mut a, 120, 30);
+        assert_eq!(a.hit.details.height, 20);
+    }
+
+    #[test]
+    fn dragging_borders_resizes_portrait() {
+        let mut a = app(2);
+        render(&mut a, 45, 40);
+        let edge = a.hit.edge_list;
+        drag(&mut a, (10, edge.y), (10, 15));
+        render(&mut a, 45, 40);
+        // The border follows the pointer: rows 1 (below the header) to 15.
+        assert_eq!(a.hit.list.height, 15);
+        let edge = a.hit.edge_details;
+        drag(&mut a, (10, edge.y), (10, 30));
+        render(&mut a, 45, 40);
+        assert!(a.hit.details.height > 14);
+    }
+
+    #[test]
+    fn clicking_a_pane_focuses_it() {
+        let mut a = app(2);
+        render(&mut a, 120, 30);
+        let logs = a.hit.logs;
+        a.mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            logs.x + 3,
+            logs.y + 3,
+        ));
+        assert!(a.focus == Focus::Activity);
+    }
+
+    #[test]
+    fn l_toggles_fullscreen_activity() {
+        let mut a = app(2);
+        render(&mut a, 120, 30);
+        a.key(KeyCode::Char('l'), KeyModifiers::NONE);
+        render(&mut a, 120, 30);
+        assert!(a.logs_full);
+        assert_eq!(a.hit.logs.width, 120);
+        assert_eq!(a.hit.list.width, 0);
+        a.key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!a.logs_full && !a.quit);
+        a.key(KeyCode::Char('l'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('l'), KeyModifiers::NONE);
+        assert!(!a.logs_full);
+        a.key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.quit);
     }
 
     #[test]

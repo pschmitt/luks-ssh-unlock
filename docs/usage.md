@@ -47,25 +47,31 @@ turn this off). Services and scripts never do this.
 
 On a narrow or tall terminal (under 80 columns, or taller than about two
 thirds of its width, such as a phone) the panes are stacked instead: targets
-on top, then the details, then the activity.
+on top, then the details, then the activity. `Shift`+`Up`/`Down` moves the
+focus between them.
 
-The left pane lists the targets and their state, the right pane shows the
-selected target's details and its activity: the service's journal
+The target list (as wide and tall as its content needs) and the selected
+target's details share the top; below them, at the full width, is the
+activity: the service's journal
 (`journalctl -u luks-ssh-unlock-<name>.service`, live) interleaved with what
 the dashboard itself does (check results, unlocks), marked `svc` and `tui`.
 
 | Key | Action |
 | --- | --- |
-| `Up`/`Down`, `j`/`k` | Select a target |
+| `Up`/`Down`, `j`/`k` | Select a target (scroll, when the activity has the focus) |
+| `Shift`+arrows, `Tab`/`Shift`+`Tab` | Move the focus to another pane (highlighted border) |
+| Arrows | Also move the focus when the focused pane has no use for them |
+| `l` | Show the activity full screen; `l` or `Esc` goes back |
 | `r` / `R` | Check the selected target / every target now |
 | `u`, `Enter` | Unlock the selected target, after confirmation. All checks still apply. |
 | `F` | Force unlock, after confirmation. Skips the integrity and host-key checks. |
-| `PageUp`/`PageDown` | Scroll the activity |
-| `q`, `Esc` | Quit |
+| `PageUp`/`PageDown`, `Home`/`End` | Scroll the activity, oldest/newest |
+| `q`, `Esc` | Quit (`Esc` closes the full-screen activity first) |
 
 With a mouse: click a target to select it, double-click to unlock it (the
-confirmation dialog has clickable **Yes** and **Cancel** buttons), scroll the
-wheel over the target list or the activity.
+confirmation dialog has clickable **Yes** and **Cancel** buttons), click a
+pane to focus it, scroll the wheel over the target list or the activity, and
+drag the borders between the panes to resize them.
 
 The dashboard follows each service's journal live (this needs root or the
 `systemd-journal` group) and checks a target again as soon as its service logs
