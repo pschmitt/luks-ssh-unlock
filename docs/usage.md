@@ -41,10 +41,14 @@ luks-ssh-unlock tui --host target.example.com   # one target from the options
 Each target is described by an environment file in systemd
 `EnvironmentFile=` syntax, the same files the NixOS module writes. Reading SSH
 keys and passphrases usually needs root.
+Started as a normal user in a terminal, the command re-runs itself with
+`sudo` when it cannot read them (`--no-sudo` or `LUKS_SSH_UNLOCK_NO_SUDO=1`
+turn this off). Services and scripts never do this.
 
 The left pane lists the targets and their state, the right pane shows the
-selected target's details and either this session's activity or the
-service's journal (`journalctl -u luks-ssh-unlock-<name>.service`).
+selected target's details and its activity: the service's journal
+(`journalctl -u luks-ssh-unlock-<name>.service`, live) interleaved with what
+the dashboard itself does (check results, unlocks), marked `svc` and `tui`.
 
 | Key | Action |
 | --- | --- |
@@ -52,14 +56,12 @@ service's journal (`journalctl -u luks-ssh-unlock-<name>.service`).
 | `r` / `R` | Check the selected target / every target now |
 | `u`, `Enter` | Unlock the selected target, after confirmation. All checks still apply. |
 | `F` | Force unlock, after confirmation. Skips the integrity and host-key checks. |
-| `l`, `Tab` | Switch between activity and journal |
-| `PageUp`/`PageDown` | Scroll the activity or journal |
+| `PageUp`/`PageDown` | Scroll the activity |
 | `q`, `Esc` | Quit |
 
 With a mouse: click a target to select it, double-click to unlock it (the
 confirmation dialog has clickable **Yes** and **Cancel** buttons), scroll the
-wheel over the target list or the log pane, and click the log pane's title
-to switch between activity and journal.
+wheel over the target list or the activity.
 
 The dashboard follows each service's journal live (this needs root or the
 `systemd-journal` group) and checks a target again as soon as its service logs

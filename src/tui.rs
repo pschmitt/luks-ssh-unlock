@@ -1,5 +1,5 @@
 //! Interactive dashboard: every configured target with its live state,
-//! details, logs, and one-key (confirmed) unlocks.
+//! details, activity (the service's journal plus its own actions), and one-key (confirmed) unlocks.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -29,6 +29,7 @@ use crate::daemon::State;
 use crate::log::{Level, LogLine, Logger};
 use crate::settings::{GlobalOpts, Settings, parse_env_file};
 use crate::status::{Report, Severity, TargetState};
+use chrono::{DateTime, Local, TimeZone};
 
 const LOG_LINES: usize = 500;
 /// Minimum time between two checks triggered by new journal lines.
@@ -47,13 +48,18 @@ pub struct Source {
 /// NixOS module's directory.
 pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
     let paths: Vec<PathBuf> = if files.is_empty() {
-        let mut found: Vec<PathBuf> = fs::read_dir(DEFAULT_CONFIG_DIR)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.extension().is_some_and(|e| e == "env"))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut found: Vec<PathBuf> = match fs::read_dir(DEFAULT_CONFIG_DIR) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "env"))
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("cannot read {DEFAULT_CONFIG_DIR}"))
+                );
+            }
+            Err(_) => Vec::new(),
+        };
         found.sort();
         found
     } else {
@@ -99,9 +105,9 @@ enum Msg {
     Busy(usize, Option<&'static str>),
     Done(usize, Option<State>),
     /// The service journal's recent history, once at start.
-    Journal(usize, Vec<String>),
-    /// One new line of the service journal.
-    JournalLine(usize, String),
+    History(usize, Vec<Entry>),
+    /// One new entry of the service journal.
+    Service(usize, Entry),
     Unit(usize, Option<UnitInfo>),
 }
 
@@ -168,23 +174,68 @@ struct Target {
     report: Option<Report>,
     busy: Option<&'static str>,
     last_unlock: Option<(Instant, Option<State>)>,
-    logs: VecDeque<LogLine>,
-    journal: Option<VecDeque<String>>,
+    logs: VecDeque<Entry>,
     unit: Option<UnitInfo>,
     tx: Option<Sender<Cmd>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Pane {
-    Logs,
-    Journal,
+/// One line of the activity pane: something the service logged to its
+/// journal, or something this dashboard did.
+#[derive(Clone)]
+struct Entry {
+    at: DateTime<Local>,
+    level: Level,
+    service: bool,
+    message: String,
+}
+
+impl Entry {
+    fn own(l: LogLine) -> Self {
+        Self {
+            at: l.at,
+            level: l.level,
+            service: false,
+            message: l.message,
+        }
+    }
+
+    fn service_note(level: Level, message: String) -> Self {
+        Self {
+            at: Local::now(),
+            level,
+            service: true,
+            message,
+        }
+    }
+
+    /// From one line of `journalctl --output=json`.
+    fn from_journal(line: &str) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        let message = v.get("MESSAGE")?.as_str()?.lines().next()?.to_string();
+        let micros: i64 = v.get("__REALTIME_TIMESTAMP")?.as_str()?.parse().ok()?;
+        let level = match v
+            .get("PRIORITY")
+            .and_then(|p| p.as_str())
+            .and_then(|p| p.parse::<u8>().ok())
+        {
+            Some(0..=3) => Level::Error,
+            Some(4) => Level::Warning,
+            Some(7) => Level::Debug,
+            _ => Level::Info,
+        };
+        Some(Self {
+            at: Local.timestamp_micros(micros).single()?,
+            level,
+            service: true,
+            message,
+        })
+    }
 }
 
 struct App {
     targets: Vec<Target>,
     list: ListState,
     confirm: Option<(usize, bool)>,
-    pane: Pane,
     refresh: Duration,
     quit: bool,
     /// Lines scrolled up from the bottom of the log pane.
@@ -283,30 +334,24 @@ fn worker(
 /// this catches them without waiting for the next periodic check.
 fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>) {
     let history = Command::new("journalctl")
-        .args(["--no-pager", "--output=short-iso", "-n", "200", "-u", &unit])
+        .args(["--no-pager", "--output=json", "-n", "200", "-u", &unit])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
         .output()
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
-                .map(str::to_string)
+                .filter_map(Entry::from_journal)
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_else(|e| vec![format!("journalctl failed: {e}")]);
-    let _ = tx.send(Msg::Journal(idx, history));
+        .unwrap_or_default();
+    let _ = tx.send(Msg::History(idx, history));
 
     let mut cmd = Command::new("journalctl");
-    cmd.args([
-        "--no-pager",
-        "--output=short-iso",
-        "-n",
-        "0",
-        "-f",
-        "-u",
-        &unit,
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    cmd.args(["--no-pager", "--output=json", "-n", "0", "-f", "-u", &unit])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     // Do not leave journalctl running when the dashboard exits.
     unsafe {
         cmd.pre_exec(|| {
@@ -317,7 +362,10 @@ fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>)
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(Msg::JournalLine(idx, format!("journalctl failed: {e}")));
+            let _ = tx.send(Msg::Service(
+                idx,
+                Entry::service_note(Level::Warning, format!("journalctl failed: {e}")),
+            ));
             return;
         }
     };
@@ -326,11 +374,13 @@ fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>)
     };
     let mut last_probe: Option<Instant> = None;
     for line in BufReader::new(out).lines().map_while(Result::ok) {
-        let marker = line.starts_with("-- ");
-        if tx.send(Msg::JournalLine(idx, line)).is_err() {
+        let Some(entry) = Entry::from_journal(&line) else {
+            continue;
+        };
+        if tx.send(Msg::Service(idx, entry)).is_err() {
             break;
         }
-        if !marker && last_probe.is_none_or(|t| t.elapsed() >= EVENT_PROBE_GAP) {
+        if last_probe.is_none_or(|t| t.elapsed() >= EVENT_PROBE_GAP) {
             last_probe = Some(Instant::now());
             if probe.send(Cmd::Probe).is_err() {
                 break;
@@ -339,11 +389,14 @@ fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>)
     }
     let _ = child.kill();
     let status = child.wait();
-    let _ = tx.send(Msg::JournalLine(
+    let _ = tx.send(Msg::Service(
         idx,
-        format!(
-            "journal follow ended ({}); checks fall back to the periodic refresh (root or systemd-journal group needed)",
-            status.map_or("unknown".into(), |s| s.to_string())
+        Entry::service_note(
+            Level::Warning,
+            format!(
+                "journal follow ended ({}); service events are no longer shown, checks fall back to the periodic refresh (root or systemd-journal group needed)",
+                status.map_or("unknown".into(), |s| s.to_string())
+            ),
         ),
     ));
 }
@@ -381,7 +434,6 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
             busy: None,
             last_unlock: None,
             logs: VecDeque::new(),
-            journal: None,
             unit: None,
             tx: None,
         };
@@ -412,11 +464,17 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
     }
     drop(tx);
 
+    if targets
+        .iter()
+        .any(|t| t.error.as_ref().is_some_and(|e| e.contains("not readable")))
+    {
+        crate::elevate::reexec("some targets need root to read their keys or passphrases");
+    }
+
     let mut app = App {
         targets,
         list: ListState::default().with_selected(Some(0)),
         confirm: None,
-        pane: Pane::Logs,
         refresh,
         quit: false,
         log_scroll: 0,
@@ -473,30 +531,30 @@ impl App {
     fn apply(&mut self, msg: Msg) {
         match msg {
             Msg::Report(i, r) => self.targets[i].report = Some(*r),
-            Msg::Log(i, line) => {
+            Msg::Log(i, line) => self.push_entry(i, Entry::own(line)),
+            Msg::Service(i, entry) => self.push_entry(i, entry),
+            Msg::History(i, mut entries) => {
+                // Older than anything logged this session: merge by time.
                 let logs = &mut self.targets[i].logs;
-                logs.push_back(line);
-                while logs.len() > LOG_LINES {
-                    logs.pop_front();
-                }
-                if self.log_scroll > 0 && i == self.selected() && self.pane == Pane::Logs {
-                    self.log_scroll += 1; // keep the scrolled view in place
-                }
+                entries.extend(logs.drain(..));
+                entries.sort_by_key(|e| e.at);
+                let skip = entries.len().saturating_sub(LOG_LINES);
+                logs.extend(entries.into_iter().skip(skip));
             }
             Msg::Busy(i, b) => self.targets[i].busy = b,
             Msg::Done(i, state) => self.targets[i].last_unlock = Some((Instant::now(), state)),
-            Msg::Journal(i, lines) => self.targets[i].journal = Some(lines.into()),
             Msg::Unit(i, unit) => self.targets[i].unit = unit,
-            Msg::JournalLine(i, line) => {
-                let journal = self.targets[i].journal.get_or_insert_with(VecDeque::new);
-                journal.push_back(line);
-                while journal.len() > LOG_LINES {
-                    journal.pop_front();
-                }
-                if self.log_scroll > 0 && i == self.selected() && self.pane == Pane::Journal {
-                    self.log_scroll += 1; // keep the scrolled view in place
-                }
-            }
+        }
+    }
+
+    fn push_entry(&mut self, i: usize, entry: Entry) {
+        let logs = &mut self.targets[i].logs;
+        logs.push_back(entry);
+        while logs.len() > LOG_LINES {
+            logs.pop_front();
+        }
+        if self.log_scroll > 0 && i == self.selected() {
+            self.log_scroll += 1; // keep the scrolled view in place
         }
     }
 
@@ -524,7 +582,6 @@ impl App {
             KeyCode::Char('F') if n > 0 && self.targets[sel].tx.is_some() => {
                 self.confirm = Some((sel, true))
             }
-            KeyCode::Char('l') | KeyCode::Tab => self.toggle_pane(),
             _ => {}
         }
     }
@@ -534,14 +591,6 @@ impl App {
             self.log_scroll = 0;
         }
         self.list.select(Some(i));
-    }
-
-    fn toggle_pane(&mut self) {
-        self.log_scroll = 0;
-        self.pane = match self.pane {
-            Pane::Logs => Pane::Journal,
-            Pane::Journal => Pane::Logs,
-        };
     }
 
     fn scroll_logs(&mut self, up: bool, by: usize) {
@@ -604,9 +653,6 @@ impl App {
                             }
                         }
                     }
-                } else if contains(self.hit.logs, x, y) && y == self.hit.logs.y {
-                    // The pane's title row switches between activity and journal.
-                    self.toggle_pane();
                 }
             }
             _ => {}
@@ -672,7 +718,7 @@ impl App {
             Line::from(" y/click Yes confirms · any other key or click cancels".yellow())
         } else {
             Line::from(
-                " ↑↓/jk/click select · r refresh · R refresh all · u/⏎/double-click unlock · F force · l/Tab/click title logs↔journal · wheel scroll · q quit"
+                " ↑↓/jk/click select · r refresh · R refresh all · u/⏎/double-click unlock · F force · wheel/PgUp/PgDn scroll activity · q quit"
                     .dim(),
             )
         };
@@ -839,36 +885,30 @@ impl App {
         self.hit.logs = area;
         let t = &self.targets[idx];
         let height = area.height.saturating_sub(2) as usize;
-        let (title, lines): (&str, Vec<Line>) = match self.pane {
-            Pane::Logs => (
-                " Activity (this session) ",
-                t.logs
-                    .iter()
-                    .map(|l| {
-                        let style = match l.level {
-                            Level::Debug => Style::new().dim(),
-                            Level::Info => Style::new(),
-                            Level::Warning => Style::new().yellow(),
-                            Level::Error => Style::new().red(),
-                        };
-                        Line::from(vec![
-                            Span::styled(
-                                format!("{} ", l.at.format("%H:%M:%S")),
-                                Style::new().dim(),
-                            ),
-                            Span::styled(l.message.clone(), style),
-                        ])
-                    })
-                    .collect(),
-            ),
-            Pane::Journal => (
-                " Service journal (live) ",
-                match &t.journal {
-                    Some(j) => j.iter().map(|l| Line::from(l.clone())).collect(),
-                    None => vec![Line::from("loading…".dim())],
-                },
-            ),
-        };
+        let title = " Activity · service journal and this dashboard ";
+        let lines: Vec<Line> = t
+            .logs
+            .iter()
+            .map(|l| {
+                let style = match l.level {
+                    Level::Debug => Style::new().dim(),
+                    Level::Info => Style::new(),
+                    Level::Warning => Style::new().yellow(),
+                    Level::Error => Style::new().red(),
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!(
+                            "{} {} ",
+                            l.at.format("%H:%M:%S"),
+                            if l.service { "svc" } else { "tui" }
+                        ),
+                        Style::new().dim(),
+                    ),
+                    Span::styled(l.message.clone(), style),
+                ])
+            })
+            .collect();
         let total = lines.len();
         self.log_scroll = self.log_scroll.min(total.saturating_sub(height));
         let end = total - self.log_scroll;

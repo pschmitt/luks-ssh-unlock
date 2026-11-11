@@ -5,6 +5,7 @@ mod checksum;
 mod ctx;
 mod daemon;
 mod dhcp;
+mod elevate;
 mod log;
 mod notify;
 mod probe;
@@ -42,6 +43,11 @@ use crate::settings::{GlobalOpts, Settings};
 struct Cli {
     #[command(subcommand)]
     command: Option<Cmd>,
+
+    /// Do not re-run with sudo when root is needed to read keys or
+    /// passphrases [env: LUKS_SSH_UNLOCK_NO_SUDO]
+    #[arg(long, global = true)]
+    no_sudo: bool,
 
     #[command(flatten)]
     opts: GlobalOpts,
@@ -158,12 +164,23 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {
-            if let Some(Exit(code, msg)) = e.downcast_ref::<Exit>() {
-                eprintln!("luks-ssh-unlock: {msg}");
-                return ExitCode::from(*code as u8);
+            let needs_root = elevate::needs_root(&e);
+            if needs_root {
+                // Only returns without a terminal, with --no-sudo, or when
+                // sudo cannot be run.
+                elevate::reexec("root is needed to read the configuration, keys or passphrases");
             }
-            eprintln!("luks-ssh-unlock: {e:#}");
-            ExitCode::FAILURE
+            let code = if let Some(Exit(code, msg)) = e.downcast_ref::<Exit>() {
+                eprintln!("luks-ssh-unlock: {msg}");
+                *code as u8
+            } else {
+                eprintln!("luks-ssh-unlock: {e:#}");
+                1
+            };
+            if needs_root {
+                eprintln!("luks-ssh-unlock: hint: run as root, for example with sudo");
+            }
+            ExitCode::from(code)
         }
     }
 }
