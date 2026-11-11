@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/fresco.svg" width="800" alt="A medieval fresco: a herald carries a golden key along a winding road to a sleeping tower with a padlocked gate, while a monk checks a wax seal against his ledger">
+  <img src="assets/fresco.jpg" width="800" alt="A medieval fresco: a procession rides to the LUKS castle, led by a banner reading SSH, a knight with a terminal and a knight with a Tux shield, while a crowned king raises a golden key towards the padlocked gate">
   <p>
     <a href="https://nixbot.brkn.lol/repos/github/pschmitt/luks-ssh-unlock"><img src="https://nixbot.brkn.lol/repos/github/pschmitt/luks-ssh-unlock/badge.svg?branch=main" alt="nixbot"></a>
     <a href="https://github.com/pschmitt/luks-ssh-unlock/actions/workflows/build.yaml"><img src="https://github.com/pschmitt/luks-ssh-unlock/actions/workflows/build.yaml/badge.svg" alt="build"></a>
