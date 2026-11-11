@@ -470,7 +470,7 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
         .iter()
         .any(|t| t.error.as_ref().is_some_and(|e| e.contains("not readable")))
     {
-        crate::elevate::reexec("some targets need root to read their keys or passphrases");
+        crate::elevate::reexec();
     }
 
     let mut app = App {

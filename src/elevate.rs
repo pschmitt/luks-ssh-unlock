@@ -92,14 +92,11 @@ fn env_to_keep() -> Vec<String> {
 
 /// Replace this process with `sudo luks-ssh-unlock <same arguments>`.
 /// Returns only when that is not possible or not wanted.
-pub fn reexec(why: &str) {
+pub fn reexec() {
     if is_root() || disabled() || !interactive() {
         return;
     }
     let Some(exe) = self_path() else { return };
-    eprintln!(
-        "luks-ssh-unlock: {why}; re-running with sudo (--no-sudo or LUKS_SSH_UNLOCK_NO_SUDO=1 disables this)"
-    );
     let mut cmd = Command::new("sudo");
     let keep = env_to_keep();
     if !keep.is_empty() {

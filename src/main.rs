@@ -168,7 +168,7 @@ fn main() -> ExitCode {
             if needs_root {
                 // Only returns without a terminal, with --no-sudo, or when
                 // sudo cannot be run.
-                elevate::reexec("root is needed to read the configuration, keys or passphrases");
+                elevate::reexec();
             }
             let code = if let Some(Exit(code, msg)) = e.downcast_ref::<Exit>() {
                 eprintln!("luks-ssh-unlock: {msg}");
