@@ -11,7 +11,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -25,6 +29,8 @@ use crate::settings::{GlobalOpts, Settings, parse_env_file};
 use crate::status::{Report, Severity, TargetState};
 
 const LOG_LINES: usize = 500;
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const WHEEL_LINES: usize = 3;
 pub const DEFAULT_CONFIG_DIR: &str = "/etc/luks-ssh-unlock";
 
 /// One target to show: a name and the environment describing it.
@@ -117,6 +123,24 @@ struct App {
     pane: Pane,
     refresh: Duration,
     quit: bool,
+    /// Lines scrolled up from the bottom of the log pane.
+    log_scroll: usize,
+    /// Screen areas of the last frame, for mouse hit-testing.
+    hit: Hit,
+    last_click: Option<(Instant, usize)>,
+}
+
+#[derive(Default)]
+struct Hit {
+    list: Rect,
+    logs: Rect,
+    yes: Rect,
+    cancel: Rect,
+    dialog: Rect,
+}
+
+fn contains(r: Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
 fn worker(
@@ -128,10 +152,15 @@ fn worker(
     refresh: Duration,
 ) {
     let mut next = Instant::now();
+    let mut last_state: Option<String> = None;
     loop {
+        let mut manual = true;
         let cmd = match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
             Ok(cmd) => cmd,
-            Err(RecvTimeoutError::Timeout) => Cmd::Probe,
+            Err(RecvTimeoutError::Timeout) => {
+                manual = false;
+                Cmd::Probe
+            }
             Err(RecvTimeoutError::Disconnected) => return,
         };
         match cmd {
@@ -140,6 +169,15 @@ fn worker(
                 ctx.mode = Mode::Status;
                 match ctx.status(false) {
                     Ok(report) => {
+                        // Periodic checks only log when something changed.
+                        let now = describe(&report);
+                        if manual || last_state.as_deref() != Some(now.as_str()) {
+                            ctx.log.info(match &last_state {
+                                Some(prev) if *prev != now => format!("Check: {prev} → {now}"),
+                                _ => format!("Check: {now}"),
+                            });
+                        }
+                        last_state = Some(now);
                         let _ = tx.send(Msg::Report(idx, Box::new(report)));
                     }
                     Err(e) => ctx.log.error(format!("Status check failed: {e:#}")),
@@ -254,9 +292,20 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
         pane: Pane::Logs,
         refresh,
         quit: false,
+        log_scroll: 0,
+        hit: Hit::default(),
+        last_click: None,
     };
     let mut terminal = ratatui::init();
+    // ratatui's panic hook restores the screen but knows nothing of the mouse.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        hook(info);
+    }));
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = event_loop(&mut terminal, &mut app, &rx);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -267,11 +316,14 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, rx: &Receiver<Msg>)
             app.apply(msg);
         }
         terminal.draw(|f| app.draw(f))?;
-        if event::poll(Duration::from_millis(150))?
-            && let TermEvent::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            app.key(key.code, key.modifiers);
+        if event::poll(Duration::from_millis(150))? {
+            match event::read()? {
+                TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                    app.key(key.code, key.modifiers)
+                }
+                TermEvent::Mouse(m) => app.mouse(m),
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -319,8 +371,10 @@ impl App {
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Down | KeyCode::Char('j') if n > 0 => self.list.select(Some((sel + 1) % n)),
-            KeyCode::Up | KeyCode::Char('k') if n > 0 => self.list.select(Some((sel + n - 1) % n)),
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => self.select((sel + 1) % n),
+            KeyCode::Up | KeyCode::Char('k') if n > 0 => self.select((sel + n - 1) % n),
+            KeyCode::PageUp => self.scroll_logs(true, self.hit.logs.height as usize),
+            KeyCode::PageDown => self.scroll_logs(false, self.hit.logs.height as usize),
             KeyCode::Char('r') => self.send(sel, Cmd::Probe),
             KeyCode::Char('R') => (0..n).for_each(|i| self.send(i, Cmd::Probe)),
             KeyCode::Char('u') | KeyCode::Enter if n > 0 && self.targets[sel].tx.is_some() => {
@@ -329,14 +383,93 @@ impl App {
             KeyCode::Char('F') if n > 0 && self.targets[sel].tx.is_some() => {
                 self.confirm = Some((sel, true))
             }
-            KeyCode::Char('l') | KeyCode::Tab => {
-                self.pane = match self.pane {
-                    Pane::Logs => {
-                        self.send(sel, Cmd::Journal);
-                        Pane::Journal
+            KeyCode::Char('l') | KeyCode::Tab => self.toggle_pane(),
+            _ => {}
+        }
+    }
+
+    fn select(&mut self, i: usize) {
+        if i != self.selected() || self.list.selected().is_none() {
+            self.log_scroll = 0;
+        }
+        self.list.select(Some(i));
+    }
+
+    fn toggle_pane(&mut self) {
+        self.log_scroll = 0;
+        self.pane = match self.pane {
+            Pane::Logs => {
+                self.send(self.selected(), Cmd::Journal);
+                Pane::Journal
+            }
+            Pane::Journal => Pane::Logs,
+        };
+    }
+
+    fn scroll_logs(&mut self, up: bool, by: usize) {
+        // Clamped to the available history when drawing.
+        self.log_scroll = if up {
+            self.log_scroll.saturating_add(by)
+        } else {
+            self.log_scroll.saturating_sub(by)
+        };
+    }
+
+    fn mouse(&mut self, m: MouseEvent) {
+        let (x, y) = (m.column, m.row);
+        if self.confirm.is_some() {
+            if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                let (idx, force) = self.confirm.take().expect("checked above");
+                if contains(self.hit.yes, x, y) {
+                    self.send(idx, Cmd::Unlock { force });
+                } else if contains(self.hit.dialog, x, y) && !contains(self.hit.cancel, x, y) {
+                    // Clicks on the dialog text neither confirm nor cancel.
+                    self.confirm = Some((idx, force));
+                }
+            }
+            return;
+        }
+        let n = self.targets.len();
+        if n == 0 {
+            return;
+        }
+        match m.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = m.kind == MouseEventKind::ScrollUp;
+                if contains(self.hit.logs, x, y) {
+                    self.scroll_logs(up, WHEEL_LINES);
+                } else if contains(self.hit.list, x, y) {
+                    let sel = self.selected();
+                    let next = if up {
+                        sel.saturating_sub(1)
+                    } else {
+                        (sel + 1).min(n - 1)
+                    };
+                    self.select(next);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let list = self.hit.list;
+                if contains(list, x, y) {
+                    // Two text rows per item, inside the border.
+                    if y > list.y && y + 1 < list.y + list.height {
+                        let idx = self.list.offset() + usize::from(y - list.y - 1) / 2;
+                        if idx < n {
+                            self.select(idx);
+                            let double = self
+                                .last_click
+                                .is_some_and(|(at, i)| i == idx && at.elapsed() < DOUBLE_CLICK);
+                            self.last_click = Some((Instant::now(), idx));
+                            if double && self.targets[idx].tx.is_some() {
+                                self.last_click = None;
+                                self.confirm = Some((idx, false));
+                            }
+                        }
                     }
-                    Pane::Journal => Pane::Logs,
-                };
+                } else if contains(self.hit.logs, x, y) && y == self.hit.logs.y {
+                    // The pane's title row switches between activity and journal.
+                    self.toggle_pane();
+                }
             }
             _ => {}
         }
@@ -386,10 +519,10 @@ impl App {
         }
 
         let hints = if self.confirm.is_some() {
-            Line::from(" y confirm · any other key cancels".yellow())
+            Line::from(" y/click Yes confirms · any other key or click cancels".yellow())
         } else {
             Line::from(
-                " ↑↓/jk select · r refresh · R refresh all · u/⏎ unlock · F force unlock · l logs/journal · q quit"
+                " ↑↓/jk/click select · r refresh · R refresh all · u/⏎/double-click unlock · F force · l/Tab/click title logs↔journal · wheel scroll · q quit"
                     .dim(),
             )
         };
@@ -423,6 +556,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▌");
+        self.hit.list = area;
         f.render_stateful_widget(list, area, &mut self.list);
     }
 
@@ -538,7 +672,8 @@ impl App {
         );
     }
 
-    fn draw_logs(&self, f: &mut Frame, area: Rect, idx: usize) {
+    fn draw_logs(&mut self, f: &mut Frame, area: Rect, idx: usize) {
+        self.hit.logs = area;
         let t = &self.targets[idx];
         let height = area.height.saturating_sub(2) as usize;
         let (title, lines): (&str, Vec<Line>) = match self.pane {
@@ -546,9 +681,6 @@ impl App {
                 " Activity (this session) ",
                 t.logs
                     .iter()
-                    .rev()
-                    .take(height)
-                    .rev()
                     .map(|l| {
                         let style = match l.level {
                             Level::Debug => Style::new().dim(),
@@ -569,28 +701,33 @@ impl App {
             Pane::Journal => (
                 " Service journal ",
                 match &t.journal {
-                    Some(j) => j
-                        .iter()
-                        .rev()
-                        .take(height)
-                        .rev()
-                        .map(|l| Line::from(l.clone()))
-                        .collect(),
+                    Some(j) => j.iter().map(|l| Line::from(l.clone())).collect(),
                     None => vec![Line::from("loading…".dim())],
                 },
             ),
         };
+        let total = lines.len();
+        self.log_scroll = self.log_scroll.min(total.saturating_sub(height));
+        let end = total - self.log_scroll;
+        let window: Vec<Line> = lines[end.saturating_sub(height)..end].to_vec();
+        let title = if self.log_scroll > 0 {
+            format!("{title}· ↑{} ", self.log_scroll)
+        } else if total == 0 {
+            format!("{title}· nothing yet ")
+        } else {
+            title.to_string()
+        };
         f.render_widget(
-            Paragraph::new(lines)
+            Paragraph::new(window)
                 .wrap(Wrap { trim: false })
                 .block(Block::bordered().title(title)),
             area,
         );
     }
 
-    fn draw_confirm(&self, f: &mut Frame, idx: usize, force: bool) {
+    fn draw_confirm(&mut self, f: &mut Frame, idx: usize, force: bool) {
         let t = &self.targets[idx];
-        let area = centered(f.area(), 64, if force { 9 } else { 7 });
+        let area = centered(f.area(), 64, if force { 11 } else { 9 });
         let mut lines = vec![
             Line::from(format!(
                 "Send the LUKS passphrase to {} ({})?",
@@ -613,6 +750,20 @@ impl App {
             lines.push(Line::default());
         }
         lines.push(Line::from("y = yes, any other key = cancel".bold()));
+        let inner = Rect::new(
+            area.x + 1,
+            area.y + area.height.saturating_sub(2),
+            area.width.saturating_sub(2),
+            1,
+        );
+        self.hit.dialog = area;
+        self.hit.yes = Rect::new(inner.x + 1, inner.y, 9.min(inner.width), 1);
+        self.hit.cancel = Rect::new(
+            self.hit.yes.x + self.hit.yes.width + 2,
+            inner.y,
+            10.min(inner.width.saturating_sub(11)),
+            1,
+        );
         f.render_widget(Clear, area);
         f.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: true }).block(
@@ -626,6 +777,26 @@ impl App {
             ),
             area,
         );
+        f.render_widget(
+            Span::styled(" [ Yes ] ", Style::new().black().on_green().bold()),
+            self.hit.yes,
+        );
+        f.render_widget(
+            Span::styled(" [ Cancel ] ", Style::new().black().on_gray().bold()),
+            self.hit.cancel,
+        );
+    }
+}
+
+/// One-line state of a report, for the activity log.
+fn describe(r: &Report) -> String {
+    match &r.state {
+        TargetState::Unlocked(d) => format!("unlocked ({d})"),
+        TargetState::Initrd(d) if r.unlockable => format!("waiting for passphrase ({d})"),
+        TargetState::Initrd(d) => format!("initrd, verification failed ({d})"),
+        TargetState::NotInitrd => "booting / not initrd".into(),
+        TargetState::SshFailed(d) => format!("SSH login failed ({d})"),
+        TargetState::Unreachable => "unreachable".into(),
     }
 }
 

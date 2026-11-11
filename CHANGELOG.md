@@ -12,6 +12,11 @@ options and the container interface are compatible.
 - `tui`: dashboard of all targets (`/etc/luks-ssh-unlock/*.env` by default)
   with live state, details, activity and the service journal, and confirmed
   unlocks and forced unlocks. The module's per-instance command gains `tui`.
+  The dashboard supports the mouse: click to select a target, double-click
+  to unlock it (after confirmation), scroll the target list and the log
+  pane, and click the log pane's title to switch between activity and
+  journal. The activity pane logs every check result (state changes and
+  manual refreshes), so it is no longer empty before the first unlock.
 - `status --json`, and a `status` exit status that tells whether the host is
   up or can be unlocked.
 - `completions SHELL`; the Nix package installs bash, zsh and fish

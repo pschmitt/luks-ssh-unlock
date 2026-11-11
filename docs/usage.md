@@ -53,7 +53,13 @@ service's journal (`journalctl -u luks-ssh-unlock-<name>.service`).
 | `u`, `Enter` | Unlock the selected target, after confirmation. All checks still apply. |
 | `F` | Force unlock, after confirmation. Skips the integrity and host-key checks. |
 | `l`, `Tab` | Switch between activity and journal |
+| `PageUp`/`PageDown` | Scroll the activity or journal |
 | `q`, `Esc` | Quit |
+
+With a mouse: click a target to select it, double-click to unlock it (the
+confirmation dialog has clickable **Yes** and **Cancel** buttons), scroll the
+wheel over the target list or the log pane, and click the log pane's title
+to switch between activity and journal.
 
 The periodic checks never send notifications and skip the initrd checksum,
 which can be slow in paranoid mode. An unlock always runs it first.
