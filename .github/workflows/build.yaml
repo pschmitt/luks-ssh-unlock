@@ -40,15 +40,31 @@ jobs:
           name: luks-ssh-unlock-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/luks-ssh-unlock
           if-no-files-found: error
-  # aarch64-linux packages and checks, built natively on GitHub's arm runners
-  # (nixbot on x86_64 would have to emulate them) and pushed to the niks3 S3
-  # cache; see pschmitt/ci-workflows.
+  # Native ARM packages publish to niks3 before the checks job consumes them.
   nix-aarch64:
     permissions:
       contents: read
       id-token: write
-    uses: pschmitt/ci-workflows/.github/workflows/nix-aarch64.yaml@main
+    uses: pschmitt/ci-workflows/.github/workflows/nix-build.yaml@main
     with:
+      runner: ubuntu-26.04-arm
+      system: aarch64-linux
+      pin-prefix: gh-luks-ssh-unlock-main
+    secrets:
+      s3_store: ${{ secrets.NIKS3_S3_STORE }}
+      s3_access_key: ${{ secrets.NIKS3_S3_ACCESS_KEY }}
+      s3_secret_key: ${{ secrets.NIKS3_S3_SECRET_KEY }}
+
+  nix-aarch64-checks:
+    needs: nix-aarch64
+    permissions:
+      contents: read
+      id-token: write
+    uses: pschmitt/ci-workflows/.github/workflows/nix-checks.yaml@main
+    with:
+      runner: ubuntu-26.04-arm
+      system: aarch64-linux
+      full-flake-check: false
       pin-prefix: gh-luks-ssh-unlock-main
     secrets:
       s3_store: ${{ secrets.NIKS3_S3_STORE }}
