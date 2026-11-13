@@ -67,11 +67,9 @@ impl ExtraCmd {
     }
 }
 
-/// Extra commands from `/etc/luks-ssh-unlock/tui-commands` (one
-/// `[LABEL=]COMMAND` per line, `#` comments), used when none are given on the
-/// command line. The NixOS module writes it.
-pub fn default_extras() -> Vec<ExtraCmd> {
-    fs::read_to_string(format!("{DEFAULT_CONFIG_DIR}/tui-commands"))
+/// Extra commands from a file: one `[LABEL=]COMMAND` per line, `#` comments.
+fn read_extras(path: &std::path::Path) -> Vec<ExtraCmd> {
+    fs::read_to_string(path)
         .map(|text| {
             text.lines()
                 .map(str::trim)
@@ -82,45 +80,157 @@ pub fn default_extras() -> Vec<ExtraCmd> {
         .unwrap_or_default()
 }
 
-/// Last output of one extra command for one target.
+/// Extra commands from `/etc/luks-ssh-unlock/tui-commands`, used when none
+/// are given on the command line. The NixOS module writes it.
+pub fn default_extras() -> Vec<ExtraCmd> {
+    read_extras(&PathBuf::from(DEFAULT_CONFIG_DIR).join("tui-commands"))
+}
+
+/// A target's commands: the common ones, with its own `<name>.tui-commands`
+/// replacing those of the same label or adding new ones. An empty command
+/// removes the label for this target.
+fn merge_extras(common: &[ExtraCmd], own: Vec<ExtraCmd>) -> Vec<ExtraCmd> {
+    let mut out = common.to_vec();
+    for cmd in own {
+        match out.iter_mut().find(|c| c.label == cmd.label) {
+            Some(slot) => *slot = cmd,
+            None => out.push(cmd),
+        }
+    }
+    out.retain(|c| !c.command.is_empty());
+    out
+}
+
+/// Output of one extra command for one target.
 #[derive(Default)]
 struct ExtraOut {
-    lines: Vec<String>,
-    fetched: Option<Instant>,
+    lines: Vec<Line<'static>>,
+    /// Which run the lines belong to; 0 when none is live.
+    run_id: u64,
     running: bool,
+    /// The next line of the run replaces the old output.
+    restart: bool,
+    finished_at: Option<Instant>,
+}
+
+/// The extra command that is running now (at most one: the selected
+/// target's, in the active pane).
+struct ExtraRun {
+    t: usize,
+    c: usize,
+    /// Process group, killed as a whole when the selection changes.
+    pgid: i32,
 }
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Drop escape sequences and control characters: they would garble the screen.
-fn sanitize(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => {
-                if chars.next_if_eq(&'[').is_some() {
-                    for n in chars.by_ref() {
-                        if ('@'..='~').contains(&n) {
-                            break;
-                        }
+fn sgr(mut style: Style, params: &str) -> Style {
+    let nums: Vec<u16> = params
+        .split([';', ':'])
+        .map(|p| p.parse().unwrap_or(0))
+        .collect();
+    let mut i = 0;
+    while i < nums.len() {
+        let n = nums[i];
+        match n {
+            0 => style = Style::new(),
+            1 => style = style.add_modifier(Modifier::BOLD),
+            2 => style = style.add_modifier(Modifier::DIM),
+            3 => style = style.add_modifier(Modifier::ITALIC),
+            4 => style = style.add_modifier(Modifier::UNDERLINED),
+            7 => style = style.add_modifier(Modifier::REVERSED),
+            22 => style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
+            23 => style = style.remove_modifier(Modifier::ITALIC),
+            24 => style = style.remove_modifier(Modifier::UNDERLINED),
+            27 => style = style.remove_modifier(Modifier::REVERSED),
+            30..=37 => style = style.fg(Color::Indexed((n - 30) as u8)),
+            90..=97 => style = style.fg(Color::Indexed((n - 90 + 8) as u8)),
+            39 => style = style.fg(Color::Reset),
+            40..=47 => style = style.bg(Color::Indexed((n - 40) as u8)),
+            100..=107 => style = style.bg(Color::Indexed((n - 100 + 8) as u8)),
+            49 => style = style.bg(Color::Reset),
+            38 | 48 => {
+                let color = match nums.get(i + 1) {
+                    Some(5) => {
+                        let c = nums.get(i + 2).map(|&v| Color::Indexed(v as u8));
+                        i += 2;
+                        c
                     }
+                    Some(2) if i + 4 < nums.len() => {
+                        let c = Color::Rgb(nums[i + 2] as u8, nums[i + 3] as u8, nums[i + 4] as u8);
+                        i += 4;
+                        Some(c)
+                    }
+                    _ => None,
+                };
+                if let Some(c) = color {
+                    style = if n == 38 { style.fg(c) } else { style.bg(c) };
                 }
             }
-            '\t' => out.push_str("    "),
-            c if c.is_control() => {}
-            c => out.push(c),
+            _ => {}
         }
+        i += 1;
     }
-    out
+    style
 }
 
-/// Run an extra command for a target (`{host}` and `{name}` are replaced by
-/// the quoted values, and also exported as `LUKS_SSH_UNLOCK_HOST` and
-/// `LUKS_SSH_UNLOCK_NAME`). Bounded to 30 seconds.
-fn run_extra(command: &str, name: &str, host: &str) -> Vec<String> {
+/// One line of command output with its colors (SGR escapes) kept and every
+/// other escape sequence and control character dropped: they would garble
+/// the screen.
+fn ansi_line(text: &str) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut style = Style::new();
+    let mut cur = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    let mut last = None;
+                    for n in chars.by_ref() {
+                        if ('@'..='~').contains(&n) {
+                            last = Some(n);
+                            break;
+                        }
+                        params.push(n);
+                    }
+                    if last == Some('m') {
+                        if !cur.is_empty() {
+                            spans.push(Span::styled(std::mem::take(&mut cur), style));
+                        }
+                        style = sgr(style, &params);
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            },
+            '\t' => cur.push_str("    "),
+            c if c.is_control() => {}
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        spans.push(Span::styled(cur, style));
+    }
+    Line::from(spans)
+}
+
+/// Start an extra command for a target and stream its output (stdout and
+/// stderr) to the dashboard line by line. `{host}` and `{name}` are replaced
+/// by the quoted values, and also exported as `LUKS_SSH_UNLOCK_HOST` and
+/// `LUKS_SSH_UNLOCK_NAME`. Returns the process group to kill.
+fn spawn_extra(
+    command: &str,
+    (t, c, run_id): (usize, usize, u64),
+    (name, host): (&str, &str),
+    tx: Sender<Msg>,
+) -> std::io::Result<i32> {
     let script = command
         .replace("{host}", &shell_quote(host))
         .replace("{name}", &shell_quote(name));
@@ -128,39 +238,65 @@ fn run_extra(command: &str, name: &str, host: &str) -> Vec<String> {
     // the user who started it: their tools and credentials live there.
     let user = std::env::var("SUDO_USER")
         .ok()
-        .filter(|u| !u.is_empty() && u != "root" && unsafe { libc::geteuid() } == 0);
-    let mut cmd = Command::new("timeout");
-    cmd.args(["--kill-after=5", "30"]);
-    if let Some(user) = &user {
-        cmd.args(["sudo", "-n", "-H", "-u", user, "--"]);
+        .filter(|u| !u.is_empty() && u != "root" && unsafe { libc::geteuid() } == 0)
+        .unwrap_or_default();
+    let mut cmd = Command::new("sh");
+    cmd.args([
+        "-c",
+        r#"exec 2>&1
+if [ -n "$2" ]; then
+  exec sudo -n -H -u "$2" -- env "LUKS_SSH_UNLOCK_NAME=$3" "LUKS_SSH_UNLOCK_HOST=$4" sh -c "$1"
+fi
+LUKS_SSH_UNLOCK_NAME=$3 LUKS_SSH_UNLOCK_HOST=$4
+export LUKS_SSH_UNLOCK_NAME LUKS_SSH_UNLOCK_HOST
+exec sh -c "$1""#,
+        "sh",
+        &script,
+        &user,
+        name,
+        host,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .process_group(0);
+    // Do not leave the command running when the dashboard dies.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
     }
-    let out = cmd
-        .args(["sh", "-c", &script])
-        .env("LUKS_SSH_UNLOCK_NAME", name)
-        .env("LUKS_SSH_UNLOCK_HOST", host)
-        .stdin(Stdio::null())
-        .output();
-    let out = match out {
-        Ok(o) => o,
-        Err(e) => return vec![format!("cannot run command: {e}")],
-    };
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    let mut lines: Vec<String> = text.lines().map(sanitize).collect();
-    let skip = lines.len().saturating_sub(EXTRA_LINES);
-    lines.drain(..skip);
-    if !out.status.success() {
-        lines.push(format!(
-            "[exit {}]",
-            out.status.code().map_or("signal".into(), |c| c.to_string())
-        ));
-    }
-    lines
+    let mut child = cmd.spawn()?;
+    let pgid = child.id() as i32;
+    let out = child.stdout.take().expect("stdout is piped");
+    thread::spawn(move || {
+        let mut reader = BufReader::new(out);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let text = String::from_utf8_lossy(&buf);
+                    let line = ansi_line(text.trim_end_matches(['\n', '\r']));
+                    if tx.send(Msg::ExtraLine(t, c, run_id, line)).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let code = child.wait().ok().and_then(|s| s.code());
+        let _ = tx.send(Msg::ExtraDone(t, c, run_id, code));
+    });
+    Ok(pgid)
 }
 
 /// One target to show: a name and the environment describing it.
 pub struct Source {
     pub name: String,
+    /// This target's own extra commands (`<name>.tui-commands`).
+    pub extras: Vec<ExtraCmd>,
     pub env: Option<std::collections::HashMap<String, String>>,
 }
 
@@ -204,6 +340,7 @@ pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
             let text =
                 fs::read_to_string(p).with_context(|| format!("cannot read {}", p.display()))?;
             Ok(Source {
+                extras: read_extras(&p.with_extension("tui-commands")),
                 name: p
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
@@ -229,8 +366,10 @@ enum Msg {
     /// One new entry of the service journal.
     Service(usize, Entry),
     Unit(usize, Option<UnitInfo>),
-    /// Output of extra command `.1` for target `.0`.
-    Extra(usize, usize, Vec<String>),
+    /// Output of extra command `.1` of target `.0`, from run `.2`.
+    ExtraLine(usize, usize, u64, Line<'static>),
+    /// The run ended; the exit code, or none when it was killed by a signal.
+    ExtraDone(usize, usize, u64, Option<i32>),
 }
 
 /// What systemd says about the target's service.
@@ -299,6 +438,8 @@ struct Target {
     logs: VecDeque<Entry>,
     unit: Option<UnitInfo>,
     tx: Option<Sender<Cmd>>,
+    /// Extra commands of this target, and their output.
+    cmds: Vec<ExtraCmd>,
     extra: Vec<ExtraOut>,
 }
 
@@ -379,6 +520,8 @@ enum Edge {
     List,
     /// Between the details and the activity.
     Details,
+    /// Between the activity and the extra pane.
+    Extra,
 }
 
 struct App {
@@ -409,9 +552,13 @@ struct App {
     filter: String,
     filtering: bool,
     /// Optional extra commands, shown in a fourth pane; `c` switches.
-    extras: Vec<ExtraCmd>,
+    has_extras: bool,
     extra_idx: usize,
     extra_scroll: usize,
+    extra_run: Option<ExtraRun>,
+    extra_gen: u64,
+    /// Height of the extra pane, in percent of the space it shares with the activity.
+    extra_pct: u16,
     msg_tx: Sender<Msg>,
 }
 
@@ -422,6 +569,9 @@ struct Hit {
     details: Rect,
     logs: Rect,
     extra: Rect,
+    /// The activity and the extra pane together, and the border between them.
+    split: Rect,
+    edge_extra: Rect,
     edge_list: Rect,
     edge_details: Rect,
     yes: Rect,
@@ -581,6 +731,7 @@ pub fn run(
     opts: &GlobalOpts,
     refresh: Duration,
     extras: Vec<ExtraCmd>,
+    filter: String,
 ) -> Result<()> {
     let (tx, rx) = mpsc::channel::<Msg>();
     let mut targets = Vec::new();
@@ -606,6 +757,7 @@ pub fn run(
             .as_ref()
             .map(|s| s.hostname.clone())
             .unwrap_or_default();
+        let cmds = merge_extras(&extras, src.extras.clone());
         let mut target = Target {
             name: src.name.clone(),
             host,
@@ -616,7 +768,8 @@ pub fn run(
             logs: VecDeque::new(),
             unit: None,
             tx: None,
-            extra: (0..extras.len()).map(|_| ExtraOut::default()).collect(),
+            extra: (0..cmds.len()).map(|_| ExtraOut::default()).collect(),
+            cmds,
         };
         match settings.and_then(|mut s| {
             s.once = true;
@@ -650,6 +803,7 @@ pub fn run(
         crate::elevate::reexec();
     }
 
+    let has_extras = targets.iter().any(|t| !t.cmds.is_empty());
     let mut app = App {
         targets,
         list: ListState::default().with_selected(Some(0)),
@@ -667,11 +821,14 @@ pub fn run(
         port_details_pct: 45,
         hit: Hit::default(),
         last_click: None,
-        filter: String::new(),
+        filter,
         filtering: false,
-        extras,
+        has_extras,
         extra_idx: 0,
         extra_scroll: 0,
+        extra_run: None,
+        extra_gen: 0,
+        extra_pct: 50,
         msg_tx: tx,
     };
     let mut terminal = ratatui::init();
@@ -683,6 +840,7 @@ pub fn run(
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = event_loop(&mut terminal, &mut app, &rx);
+    app.stop_extra();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
@@ -736,31 +894,71 @@ impl App {
         self.extra_scroll = 0;
     }
 
-    /// Start the selected target's extra command when it has no recent output.
-    fn fetch_extra(&mut self) {
-        if self.extras.is_empty() || self.visible().is_empty() {
-            return;
+    /// Which of the target's extra commands is shown.
+    fn extra_c(&self, t: usize) -> usize {
+        self.extra_idx
+            .min(self.targets[t].cmds.len().saturating_sub(1))
+    }
+
+    /// Kill the running extra command, if any.
+    fn stop_extra(&mut self) {
+        if let Some(run) = self.extra_run.take() {
+            unsafe { libc::kill(-run.pgid, libc::SIGKILL) };
+            let slot = &mut self.targets[run.t].extra[run.c];
+            slot.run_id = 0;
+            slot.running = false;
+            slot.finished_at = None;
         }
-        let (t, c) = (self.selected(), self.extra_idx);
+    }
+
+    /// Keep the selected target's extra command running: stream it while the
+    /// target is selected, and start it again every refresh interval once it
+    /// has ended.
+    fn fetch_extra(&mut self) {
+        let want = if !self.has_extras || self.visible().is_empty() {
+            None
+        } else {
+            let t = self.selected();
+            (!self.targets[t].cmds.is_empty()).then(|| (t, self.extra_c(t)))
+        };
+        if self
+            .extra_run
+            .as_ref()
+            .is_some_and(|r| Some((r.t, r.c)) != want)
+        {
+            self.stop_extra();
+        }
+        let Some((t, c)) = want else { return };
         let refresh = self.refresh;
         let target = &mut self.targets[t];
         if target.error.is_some() {
             return;
         }
         let slot = &mut target.extra[c];
-        if slot.running || slot.fetched.is_some_and(|a| a.elapsed() < refresh) {
+        if slot.running || slot.finished_at.is_some_and(|a| a.elapsed() < refresh) {
             return;
         }
+        self.extra_gen += 1;
+        let run_id = self.extra_gen;
+        slot.run_id = run_id;
         slot.running = true;
-        let (command, name, host) = (
-            self.extras[c].command.clone(),
-            target.name.clone(),
-            target.host.clone(),
-        );
-        let tx = self.msg_tx.clone();
-        thread::spawn(move || {
-            let _ = tx.send(Msg::Extra(t, c, run_extra(&command, &name, &host)));
-        });
+        slot.restart = true;
+        slot.finished_at = None;
+        match spawn_extra(
+            &target.cmds[c].command,
+            (t, c, run_id),
+            (&target.name, &target.host),
+            self.msg_tx.clone(),
+        ) {
+            Ok(pgid) => self.extra_run = Some(ExtraRun { t, c, pgid }),
+            Err(e) => {
+                slot.lines = vec![Line::from(format!("cannot run command: {e}"))];
+                slot.run_id = 0;
+                slot.running = false;
+                slot.restart = false;
+                slot.finished_at = Some(Instant::now());
+            }
+        }
     }
 
     fn scroll_extra(&mut self, up: bool, by: usize) {
@@ -793,11 +991,46 @@ impl App {
             Msg::Busy(i, b) => self.targets[i].busy = b,
             Msg::Done(i, state) => self.targets[i].last_unlock = Some((Instant::now(), state)),
             Msg::Unit(i, unit) => self.targets[i].unit = unit,
-            Msg::Extra(i, c, lines) => {
+            Msg::ExtraLine(i, c, run_id, line) => {
+                let shown = self.selected() == i && self.extra_c(i) == c;
                 let slot = &mut self.targets[i].extra[c];
-                slot.lines = lines;
-                slot.fetched = Some(Instant::now());
+                if slot.run_id != run_id {
+                    return;
+                }
+                if std::mem::take(&mut slot.restart) {
+                    slot.lines.clear();
+                }
+                slot.lines.push(line);
+                if slot.lines.len() > EXTRA_LINES + 200 {
+                    let extra = slot.lines.len() - EXTRA_LINES;
+                    slot.lines.drain(..extra);
+                }
+                if self.extra_scroll > 0 && shown {
+                    self.extra_scroll += 1; // keep the scrolled view in place
+                }
+            }
+            Msg::ExtraDone(i, c, run_id, code) => {
+                let slot = &mut self.targets[i].extra[c];
+                if slot.run_id != run_id {
+                    return;
+                }
+                if std::mem::take(&mut slot.restart) {
+                    slot.lines.clear();
+                }
+                match code {
+                    Some(0) => {}
+                    Some(n) => slot.lines.push(Line::from(format!("[exit {n}]"))),
+                    None => slot.lines.push(Line::from("[killed]")),
+                }
                 slot.running = false;
+                slot.finished_at = Some(Instant::now());
+                if self
+                    .extra_run
+                    .as_ref()
+                    .is_some_and(|r| (r.t, r.c) == (i, c))
+                {
+                    self.extra_run = None;
+                }
             }
         }
     }
@@ -875,9 +1108,12 @@ impl App {
             KeyCode::BackTab => self.cycle_focus(false),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Char('c') if !self.extras.is_empty() => {
-                self.extra_idx = (self.extra_idx + 1) % self.extras.len();
-                self.extra_scroll = 0;
+            KeyCode::Char('c') if self.has_extras && n > 0 => {
+                let len = self.targets[sel].cmds.len();
+                if len > 0 {
+                    self.extra_idx = (self.extra_c(sel) + 1) % len;
+                    self.extra_scroll = 0;
+                }
             }
             KeyCode::Down | KeyCode::Char('j') if n > 0 && self.focus == Focus::List => {
                 self.select((pos + 1) % n)
@@ -912,8 +1148,11 @@ impl App {
             KeyCode::PageDown => self.scroll_logs(false, self.hit.logs.height as usize),
             KeyCode::Char('r') if n > 0 => {
                 self.send(sel, Cmd::Probe);
-                if let Some(slot) = self.targets[sel].extra.get_mut(self.extra_idx) {
-                    slot.fetched = None;
+                // Run the extra command again from the start.
+                self.stop_extra();
+                let c = self.extra_c(sel);
+                if let Some(slot) = self.targets[sel].extra.get_mut(c) {
+                    slot.finished_at = None;
                 }
             }
             KeyCode::Char('R') => (0..n).for_each(|i| self.send(i, Cmd::Probe)),
@@ -941,7 +1180,7 @@ impl App {
         if self.logs_full {
             return;
         }
-        let extra = !self.extras.is_empty();
+        let extra = self.has_extras;
         self.focus = match (self.portrait, self.focus, dir) {
             (false, Focus::List, Dir::Right) => Focus::Details,
             (false, Focus::Details | Focus::Activity | Focus::Extra, Dir::Left) => Focus::List,
@@ -960,7 +1199,7 @@ impl App {
             return;
         }
         let mut order = vec![Focus::List, Focus::Details, Focus::Activity];
-        if !self.extras.is_empty() {
+        if self.has_extras {
             order.push(Focus::Extra);
         }
         let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
@@ -994,6 +1233,13 @@ impl App {
             (true, Some(Edge::Details)) => {
                 let h = (u32::from(y) + 1).saturating_sub(u32::from(self.hit.details.y));
                 self.port_details_pct = (h * 100 / u32::from(body.height)).clamp(15, 70) as u16;
+            }
+            (_, Some(Edge::Extra)) => {
+                let area = self.hit.split;
+                if area.height > 0 {
+                    let h = u32::from(area.bottom().saturating_sub(y));
+                    self.extra_pct = (h * 100 / u32::from(area.height)).clamp(15, 85) as u16;
+                }
             }
             _ => {}
         }
@@ -1036,6 +1282,8 @@ impl App {
                     Some(Edge::List)
                 } else if contains(self.hit.edge_details, x, y) {
                     Some(Edge::Details)
+                } else if contains(self.hit.edge_extra, x, y) {
+                    Some(Edge::Extra)
                 } else {
                     None
                 };
@@ -1116,6 +1364,7 @@ impl App {
         self.hit.edge_list = Rect::default();
         self.hit.edge_details = Rect::default();
         self.hit.extra = Rect::default();
+        self.hit.edge_extra = Rect::default();
         // Cells are about twice as tall as wide: below this the side-by-side
         // layout is cramped, so stack the panes instead.
         self.portrait = area.width < 80 || u32::from(area.width) * 2 < u32::from(area.height) * 3;
@@ -1171,10 +1420,16 @@ impl App {
                 Rect::new(right.x, details.bottom().saturating_sub(1), right.width, 2);
             (left, details, logs)
         };
-        let (logs, extra) = if self.extras.is_empty() || self.logs_full {
+        let (logs, extra) = if !self.has_extras || self.logs_full {
             (logs, None)
         } else {
-            let [a, b] = Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(logs);
+            let [a, b] = Layout::vertical([
+                Constraint::Percentage(100 - self.extra_pct),
+                Constraint::Percentage(self.extra_pct),
+            ])
+            .areas(logs);
+            self.hit.split = logs;
+            self.hit.edge_extra = Rect::new(a.x, a.bottom().saturating_sub(1), a.width, 2);
             (a, Some(b))
         };
         self.hit.body = body;
@@ -1552,28 +1807,35 @@ impl App {
 
     fn draw_extra(&mut self, f: &mut Frame, area: Rect, idx: usize) {
         self.hit.extra = area;
-        let cmd = &self.extras[self.extra_idx];
-        let slot = &self.targets[idx].extra[self.extra_idx];
+        let t = &self.targets[idx];
+        if t.cmds.is_empty() {
+            f.render_widget(
+                Paragraph::new(Line::from("no command configured for this target".dim())).block(
+                    Block::bordered()
+                        .title(format!(" {} ", t.name))
+                        .border_style(self.border(Focus::Extra)),
+                ),
+                area,
+            );
+            return;
+        }
+        let c = self.extra_c(idx);
+        let (cmd, slot) = (&t.cmds[c], &t.extra[c]);
         let height = area.height.saturating_sub(2) as usize;
         let total = slot.lines.len();
         self.extra_scroll = self.extra_scroll.min(total.saturating_sub(height));
         let end = total - self.extra_scroll;
-        let window: Vec<Line> = slot.lines[end.saturating_sub(height)..end]
-            .iter()
-            .map(|l| Line::from(l.as_str()))
-            .collect();
-        let mut title = format!(" {} · {}", cmd.label, self.targets[idx].name);
-        if self.extras.len() > 1 {
-            title.push_str(&format!(
-                " · c next {}/{}",
-                self.extra_idx + 1,
-                self.extras.len()
-            ));
+        let window: Vec<Line> = slot.lines[end.saturating_sub(height)..end].to_vec();
+        let mut title = format!(" {} · {}", cmd.label, t.name);
+        if t.cmds.len() > 1 {
+            title.push_str(&format!(" · c next {}/{}", c + 1, t.cmds.len()));
         }
         if slot.running {
-            title.push_str(" · running…");
-        } else if slot.fetched.is_none() {
-            title.push_str(" · waiting");
+            title.push_str(" · live");
+        } else if slot.finished_at.is_some() {
+            title.push_str(" · ended");
+        } else {
+            title.push_str(" · starting");
         }
         if self.extra_scroll > 0 {
             title.push_str(&format!(" · ↑{}", self.extra_scroll));
@@ -1722,6 +1984,7 @@ mod tests {
                     logs: VecDeque::new(),
                     unit: None,
                     tx: None,
+                    cmds: Vec::new(),
                     extra: Vec::new(),
                 })
                 .collect(),
@@ -1742,11 +2005,23 @@ mod tests {
             last_click: None,
             filter: String::new(),
             filtering: false,
-            extras: Vec::new(),
+            has_extras: false,
             extra_idx: 0,
             extra_scroll: 0,
+            extra_run: None,
+            extra_gen: 0,
+            extra_pct: 50,
             msg_tx: mpsc::channel().0,
         }
+    }
+
+    /// Give every target the same extra commands.
+    fn set_extras(a: &mut App, cmds: Vec<ExtraCmd>) {
+        for t in &mut a.targets {
+            t.extra = cmds.iter().map(|_| ExtraOut::default()).collect();
+            t.cmds = cmds.clone();
+        }
+        a.has_extras = !cmds.is_empty();
     }
 
     fn render(app: &mut App, w: u16, h: u16) -> String {
@@ -1961,21 +2236,9 @@ mod tests {
         assert_eq!(c.label, "openstack::console-log");
         let c = ExtraCmd::parse("echo a=b");
         assert_eq!(c.label, "echo");
-        assert_eq!(
-            run_extra(
-                "echo {host} \"$LUKS_SSH_UNLOCK_NAME\"; echo err >&2; exit 3",
-                "n",
-                "h x"
-            ),
-            vec!["h x n", "err", "[exit 3]"]
-        );
-
         let mut a = app(2);
-        a.extras = vec![c];
-        for t in &mut a.targets {
-            t.extra = vec![ExtraOut::default()];
-        }
-        a.targets[0].extra[0].lines = vec!["boot ok".into()];
+        set_extras(&mut a, vec![c]);
+        a.targets[0].extra[0].lines = vec![Line::from("boot ok")];
         let out = render(&mut a, 120, 30);
         assert!(out.contains("boot ok"));
         assert!(a.hit.extra.y >= a.hit.logs.bottom());
@@ -1985,8 +2248,134 @@ mod tests {
         assert!(a.focus == Focus::Extra);
         a.key(KeyCode::Tab, KeyModifiers::NONE);
         assert!(a.focus == Focus::List);
+        // Dragging the border between activity and extra pane resizes it.
+        let before = a.hit.extra.height;
+        let edge = a.hit.edge_extra;
+        drag(&mut a, (edge.x + 3, edge.y), (edge.x + 3, edge.y - 5));
+        render(&mut a, 120, 30);
+        assert!(
+            a.hit.extra.height > before,
+            "{} > {before}",
+            a.hit.extra.height
+        );
         render(&mut a, 45, 40);
         assert!(a.hit.extra.y > a.hit.logs.y);
+    }
+
+    #[test]
+    fn targets_can_override_extra_commands() {
+        let common = vec![
+            ExtraCmd::parse("console=openstack {name}"),
+            ExtraCmd::parse("dmesg=dmesg"),
+        ];
+        let own = |specs: &[&str]| specs.iter().map(|s| ExtraCmd::parse(s)).collect();
+        let cmds = |v: Vec<ExtraCmd>| -> Vec<(String, String)> {
+            v.into_iter().map(|c| (c.label, c.command)).collect()
+        };
+        assert_eq!(cmds(merge_extras(&common, Vec::new())).len(), 2);
+        // Replaced, with the others kept.
+        let m = cmds(merge_extras(&common, own(&["console=ipmi {host}"])));
+        assert_eq!(m[0], ("console".into(), "ipmi {host}".into()));
+        assert_eq!(m.len(), 2);
+        // Removed with an empty command; extra ones are added.
+        let m = cmds(merge_extras(&common, own(&["console=", "x=echo hi"])));
+        assert_eq!(
+            m,
+            [
+                ("dmesg".into(), "dmesg".into()),
+                ("x".into(), "echo hi".into())
+            ]
+        );
+
+        // The pane tells when the selected target has no command.
+        let mut a = app(2);
+        set_extras(&mut a, common);
+        a.targets[1].cmds.clear();
+        a.targets[1].extra.clear();
+        a.select(1);
+        a.fetch_extra();
+        assert!(a.extra_run.is_none());
+        assert!(render(&mut a, 120, 30).contains("no command configured"));
+        a.key(KeyCode::Char('c'), KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn ansi_colors_are_kept() {
+        let l = ansi_line("a\x1b[31mred\x1b[0m \x1b[1;38;5;12mblue\x1b[2Jx\x07\ty");
+        assert_eq!(l.spans[0].content, "a");
+        assert_eq!(l.spans[1].content, "red");
+        assert_eq!(l.spans[1].style.fg, Some(Color::Indexed(1)));
+        assert_eq!(l.spans[2].style, Style::new());
+        assert_eq!(l.spans[3].style.fg, Some(Color::Indexed(12)));
+        assert!(l.spans[3].style.add_modifier.contains(Modifier::BOLD));
+        let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "a".to_string() + "red blue" + "x    y");
+    }
+
+    /// Run the pending messages of the channel until `done` holds.
+    fn pump(a: &mut App, rx: &Receiver<Msg>, done: impl Fn(&App) -> bool) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while !done(a) {
+            assert!(Instant::now() < end, "timed out");
+            if let Ok(m) = rx.recv_timeout(Duration::from_millis(50)) {
+                a.apply(m);
+            }
+        }
+    }
+
+    #[test]
+    fn extra_output_streams_and_stops() {
+        let (tx, rx) = mpsc::channel();
+        let mut a = app(2);
+        a.msg_tx = tx;
+        set_extras(
+            &mut a,
+            vec![ExtraCmd::parse(
+                "echo $LUKS_SSH_UNLOCK_NAME {host}; printf '\\033[31mred\\033[0m\\n' >&2; sleep 0.3; echo late; exit 3",
+            )],
+        );
+        a.fetch_extra();
+        assert!(a.extra_run.is_some() && a.targets[0].extra[0].running);
+        // The first lines arrive while the command still runs.
+        pump(&mut a, &rx, |a| a.targets[0].extra[0].lines.len() >= 2);
+        assert!(a.targets[0].extra[0].running);
+        let first: String = a.targets[0].extra[0].lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(first, "host0 h0.example");
+        pump(&mut a, &rx, |a| !a.targets[0].extra[0].running);
+        let lines = &a.targets[0].extra[0].lines;
+        assert_eq!(lines[1].spans[0].style.fg, Some(Color::Indexed(1)));
+        let last: String = lines
+            .last()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(last, "[exit 3]");
+        assert!(a.extra_run.is_none());
+
+        // A command that never ends is killed when another target is selected.
+        set_extras(
+            &mut a,
+            vec![ExtraCmd::parse("while :; do echo x; sleep 0.05; done")],
+        );
+        a.fetch_extra();
+        let pgid = a.extra_run.as_ref().unwrap().pgid;
+        pump(&mut a, &rx, |a| a.targets[0].extra[0].lines.len() >= 2);
+        a.select(1);
+        a.fetch_extra();
+        assert_eq!(a.extra_run.as_ref().unwrap().t, 1);
+        assert!(!a.targets[0].extra[0].running);
+        let end = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(-pgid, 0) } == 0 {
+            assert!(Instant::now() < end, "process group still alive");
+            thread::sleep(Duration::from_millis(20));
+        }
+        a.stop_extra();
     }
 
     #[test]

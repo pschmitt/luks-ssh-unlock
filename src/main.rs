@@ -72,9 +72,14 @@ enum Cmd {
         /// Seconds between two status checks of a target
         #[arg(long, default_value_t = 30, value_name = "SECONDS")]
         refresh: u64,
+        /// Only show targets whose name or host contains this text
+        /// (case-insensitive); `/` changes it in the dashboard
+        #[arg(long, value_name = "TEXT")]
+        filter: Option<String>,
         /// Show a command's output in a pane below the activity
         /// (repeatable; `c` switches). `{host}` and `{name}` are replaced by
-        /// the selected target's host and name. Run with `sh -c`, 30s limit.
+        /// the selected target's host and name. Run with `sh -c` while the target is
+        /// selected; the output is streamed.
         /// [default: /etc/luks-ssh-unlock/tui-commands]
         #[arg(long = "extra-command", value_name = "[LABEL=]COMMAND")]
         extra_commands: Vec<String>,
@@ -131,6 +136,7 @@ fn real_main() -> Result<bool> {
         Cmd::Tui {
             files,
             refresh,
+            filter,
             extra_commands,
         } => {
             let mut sources = tui::discover(&files)?;
@@ -143,7 +149,11 @@ fn real_main() -> Result<bool> {
                     .clone()
                     .or_else(|| process_env("SSH_HOSTNAME"))
                     .unwrap_or_default();
-                sources.push(tui::Source { name, env: None });
+                sources.push(tui::Source {
+                    name,
+                    env: None,
+                    extras: Vec::new(),
+                });
             }
             let extras = if extra_commands.is_empty() {
                 tui::default_extras()
@@ -158,6 +168,7 @@ fn real_main() -> Result<bool> {
                 &cli.opts,
                 Duration::from_secs(refresh.max(5)),
                 extras,
+                filter.unwrap_or_default(),
             )?;
             Ok(true)
         }

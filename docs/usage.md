@@ -36,6 +36,7 @@ commands' results.
 sudo luks-ssh-unlock tui                        # every /etc/luks-ssh-unlock/*.env
 luks-ssh-unlock tui hosts/ --refresh 10         # every *.env in a directory
 luks-ssh-unlock tui --host target.example.com   # one target from the options
+luks-ssh-unlock tui --filter rofl               # only targets whose name or host contains "rofl"
 ```
 
 Each target is described by an environment file in systemd
@@ -78,24 +79,36 @@ drag the borders between the panes to resize them.
 
 ### Extra command pane
 
-`--extra-command '[LABEL=]COMMAND'` (repeatable) adds an optional fourth pane
-below the activity that shows the output of
-a command for the selected target, for example a cloud console log:
+`--extra-command '[LABEL=]COMMAND'` (repeatable) adds an optional pane below
+the activity that shows the output of a command for the selected target, for
+example a cloud console log:
 
 ```sh
-luks-ssh-unlock tui --extra-command 'console=openstack::console-log {host}'
+luks-ssh-unlock tui --extra-command 'console=openstack::console-log {name}'
 ```
 
-`{host}` and `{name}` are replaced by the target's host and name (shell-quoted,
-also exported as `LUKS_SSH_UNLOCK_HOST` and `LUKS_SSH_UNLOCK_NAME`). The command
-runs with `sh -c` (so it must be an executable on `PATH`, not a shell function),
-(as the user who ran `sudo`, when the dashboard runs as root through it)
-for the selected target only, again on selection and every refresh interval
-(`r` re-runs it), and is stopped after 30 seconds. Output (stdout and stderr,
-last 2000 lines) is scrollable when the pane has the focus; `c` switches
-between several commands. Without the option, commands are read from
-`/etc/luks-ssh-unlock/tui-commands` (one `[LABEL=]COMMAND` per line, `#`
-comments), which the NixOS module writes from `services.luks-ssh-unlock.tui.extraCommands`.
+`{host}` and `{name}` are replaced by the target's host and name
+(shell-quoted, also exported as `LUKS_SSH_UNLOCK_HOST` and
+`LUKS_SSH_UNLOCK_NAME`). The command runs with `sh -c` (so it must be an
+executable on `PATH`, not a shell function; wrap it in `zsh -lc '...'` for
+those), as the user who ran `sudo` when the dashboard runs as root through it.
+
+The output (stdout and stderr, colors kept, last 2000 lines) is streamed line
+by line, so commands that follow a log work. It runs while its target is
+selected and stops when another one is selected, `c` switches, or the dashboard
+exits. A command that ends is started again every refresh interval; `r` starts
+it again at once. The pane scrolls when it has the focus (like the activity)
+and its border can be dragged; `c` switches between several commands. Without
+the option, commands are read from `/etc/luks-ssh-unlock/tui-commands` (one
+`[LABEL=]COMMAND` per line, `#` comments), which the NixOS module writes from
+`services.luks-ssh-unlock.tui.extraCommands`.
+
+A target can have its own commands in `<name>.tui-commands` next to its
+environment file (same format; the NixOS module writes it from the instance's
+`tuiCommands`). They replace the common command of the same label, add new
+ones, and an empty command (`console=`) removes that label for the target.
+This is how a host that is not an OpenStack VM gets a different console
+command, or none.
 
 The dashboard follows each service's journal live (this needs root or the
 `systemd-journal` group) and checks a target again as soon as its service logs

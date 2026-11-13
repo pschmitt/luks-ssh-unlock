@@ -296,6 +296,12 @@ in
         name: instance:
         nameValuePair "luks-ssh-unlock/${name}.initrd_known_hosts" { text = instance.initrdKnownHosts; }
       ) (filterAttrs (_: instance: instance.initrdKnownHosts != "") cfg.instances))
+      // (mapAttrs' (
+        name: instance:
+        nameValuePair "luks-ssh-unlock/${name}.tui-commands" {
+          text = concatStringsSep "\n" instance.tuiCommands + "\n";
+        }
+      ) (filterAttrs (_: instance: instance.tuiCommands != [ ]) cfg.instances))
       // optionalAttrs (cfg.tui.extraCommands != [ ]) {
         "luks-ssh-unlock/tui-commands".text = concatStringsSep "\n" cfg.tui.extraCommands + "\n";
       };
@@ -661,6 +667,17 @@ in
               };
               default = { };
               description = "Optional DHCP-triggered unlock listener settings.";
+            };
+            tuiCommands = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = ''
+                Dashboard commands for this target only, `[LABEL=]COMMAND`: they
+                replace the common `services.luks-ssh-unlock.tui.extraCommands`
+                of the same label, add new ones, and an empty command
+                (`"console="`) removes that label for this target.
+              '';
+              example = literalExpression ''[ "console=ipmi-console {host}" ]'';
             };
             skipSshPortCheck = mkOption {
               type = types.bool;

@@ -10,10 +10,12 @@ options and the container interface are compatible.
 ### New
 
 - `tui`: `/` filters the targets by name or host as you type (`Enter` keeps
-  the filter, `Esc` clears it). `--extra-command '[LABEL=]COMMAND'`
+  the filter, `Esc` clears it); `--filter TEXT` starts with one. `--extra-command '[LABEL=]COMMAND'`
   (repeatable) adds an optional pane below the activity that shows
-  the selected target's output of that command (`{host}` and `{name}` are
-  substituted); `c` switches between commands.
+  the selected target's output of that command, streamed live with its
+  colors (`{host}` and `{name}` are substituted); `c` switches between
+  commands, and the pane's border can be dragged. A target can override
+  or remove them in `<name>.tui-commands` (NixOS: instance option `tuiCommands`).
 - `tui`: dashboard of all targets (`/etc/luks-ssh-unlock/*.env` by default)
   with live state, details and activity, and confirmed
   unlocks and forced unlocks. The module's per-instance command gains `tui`.
