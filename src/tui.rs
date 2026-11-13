@@ -67,6 +67,21 @@ impl ExtraCmd {
     }
 }
 
+/// Extra commands from `/etc/luks-ssh-unlock/tui-commands` (one
+/// `[LABEL=]COMMAND` per line, `#` comments), used when none are given on the
+/// command line. The NixOS module writes it.
+pub fn default_extras() -> Vec<ExtraCmd> {
+    fs::read_to_string(format!("{DEFAULT_CONFIG_DIR}/tui-commands"))
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(ExtraCmd::parse)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Last output of one extra command for one target.
 #[derive(Default)]
 struct ExtraOut {
@@ -109,8 +124,18 @@ fn run_extra(command: &str, name: &str, host: &str) -> Vec<String> {
     let script = command
         .replace("{host}", &shell_quote(host))
         .replace("{name}", &shell_quote(name));
-    let out = Command::new("timeout")
-        .args(["--kill-after=5", "30", "sh", "-c", &script])
+    // Under sudo (the dashboard re-runs itself as root), run the command as
+    // the user who started it: their tools and credentials live there.
+    let user = std::env::var("SUDO_USER")
+        .ok()
+        .filter(|u| !u.is_empty() && u != "root" && unsafe { libc::geteuid() } == 0);
+    let mut cmd = Command::new("timeout");
+    cmd.args(["--kill-after=5", "30"]);
+    if let Some(user) = &user {
+        cmd.args(["sudo", "-n", "-H", "-u", user, "--"]);
+    }
+    let out = cmd
+        .args(["sh", "-c", &script])
         .env("LUKS_SSH_UNLOCK_NAME", name)
         .env("LUKS_SSH_UNLOCK_HOST", host)
         .stdin(Stdio::null())
@@ -919,17 +944,13 @@ impl App {
         let extra = !self.extras.is_empty();
         self.focus = match (self.portrait, self.focus, dir) {
             (false, Focus::List, Dir::Right) => Focus::Details,
-            (false, Focus::Details | Focus::Activity, Dir::Left) => Focus::List,
-            (false, Focus::List, Dir::Down) => Focus::Activity,
-            (false, Focus::Activity, Dir::Right) if extra => Focus::Extra,
-            (false, Focus::Extra, Dir::Left) => Focus::Activity,
-            (false, Focus::Extra, Dir::Up) => Focus::Details,
-            (true, Focus::Activity, Dir::Down) if extra => Focus::Extra,
-            (true, Focus::Extra, Dir::Up) => Focus::Activity,
+            (false, Focus::Details | Focus::Activity | Focus::Extra, Dir::Left) => Focus::List,
             (true, Focus::Details, Dir::Up) => Focus::List,
             (true, Focus::List, Dir::Down) => Focus::Details,
             (_, Focus::Details, Dir::Down) => Focus::Activity,
             (_, Focus::Activity, Dir::Up) => Focus::Details,
+            (_, Focus::Activity, Dir::Down) if extra => Focus::Extra,
+            (_, Focus::Extra, Dir::Up) => Focus::Activity,
             (_, f, _) => f,
         };
     }
@@ -1136,34 +1157,24 @@ impl App {
                 .map_or(content_w.clamp(24, (body.width * 2 / 5).max(24)), |w| {
                     w.clamp(15, body.width.saturating_sub(20).max(15))
                 });
-            let auto_h = ((self.targets.len() as u16)
-                .saturating_mul(2)
-                .saturating_add(2))
-            .clamp(14, (body.height / 2).max(14));
             let top_h = self
                 .land_top_h
-                .map_or(auto_h, |h| h.clamp(6, body.height.saturating_sub(4).max(6)))
+                .map_or(14, |h| h.clamp(6, body.height.saturating_sub(4).max(6)))
                 .min(body.height.saturating_sub(3))
                 .max(3);
-            let [top, logs] =
-                Layout::vertical([Constraint::Length(top_h), Constraint::Min(3)]).areas(body);
-            let [left, details] =
-                Layout::horizontal([Constraint::Length(list_w), Constraint::Min(10)]).areas(top);
-            self.hit.edge_list = Rect::new(left.right().saturating_sub(1), top.y, 2, top.height);
+            let [left, right] =
+                Layout::horizontal([Constraint::Length(list_w), Constraint::Min(10)]).areas(body);
+            let [details, logs] =
+                Layout::vertical([Constraint::Length(top_h), Constraint::Min(3)]).areas(right);
+            self.hit.edge_list = Rect::new(left.right().saturating_sub(1), body.y, 2, body.height);
             self.hit.edge_details =
-                Rect::new(body.x, top.bottom().saturating_sub(1), body.width, 2);
+                Rect::new(right.x, details.bottom().saturating_sub(1), right.width, 2);
             (left, details, logs)
         };
         let (logs, extra) = if self.extras.is_empty() || self.logs_full {
             (logs, None)
-        } else if self.portrait {
-            let [a, b] = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .areas(logs);
-            (a, Some(b))
         } else {
-            let [a, b] =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .areas(logs);
+            let [a, b] = Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(logs);
             (a, Some(b))
         };
         self.hit.body = body;
@@ -1749,10 +1760,13 @@ mod tests {
         let mut a = app(2);
         render(&mut a, 120, 30);
         assert!(!a.portrait);
-        // List and details side by side, the activity below at full width.
+        // The list on the left over the full height; details above the
+        // activity on the right.
         assert!(a.hit.details.x > a.hit.list.x);
         assert!(a.hit.logs.y > a.hit.details.y);
-        assert_eq!(a.hit.logs.width, 120);
+        assert_eq!(a.hit.logs.x, a.hit.details.x);
+        assert_eq!(a.hit.logs.right(), 120);
+        assert!(a.hit.list.height > a.hit.details.height);
         // The list is as wide as its content, not a third of the screen.
         assert!(a.hit.list.width < 40, "{}", a.hit.list.width);
     }
@@ -1964,9 +1978,10 @@ mod tests {
         a.targets[0].extra[0].lines = vec!["boot ok".into()];
         let out = render(&mut a, 120, 30);
         assert!(out.contains("boot ok"));
-        assert!(a.hit.extra.x >= a.hit.logs.right());
+        assert!(a.hit.extra.y >= a.hit.logs.bottom());
+        assert_eq!(a.hit.extra.x, a.hit.logs.x);
         a.focus = Focus::Activity;
-        a.key(KeyCode::Right, KeyModifiers::SHIFT);
+        a.key(KeyCode::Down, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::Extra);
         a.key(KeyCode::Tab, KeyModifiers::NONE);
         assert!(a.focus == Focus::List);

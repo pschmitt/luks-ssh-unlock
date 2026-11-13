@@ -295,7 +295,10 @@ in
       // (mapAttrs' (
         name: instance:
         nameValuePair "luks-ssh-unlock/${name}.initrd_known_hosts" { text = instance.initrdKnownHosts; }
-      ) (filterAttrs (_: instance: instance.initrdKnownHosts != "") cfg.instances));
+      ) (filterAttrs (_: instance: instance.initrdKnownHosts != "") cfg.instances))
+      // optionalAttrs (cfg.tui.extraCommands != [ ]) {
+        "luks-ssh-unlock/tui-commands".text = concatStringsSep "\n" cfg.tui.extraCommands + "\n";
+      });
 
     warnings = concatLists (
       mapAttrsToList (
@@ -466,6 +469,18 @@ in
           or (throw "services.luks-ssh-unlock.package is not set: import the module through the luks-ssh-unlock flake (nixosModules.default) or add its overlay");
       defaultText = literalExpression "the luks-ssh-unlock flake's package";
       description = "luks-ssh-unlock package to run.";
+    };
+    tui.extraCommands = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      description = ''
+        Commands whose output the dashboard (`luks-ssh-unlock tui`) shows for
+        the selected target, in an extra pane below the activity. Each is
+        `[LABEL=]COMMAND`, run with `sh -c`; `{host}` and `{name}` are replaced
+        by the target's host and name. Written to
+        `/etc/luks-ssh-unlock/tui-commands`.
+      '';
+      example = literalExpression ''[ "console=zsh -lc 'zhj openstack::console-log {host}'" ]'';
     };
     activationScript = {
       enable = mkEnableOption "Generate initrd checksum and metadata during activation";

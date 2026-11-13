@@ -50,9 +50,10 @@ thirds of its width, such as a phone) the panes are stacked instead: targets
 on top, then the details, then the activity. `Shift`+`Up`/`Down` moves the
 focus between them.
 
-The target list (as wide and tall as its content needs) and the selected
-target's details share the top; below them, at the full width, is the
-activity: the service's journal
+The target list (as wide as its content needs) takes the full height on the
+left. On the right, from top to bottom: the selected target's details, the
+activity and, if configured, the extra command pane. The activity is the
+service's journal
 (`journalctl -u luks-ssh-unlock-<name>.service`, live) interleaved with what
 the dashboard itself does (check results, unlocks), marked `svc` and `tui`.
 
@@ -78,7 +79,7 @@ drag the borders between the panes to resize them.
 ### Extra command pane
 
 `--extra-command '[LABEL=]COMMAND'` (repeatable) adds an optional fourth pane
-right of the activity (below it on a narrow terminal) that shows the output of
+below the activity that shows the output of
 a command for the selected target, for example a cloud console log:
 
 ```sh
@@ -88,10 +89,13 @@ luks-ssh-unlock tui --extra-command 'console=openstack::console-log {host}'
 `{host}` and `{name}` are replaced by the target's host and name (shell-quoted,
 also exported as `LUKS_SSH_UNLOCK_HOST` and `LUKS_SSH_UNLOCK_NAME`). The command
 runs with `sh -c` (so it must be an executable on `PATH`, not a shell function),
+(as the user who ran `sudo`, when the dashboard runs as root through it)
 for the selected target only, again on selection and every refresh interval
 (`r` re-runs it), and is stopped after 30 seconds. Output (stdout and stderr,
 last 2000 lines) is scrollable when the pane has the focus; `c` switches
-between several commands.
+between several commands. Without the option, commands are read from
+`/etc/luks-ssh-unlock/tui-commands` (one `[LABEL=]COMMAND` per line, `#`
+comments), which the NixOS module writes from `services.luks-ssh-unlock.tui.extraCommands`.
 
 The dashboard follows each service's journal live (this needs root or the
 `systemd-journal` group) and checks a target again as soon as its service logs

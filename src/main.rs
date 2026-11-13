@@ -72,9 +72,10 @@ enum Cmd {
         /// Seconds between two status checks of a target
         #[arg(long, default_value_t = 30, value_name = "SECONDS")]
         refresh: u64,
-        /// Show a command's output in a fourth pane, right of the activity
+        /// Show a command's output in a pane below the activity
         /// (repeatable; `c` switches). `{host}` and `{name}` are replaced by
         /// the selected target's host and name. Run with `sh -c`, 30s limit.
+        /// [default: /etc/luks-ssh-unlock/tui-commands]
         #[arg(long = "extra-command", value_name = "[LABEL=]COMMAND")]
         extra_commands: Vec<String>,
     },
@@ -144,10 +145,14 @@ fn real_main() -> Result<bool> {
                     .unwrap_or_default();
                 sources.push(tui::Source { name, env: None });
             }
-            let extras = extra_commands
-                .iter()
-                .map(|s| tui::ExtraCmd::parse(s))
-                .collect();
+            let extras = if extra_commands.is_empty() {
+                tui::default_extras()
+            } else {
+                extra_commands
+                    .iter()
+                    .map(|s| tui::ExtraCmd::parse(s))
+                    .collect()
+            };
             tui::run(
                 sources,
                 &cli.opts,

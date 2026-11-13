@@ -11,7 +11,7 @@ options and the container interface are compatible.
 
 - `tui`: `/` filters the targets by name or host as you type (`Enter` keeps
   the filter, `Esc` clears it). `--extra-command '[LABEL=]COMMAND'`
-  (repeatable) adds an optional fourth pane right of the activity that shows
+  (repeatable) adds an optional pane below the activity that shows
   the selected target's output of that command (`{host}` and `{name}` are
   substituted); `c` switches between commands.
 - `tui`: dashboard of all targets (`/etc/luks-ssh-unlock/*.env` by default)
