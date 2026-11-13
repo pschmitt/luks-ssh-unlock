@@ -1299,7 +1299,8 @@ impl App {
         let extra = self.has_extras;
         self.focus = match (self.portrait, self.focus, dir) {
             (false, Focus::List, Dir::Right) => Focus::Activity,
-            (false, Focus::Activity | Focus::Extra, Dir::Left) => Focus::List,
+            (false, Focus::Activity, Dir::Left) => Focus::List,
+            (false, Focus::List, Dir::Down) if extra => Focus::Extra,
             (true, Focus::List, Dir::Down) => Focus::Activity,
             (true, Focus::Activity, Dir::Up) => Focus::List,
             (_, Focus::Activity, Dir::Down) if extra => Focus::Extra,
@@ -1476,6 +1477,19 @@ impl App {
         // Cells are about twice as tall as wide: below this the side-by-side
         // layout is cramped, so stack the panes instead.
         self.portrait = area.width < 80 || u32::from(area.width) * 2 < u32::from(area.height) * 3;
+        let (upper, wide_extra) = if !self.portrait && self.has_extras && !self.logs_full {
+            let [upper, extra] = Layout::vertical([
+                Constraint::Percentage(100 - self.extra_pct),
+                Constraint::Percentage(self.extra_pct),
+            ])
+            .areas(body);
+            self.hit.split = body;
+            self.hit.edge_extra =
+                Rect::new(upper.x, upper.bottom().saturating_sub(1), upper.width, 2);
+            (upper, Some(extra))
+        } else {
+            (body, None)
+        };
         let (left, logs) = if self.portrait {
             // Two rows per target, but never more than a third of the screen
             // unless dragged there.
@@ -1491,18 +1505,14 @@ impl App {
             self.hit.edge_list = Rect::new(body.x, l.bottom().saturating_sub(1), body.width, 2);
             (l, g)
         } else {
-            // The list is as wide as its content needs, over the full height;
-            // the activity (and the extra pane) take the rest.
+            // The list is as wide as its content needs, alongside the activity.
             let content_w = self
                 .targets
                 .iter()
                 .map(|t| {
                     let warn = t.unit.as_ref().is_some_and(|u| u.warning().is_some());
                     let title = 2 + t.name.chars().count() + if warn { 10 } else { 0 };
-                    title.max(
-                        3 + summary(t).1.chars().count()
-                            + if healthcheck_ok(t).is_some() { 6 } else { 0 },
-                    )
+                    title.max(3 + summary(t).1.chars().count())
                 })
                 .max()
                 .unwrap_or(0) as u16
@@ -1513,12 +1523,13 @@ impl App {
                     w.clamp(15, body.width.saturating_sub(20).max(15))
                 });
             let [left, right] =
-                Layout::horizontal([Constraint::Length(list_w), Constraint::Min(10)]).areas(body);
-            self.hit.edge_list = Rect::new(left.right().saturating_sub(1), body.y, 2, body.height);
+                Layout::horizontal([Constraint::Length(list_w), Constraint::Min(10)]).areas(upper);
+            self.hit.edge_list =
+                Rect::new(left.right().saturating_sub(1), upper.y, 2, upper.height);
             (left, right)
         };
-        let (logs, extra) = if !self.has_extras || self.logs_full {
-            (logs, None)
+        let (logs, extra) = if !self.portrait || !self.has_extras || self.logs_full {
+            (logs, wide_extra)
         } else {
             let [a, b] = Layout::vertical([
                 Constraint::Percentage(100 - self.extra_pct),
@@ -1752,15 +1763,7 @@ impl App {
                     Some(b) => format!("{label} · {b}…"),
                     None => label,
                 };
-                // The healthcheck result, as a dot next to the state.
-                let mut sub = vec![Span::styled(format!("   {label}"), Style::new().fg(color))];
-                if let Some(ok) = healthcheck_ok(t) {
-                    sub.push(Span::styled("  hc ", Style::new().dim()));
-                    sub.push(Span::styled(
-                        "●",
-                        Style::new().fg(if ok { Color::Green } else { Color::Red }),
-                    ));
-                }
+                let sub = Span::styled(format!("   {label}"), Style::new().fg(color));
                 ListItem::new(vec![Line::from(title), Line::from(sub)])
             })
             .collect();
@@ -2126,15 +2129,6 @@ fn pick<'a>(width: u16, options: &[&'a str]) -> &'a str {
         .unwrap_or_else(|| options[options.len() - 1])
 }
 
-/// The healthcheck result of a target: none when it has no healthcheck or no
-/// report yet, else whether it passes (it can only pass once unlocked).
-fn healthcheck_ok(t: &Target) -> Option<bool> {
-    let r = t.report.as_ref()?;
-    r.healthcheck
-        .as_ref()
-        .map(|_| matches!(r.state, TargetState::Unlocked(_)))
-}
-
 fn summary(t: &Target) -> (&'static str, String, Color) {
     if t.error.is_some() {
         return ("✖", "config error".into(), Color::Red);
@@ -2435,7 +2429,11 @@ mod tests {
         let out = render(&mut a, 120, 30);
         assert!(out.contains("boot ok"));
         assert!(a.hit.extra.y >= a.hit.logs.bottom());
-        assert_eq!(a.hit.extra.x, a.hit.logs.x);
+        assert_eq!(a.hit.extra.x, a.hit.list.x);
+        assert_eq!(a.hit.extra.right(), a.hit.logs.right());
+        assert_eq!(a.hit.list.bottom(), a.hit.logs.bottom());
+        assert_eq!(a.hit.extra.y, a.hit.list.bottom());
+        assert_eq!(a.hit.edge_list.bottom(), a.hit.list.bottom());
         a.focus = Focus::Activity;
         a.key(KeyCode::Down, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::Extra);
@@ -2553,17 +2551,13 @@ mod tests {
     }
 
     #[test]
-    fn list_shows_state_and_healthcheck() {
+    fn list_shows_state_without_healthcheck() {
         let mut a = app(3);
         a.targets[0].report = Some(report(TargetState::Unlocked("up".into()), Some("hc")));
         a.targets[1].report = Some(report(TargetState::Unreachable, Some("hc")));
         a.targets[2].report = Some(report(TargetState::Unlocked("up".into()), None));
-        assert_eq!(healthcheck_ok(&a.targets[0]), Some(true));
-        assert_eq!(healthcheck_ok(&a.targets[1]), Some(false));
-        assert_eq!(healthcheck_ok(&a.targets[2]), None);
         let out = render(&mut a, 120, 30);
-        // Two targets have a healthcheck, the third none.
-        assert_eq!(out.matches("hc ●").count(), 2, "{out}");
+        assert!(!out.contains("hc ●"), "{out}");
         assert!(out.contains("unlocked") && out.contains("unreachable"));
     }
 
