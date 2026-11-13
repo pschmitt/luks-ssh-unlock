@@ -1248,13 +1248,13 @@ impl App {
                 }
             }
             KeyCode::Char('R') => (0..n).for_each(|i| self.send(i, Cmd::Probe)),
-            KeyCode::Char('u') | KeyCode::Enter if n > 0 && self.targets[sel].tx.is_some() => {
+            KeyCode::Char('u') if n > 0 && self.targets[sel].tx.is_some() => {
                 self.confirm = Some((sel, false));
             }
             KeyCode::Char('F') if n > 0 && self.targets[sel].tx.is_some() => {
                 self.confirm = Some((sel, true))
             }
-            KeyCode::Char('s') if n > 0 && self.targets[sel].tx.is_some() => {
+            KeyCode::Char('S') if n > 0 && self.targets[sel].tx.is_some() => {
                 self.toggle_service(sel)
             }
             _ => {}
@@ -1696,8 +1696,8 @@ impl App {
                 pick(
                     footer.width,
                     &[
-                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · r/R refresh · u/⏎/double-click unlock · F force · l full-screen activity · C full-screen console · c next command · ? help · q quit",
-                        " ↑↓ select · / filter · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · s service · l log · C console · ? help · q quit",
+                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · r/R refresh · u/double-click unlock · F force · S service · l full-screen activity · C full-screen console · c next command · ? help · q quit",
+                        " ↑↓ select · / filter · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · S service · l log · C console · ? help · q quit",
                         " ↑↓ select · r refresh · u unlock · q quit",
                         " ↑↓ · r · u · q",
                     ],
@@ -1724,9 +1724,9 @@ impl App {
             ("⇧+arrows  Tab", "move the focus to another pane"),
             ("/", "filter targets by name or host (⏎ keeps, Esc clears)"),
             ("r  R", "check the selected target / all targets now"),
-            ("u  ⏎", "unlock the selected target (asks first)"),
+            ("u", "unlock the selected target (asks first)"),
             ("F", "force unlock (skips integrity and host-key checks)"),
-            ("s", "stop the target's service, or start it when stopped"),
+            ("S", "stop the target's service, or start it when stopped"),
             ("l", "activity full screen (l or Esc goes back)"),
             ("C", "console (extra command) full screen"),
             ("c", "next console command"),
@@ -2512,8 +2512,15 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let mut a = app(1);
         a.targets[0].tx = Some(tx);
+        // Enter does not unlock; `u` does.
+        a.key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.confirm.is_none());
+        a.key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert!(a.confirm.is_some());
+        a.key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.confirm.is_none());
         // Unknown state: a note, nothing sent.
-        a.key(KeyCode::Char('s'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('S'), KeyModifiers::NONE);
         assert!(rx.try_recv().is_err());
         assert!(
             a.targets[0]
@@ -2524,13 +2531,13 @@ mod tests {
                 .contains("not known")
         );
         a.targets[0].unit = Some(unit("active"));
-        a.key(KeyCode::Char('s'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('S'), KeyModifiers::NONE);
         assert!(matches!(rx.try_recv(), Ok(Cmd::Service(false))));
         a.targets[0].unit = Some(unit("failed"));
-        a.key(KeyCode::Char('s'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('S'), KeyModifiers::NONE);
         assert!(matches!(rx.try_recv(), Ok(Cmd::Service(true))));
         a.targets[0].unit.as_mut().unwrap().load = "not-found".into();
-        a.key(KeyCode::Char('s'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('S'), KeyModifiers::NONE);
         assert!(rx.try_recv().is_err());
     }
 

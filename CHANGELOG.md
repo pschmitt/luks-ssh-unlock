@@ -15,7 +15,7 @@ options and the container interface are compatible.
   the selected target's output of that command, streamed live with its
   colors (`{host}` and `{name}` are substituted); `c` switches between
   commands, `C` shows it full screen, and the pane's border can be dragged.
-  `?` shows the keys, and `s` stops or starts the target's service. A target can override
+  `?` shows the keys, and `S` stops or starts the target's service. A target can override
   or remove them in `<name>.tui-commands` (NixOS: instance option `tuiCommands`).
 - `tui`: dashboard of all targets (`/etc/luks-ssh-unlock/*.env` by default)
   with live state, details and activity, and confirmed

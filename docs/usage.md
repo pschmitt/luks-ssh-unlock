@@ -69,9 +69,9 @@ the dashboard itself does (check results, unlocks), marked `svc` and `tui`.
 | `/` | Filter the targets by name or host while typing; `Enter` keeps the filter, `Esc` clears it |
 | `c` | Next extra command (see below) |
 | `r` / `R` | Check the selected target / every target now |
-| `u`, `Enter` | Unlock the selected target, after confirmation. All checks still apply. |
+| `u` | Unlock the selected target, after confirmation. All checks still apply. |
 | `F` | Force unlock, after confirmation. Skips the integrity and host-key checks. |
-| `s` | Stop the selected target's systemd service, or start it when it is not running (needs root). The dashboard warns about a stopped service. |
+| `S` | Stop the selected target's systemd service, or start it when it is not running (needs root). The dashboard warns about a stopped service. |
 | `PageUp`/`PageDown`, `Home`/`End` | Scroll the activity, oldest/newest |
 | `q`, `Esc` | Quit (`Esc` closes the full-screen activity first) |
 
