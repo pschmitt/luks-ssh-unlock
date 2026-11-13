@@ -8,6 +8,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -33,6 +34,8 @@ use chrono::{DateTime, Local, TimeZone};
 
 const LOG_LINES: usize = 500;
 const EXTRA_LINES: usize = 2000;
+/// How long an extra command gets to clean up after SIGTERM before SIGKILL.
+const EXTRA_GRACE: Duration = Duration::from_secs(5);
 /// Minimum time between two checks triggered by new journal lines.
 const EVENT_PROBE_GAP: Duration = Duration::from_secs(2);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -118,8 +121,10 @@ struct ExtraOut {
 struct ExtraRun {
     t: usize,
     c: usize,
-    /// Process group, killed as a whole when the selection changes.
+    /// Process group, signalled as a whole when the selection changes.
     pgid: i32,
+    /// Set once the command has been reaped.
+    ended: Arc<AtomicBool>,
 }
 
 fn shell_quote(s: &str) -> String {
@@ -224,13 +229,14 @@ fn ansi_line(text: &str) -> Line<'static> {
 /// Start an extra command for a target and stream its output (stdout and
 /// stderr) to the dashboard line by line. `{host}` and `{name}` are replaced
 /// by the quoted values, and also exported as `LUKS_SSH_UNLOCK_HOST` and
-/// `LUKS_SSH_UNLOCK_NAME`. Returns the process group to kill.
+/// `LUKS_SSH_UNLOCK_NAME`. Returns its process group and a flag that is set
+/// once it has been reaped.
 fn spawn_extra(
     command: &str,
     (t, c, run_id): (usize, usize, u64),
     (name, host): (&str, &str),
     tx: Sender<Msg>,
-) -> std::io::Result<i32> {
+) -> std::io::Result<(i32, Arc<AtomicBool>)> {
     let script = command
         .replace("{host}", &shell_quote(host))
         .replace("{name}", &shell_quote(name));
@@ -270,6 +276,8 @@ exec sh -c "$1""#,
     let mut child = cmd.spawn()?;
     let pgid = child.id() as i32;
     let out = child.stdout.take().expect("stdout is piped");
+    let ended = Arc::new(AtomicBool::new(false));
+    let done = ended.clone();
     thread::spawn(move || {
         let mut reader = BufReader::new(out);
         let mut buf = Vec::new();
@@ -287,9 +295,10 @@ exec sh -c "$1""#,
             }
         }
         let code = child.wait().ok().and_then(|s| s.code());
+        done.store(true, Ordering::SeqCst);
         let _ = tx.send(Msg::ExtraDone(t, c, run_id, code));
     });
-    Ok(pgid)
+    Ok((pgid, ended))
 }
 
 /// One target to show: a name and the environment describing it.
@@ -840,7 +849,7 @@ pub fn run(
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = event_loop(&mut terminal, &mut app, &rx);
-    app.stop_extra();
+    app.stop_extra(true);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
@@ -900,10 +909,31 @@ impl App {
             .min(self.targets[t].cmds.len().saturating_sub(1))
     }
 
-    /// Kill the running extra command, if any.
-    fn stop_extra(&mut self) {
+    /// Stop the running extra command, if any: SIGTERM first, so its
+    /// cleanup (such as deleting a console connection) runs, and SIGKILL
+    /// after a grace period. With `wait`, return only once it has ended.
+    fn stop_extra(&mut self, wait: bool) {
         if let Some(run) = self.extra_run.take() {
-            unsafe { libc::kill(-run.pgid, libc::SIGKILL) };
+            unsafe { libc::kill(-run.pgid, libc::SIGTERM) };
+            let (pgid, ended) = (run.pgid, run.ended);
+            let end = Instant::now() + EXTRA_GRACE;
+            if wait {
+                while !ended.load(Ordering::SeqCst) && Instant::now() < end {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                if !ended.load(Ordering::SeqCst) {
+                    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                }
+            } else {
+                thread::spawn(move || {
+                    while !ended.load(Ordering::SeqCst) && Instant::now() < end {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    if !ended.load(Ordering::SeqCst) {
+                        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                    }
+                });
+            }
             let slot = &mut self.targets[run.t].extra[run.c];
             slot.run_id = 0;
             slot.running = false;
@@ -926,7 +956,7 @@ impl App {
             .as_ref()
             .is_some_and(|r| Some((r.t, r.c)) != want)
         {
-            self.stop_extra();
+            self.stop_extra(false);
         }
         let Some((t, c)) = want else { return };
         let refresh = self.refresh;
@@ -950,7 +980,7 @@ impl App {
             (&target.name, &target.host),
             self.msg_tx.clone(),
         ) {
-            Ok(pgid) => self.extra_run = Some(ExtraRun { t, c, pgid }),
+            Ok((pgid, ended)) => self.extra_run = Some(ExtraRun { t, c, pgid, ended }),
             Err(e) => {
                 slot.lines = vec![Line::from(format!("cannot run command: {e}"))];
                 slot.run_id = 0;
@@ -1149,7 +1179,7 @@ impl App {
             KeyCode::Char('r') if n > 0 => {
                 self.send(sel, Cmd::Probe);
                 // Run the extra command again from the start.
-                self.stop_extra();
+                self.stop_extra(false);
                 let c = self.extra_c(sel);
                 if let Some(slot) = self.targets[sel].extra.get_mut(c) {
                     slot.finished_at = None;
@@ -2375,7 +2405,7 @@ mod tests {
             assert!(Instant::now() < end, "process group still alive");
             thread::sleep(Duration::from_millis(20));
         }
-        a.stop_extra();
+        a.stop_extra(true);
     }
 
     #[test]
