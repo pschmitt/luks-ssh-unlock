@@ -77,6 +77,7 @@ host keys, uptime) in a dialog.
 | `S` | Stop the selected target's systemd service, or start it when it is not running (needs root). The dashboard warns about a stopped service. |
 | `PageUp`/`PageDown`, `Home`/`End` | Scroll the activity, oldest/newest |
 | `q`, `Esc` | Quit (`Esc` closes the full-screen activity first) |
+| `Ctrl+]`, `Ctrl+R`/`F5` | In an interactive console, which has the keyboard otherwise: back to the dashboard, restart the console (see [Interactive consoles](#interactive-consoles)) |
 
 With a mouse: click a target to select it, double-click to unlock it (the
 confirmation dialog has clickable **Yes** and **Cancel** buttons), click a
@@ -85,7 +86,7 @@ drag the borders between the panes to resize them.
 
 ### Extra command pane
 
-`--extra-command '[LABEL=]COMMAND'` (repeatable) adds an optional pane below
+`--extra-command '[LABEL=][@]COMMAND'` (repeatable) adds an optional pane below
 the activity that shows the output of a command for the selected target, for
 example a cloud console log:
 
@@ -106,8 +107,41 @@ exits. A command that ends is started again every refresh interval; `r` starts
 it again at once. The pane scrolls when it has the focus (like the activity)
 and its border can be dragged; `c` switches between several commands. Without
 the option, commands are read from `/etc/luks-ssh-unlock/tui-commands` (one
-`[LABEL=]COMMAND` per line, `#` comments), which the NixOS module writes from
+`[LABEL=][@]COMMAND` per line, `#` comments), which the NixOS module writes from
 `services.luks-ssh-unlock.tui.extraCommands`.
+
+#### Interactive consoles
+
+A command marked with `@` (`console=@COMMAND`) is interactive: it runs on a
+pseudo-terminal the size of the pane and the pane shows its terminal screen,
+so prompts without a newline (`login: `), line editing, colors and full-screen
+programs work. The size follows the pane (the command gets `SIGWINCH`), and
+`TERM` is `xterm-256color`. Commands without `@` keep streaming their output
+line by line, as before.
+
+```sh
+luks-ssh-unlock tui --extra-command 'oci=@oci-console {name}'
+```
+
+While such a console has the focus (click it, or move the focus with
+`Shift`+arrows or `Tab`; its border turns yellow) it captures the keyboard:
+every key goes to the program, including `q`, `Esc`, `Ctrl+C`, `Tab` and the
+arrows, so nothing can quit or change the dashboard by accident. Only these
+keys stay with the dashboard:
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+]` | Give the keyboard back: the target list gets the focus, the console keeps running. Also leaves the full-screen console. |
+| `Ctrl+R`, `F5` | Restart the console: the program is stopped (and may clean up first), then started again. Also works when it has ended. |
+| `Shift`+arrows | Move the focus to another pane, as everywhere. |
+| `Shift`+`PageUp`/`PageDown`, wheel | Scroll back through the console's history; typing goes back to the end. |
+
+Clicking another pane also releases the keyboard. The footer shows the escape
+key while the console captures the keyboard. A console that ends (the program
+exits, or `Ctrl+R` stops it) shows `[exited]` (or `[exit N]`, `[killed]`) and the keyboard returns to the
+dashboard, whose keys work as usual; it is not started again on its own, press
+`Ctrl+R` or `F5` for that. Pasting is sent as typed keys (no bracketed paste),
+and the mouse is not forwarded to the program.
 
 A target can have its own commands in `<name>.tui-commands` next to its
 environment file (same format; the NixOS module writes it from the instance's

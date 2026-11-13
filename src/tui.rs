@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -14,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -47,25 +49,37 @@ pub const DEFAULT_CONFIG_DIR: &str = "/etc/luks-ssh-unlock";
 pub struct ExtraCmd {
     pub label: String,
     pub command: String,
+    /// Runs on a pseudo-terminal in an emulated screen, and gets the
+    /// keyboard while its pane has the focus (`@` before the command).
+    pub interactive: bool,
 }
 
 impl ExtraCmd {
-    /// `[LABEL=]COMMAND`. Without a label, the command's first word is used.
+    /// `[LABEL=][@]COMMAND`. Without a label, the command's first word is
+    /// used. `@` makes the command interactive (a console you type into).
     pub fn parse(spec: &str) -> Self {
-        if let Some((label, command)) = spec.split_once('=')
-            && !label.is_empty()
-            && label
-                .chars()
-                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
-        {
-            return Self {
-                label: label.into(),
-                command: command.trim().into(),
-            };
-        }
+        let (label, command) = match spec.split_once('=') {
+            Some((label, command))
+                if !label.is_empty()
+                    && label
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')) =>
+            {
+                (Some(label), command)
+            }
+            _ => (None, spec),
+        };
+        let command = command.trim();
+        let (interactive, command) = match command.strip_prefix('@') {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, command),
+        };
         Self {
-            label: spec.split_whitespace().next().unwrap_or(spec).into(),
-            command: spec.trim().into(),
+            label: label
+                .map(str::to_string)
+                .unwrap_or_else(|| command.split_whitespace().next().unwrap_or(command).into()),
+            command: command.into(),
+            interactive,
         }
     }
 }
@@ -114,6 +128,10 @@ struct ExtraOut {
     /// The next line of the run replaces the old output.
     restart: bool,
     finished_at: Option<Instant>,
+    /// Interactive commands: the emulated terminal screen, with scrollback.
+    screen: Option<vt100::Parser>,
+    /// The end of the last output, in case a terminal query is split in two.
+    query_tail: Vec<u8>,
 }
 
 /// The extra command that is running now (at most one: the selected
@@ -125,6 +143,8 @@ struct ExtraRun {
     pgid: i32,
     /// Set once the command has been reaped.
     ended: Arc<AtomicBool>,
+    /// The pseudo-terminal of an interactive command.
+    pty: Option<Pty>,
 }
 
 fn shell_quote(s: &str) -> String {
@@ -226,17 +246,11 @@ fn ansi_line(text: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Start an extra command for a target and stream its output (stdout and
-/// stderr) to the dashboard line by line. `{host}` and `{name}` are replaced
-/// by the quoted values, and also exported as `LUKS_SSH_UNLOCK_HOST` and
-/// `LUKS_SSH_UNLOCK_NAME`. Returns its process group and a flag that is set
-/// once it has been reaped.
-fn spawn_extra(
-    command: &str,
-    (t, c, run_id): (usize, usize, u64),
-    (name, host): (&str, &str),
-    tx: Sender<Msg>,
-) -> std::io::Result<(i32, Arc<AtomicBool>)> {
+/// The `sh -c` invocation of an extra command, with `{host}` and `{name}`
+/// replaced by the quoted values and also exported as
+/// `LUKS_SSH_UNLOCK_HOST` and `LUKS_SSH_UNLOCK_NAME`. Standard streams and
+/// the process group are up to the caller.
+fn extra_shell(command: &str, (name, host): (&str, &str)) -> Command {
     let script = command
         .replace("{host}", &shell_quote(host))
         .replace("{name}", &shell_quote(name));
@@ -261,18 +275,31 @@ exec sh -c "$1""#,
         &user,
         name,
         host,
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .process_group(0);
-    // Do not leave the command running when the dashboard dies.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            Ok(())
-        });
-    }
+    ]);
+    cmd
+}
+
+/// Do not leave the command running when the dashboard dies.
+fn die_with_parent() -> std::io::Result<()> {
+    unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+    Ok(())
+}
+
+/// Start an extra command for a target and stream its output (stdout and
+/// stderr) to the dashboard line by line. Returns its process group and a
+/// flag that is set once it has been reaped.
+fn spawn_extra(
+    command: &str,
+    (t, c, run_id): (usize, usize, u64),
+    target: (&str, &str),
+    tx: Sender<Msg>,
+) -> std::io::Result<(i32, Arc<AtomicBool>)> {
+    let mut cmd = extra_shell(command, target);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    unsafe { cmd.pre_exec(die_with_parent) };
     let mut child = cmd.spawn()?;
     let pgid = child.id() as i32;
     let out = child.stdout.take().expect("stdout is piped");
@@ -299,6 +326,339 @@ exec sh -c "$1""#,
         let _ = tx.send(Msg::ExtraDone(t, c, run_id, code));
     });
     Ok((pgid, ended))
+}
+
+/// Input the child has not read yet is dropped beyond this many bytes.
+const PTY_PENDING_MAX: usize = 256 * 1024;
+
+/// The master side of an interactive command's pseudo-terminal.
+struct Pty {
+    fd: OwnedFd,
+    /// Input the child has not taken yet (the master never blocks).
+    pending: Vec<u8>,
+    /// Rows and columns the child was last told.
+    size: (u16, u16),
+}
+
+fn winsize(rows: u16, cols: u16) -> libc::winsize {
+    libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    }
+}
+
+fn last_errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+impl Pty {
+    /// Tell the child about a new window size (it gets SIGWINCH).
+    fn resize(&mut self, rows: u16, cols: u16) {
+        if self.size != (rows, cols) {
+            self.size = (rows, cols);
+            let ws = winsize(rows, cols);
+            unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+        }
+    }
+
+    /// Send input to the child.
+    fn write(&mut self, bytes: &[u8]) {
+        if self.pending.len() + bytes.len() <= PTY_PENDING_MAX {
+            self.pending.extend_from_slice(bytes);
+        }
+        self.flush();
+    }
+
+    /// Hand over what the child will take now; the rest waits.
+    fn flush(&mut self) {
+        while !self.pending.is_empty() {
+            let n = unsafe {
+                libc::write(
+                    self.fd.as_raw_fd(),
+                    self.pending.as_ptr().cast(),
+                    self.pending.len(),
+                )
+            };
+            if n > 0 {
+                self.pending.drain(..n as usize);
+            } else if n < 0 && last_errno() == libc::EINTR {
+                continue;
+            } else {
+                // Full for now (EAGAIN), or the child is gone.
+                if n < 0 && last_errno() != libc::EAGAIN {
+                    self.pending.clear();
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Start an interactive extra command on a new pseudo-terminal of the given
+/// size, as the leader of its own session. Its output (raw bytes) goes to
+/// the dashboard, which feeds it to a terminal emulator. Returns its process
+/// group, a flag that is set once it has been reaped, and the terminal.
+fn spawn_console(
+    command: &str,
+    (t, c, run_id): (usize, usize, u64),
+    target: (&str, &str),
+    (rows, cols): (u16, u16),
+    tx: Sender<Msg>,
+) -> std::io::Result<(i32, Arc<AtomicBool>, Pty)> {
+    let (mut m, mut s) = (-1, -1);
+    let ws = winsize(rows, cols);
+    if unsafe { libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), &ws) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openpty returned two new descriptors that nothing else owns.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(m), OwnedFd::from_raw_fd(s)) };
+    for fd in [&master, &slave] {
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    // Reading waits in poll(); writing must never block the dashboard.
+    unsafe {
+        let fl = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+        libc::fcntl(master.as_raw_fd(), libc::F_SETFL, fl | libc::O_NONBLOCK);
+    }
+    let mut cmd = extra_shell(command, target);
+    cmd.env("TERM", "xterm-256color")
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    unsafe {
+        cmd.pre_exec(|| {
+            // A session of its own, with the terminal on stdin as its
+            // controlling terminal: job control and Ctrl+C work in it.
+            libc::setsid();
+            libc::ioctl(0, libc::TIOCSCTTY, 0);
+            die_with_parent()
+        });
+    }
+    let mut child = cmd.spawn()?;
+    // The parent's copies of the slave live in `cmd`: without them, the
+    // master sees the end of the output when the child is gone.
+    drop(cmd);
+    let pgid = child.id() as i32;
+    let reader = master.try_clone()?;
+    let ended = Arc::new(AtomicBool::new(false));
+    let done = ended.clone();
+    thread::spawn(move || {
+        let fd = reader.as_raw_fd();
+        let mut buf = [0u8; 8192];
+        let mut status = None;
+        loop {
+            let mut p = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut p, 1, 100) };
+            if ready < 0 {
+                if last_errno() == libc::EINTR {
+                    continue;
+                }
+                break;
+            }
+            if ready == 0 {
+                // Quiet: stop when the command is gone, even if something it
+                // started still holds the terminal.
+                status = child.try_wait().ok().flatten();
+                if status.is_some() {
+                    break;
+                }
+                continue;
+            }
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n > 0 {
+                let msg = Msg::ConsoleData(t, c, run_id, buf[..n as usize].to_vec());
+                if tx.send(msg).is_err() {
+                    break;
+                }
+            } else if n == 0 || !matches!(last_errno(), libc::EAGAIN | libc::EINTR) {
+                break; // the end of the output (EIO once the child is gone)
+            }
+        }
+        let code = match status {
+            Some(s) => s.code(),
+            None => child.wait().ok().and_then(|s| s.code()),
+        };
+        done.store(true, Ordering::SeqCst);
+        let _ = tx.send(Msg::ExtraDone(t, c, run_id, code));
+    });
+    Ok((
+        pgid,
+        ended,
+        Pty {
+            fd: master,
+            pending: Vec::new(),
+            size: (rows, cols),
+        },
+    ))
+}
+
+/// The keys the dashboard keeps for itself while a console has the keyboard:
+/// `Ctrl+]` hands it back to the dashboard (like telnet's escape; legacy
+/// terminals send it as `Ctrl+5`, which is the same byte).
+fn is_console_escape(code: KeyCode, mods: KeyModifiers) -> bool {
+    mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char(']' | '5'))
+}
+
+/// `Ctrl+R` or `F5` restart the console.
+fn is_console_restart(code: KeyCode, mods: KeyModifiers) -> bool {
+    (mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('r' | 'R')))
+        || (code == KeyCode::F(5) && mods.is_empty())
+}
+
+/// The control character of `Ctrl+KEY`. crossterm reports the legacy bytes
+/// 0x1c to 0x1f as `Ctrl+4` to `Ctrl+7`.
+fn ctrl_byte(c: char) -> Option<u8> {
+    match c {
+        'a'..='z' => Some(c as u8 - b'a' + 1),
+        'A'..='Z' => Some(c as u8 - b'A' + 1),
+        ' ' | '@' => Some(0),
+        '[' => Some(0x1b),
+        '\\' | '4' => Some(0x1c),
+        ']' | '5' => Some(0x1d),
+        '^' | '6' => Some(0x1e),
+        '_' | '7' => Some(0x1f),
+        '?' => Some(0x7f),
+        _ => None,
+    }
+}
+
+/// The bytes a terminal sends for a key (xterm style). `app_cursor` is the
+/// program's cursor keys mode (DECCKM).
+fn encode_key(code: KeyCode, mods: KeyModifiers, app_cursor: bool) -> Vec<u8> {
+    let shift = mods.contains(KeyModifiers::SHIFT);
+    let alt = mods.contains(KeyModifiers::ALT);
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    // xterm's modifier parameter: 1 plus shift 1, alt 2, ctrl 4.
+    let m = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+    let cursor = |f: char| match (m, app_cursor) {
+        (1, false) => format!("\x1b[{f}"),
+        (1, true) => format!("\x1bO{f}"),
+        _ => format!("\x1b[1;{m}{f}"),
+    };
+    let tilde = |n: u8| match m {
+        1 => format!("\x1b[{n}~"),
+        _ => format!("\x1b[{n};{m}~"),
+    };
+    let meta = |mut bytes: Vec<u8>| {
+        if alt {
+            bytes.insert(0, 0x1b);
+        }
+        bytes
+    };
+    match code {
+        KeyCode::Char(c) => {
+            let mut buf = [0u8; 4];
+            let plain = c.encode_utf8(&mut buf).as_bytes().to_vec();
+            meta(match ctrl.then(|| ctrl_byte(c)).flatten() {
+                Some(b) => vec![b],
+                None => plain,
+            })
+        }
+        KeyCode::Enter => meta(vec![b'\r']),
+        KeyCode::Tab => meta(vec![b'\t']),
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        KeyCode::Backspace => meta(vec![0x7f]),
+        KeyCode::Esc => meta(vec![0x1b]),
+        KeyCode::Up => cursor('A').into_bytes(),
+        KeyCode::Down => cursor('B').into_bytes(),
+        KeyCode::Right => cursor('C').into_bytes(),
+        KeyCode::Left => cursor('D').into_bytes(),
+        KeyCode::Home => cursor('H').into_bytes(),
+        KeyCode::End => cursor('F').into_bytes(),
+        KeyCode::Insert => tilde(2).into_bytes(),
+        KeyCode::Delete => tilde(3).into_bytes(),
+        KeyCode::PageUp => tilde(5).into_bytes(),
+        KeyCode::PageDown => tilde(6).into_bytes(),
+        KeyCode::F(n @ 1..=4) => {
+            let f = ['P', 'Q', 'R', 'S'][usize::from(n) - 1];
+            match m {
+                1 => format!("\x1bO{f}"),
+                _ => format!("\x1b[1;{m}{f}"),
+            }
+            .into_bytes()
+        }
+        KeyCode::F(n @ 5..=12) => {
+            tilde([15, 17, 18, 19, 20, 21, 23, 24][usize::from(n) - 5]).into_bytes()
+        }
+        KeyCode::Null => vec![0],
+        _ => Vec::new(),
+    }
+}
+
+/// Answers to the terminal queries in program output that the emulator does
+/// not answer itself: cursor position (`CSI 6 n`), status (`CSI 5 n`) and
+/// device attributes (`CSI c`). Shells and editors wait for these.
+fn terminal_replies(output: &[u8], (row, col): (u16, u16)) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, _) in output.iter().enumerate().filter(|(_, b)| **b == 0x1b) {
+        let rest = &output[i + 1..];
+        if rest.starts_with(b"[6n") {
+            out.extend(format!("\x1b[{};{}R", row + 1, col + 1).bytes());
+        } else if rest.starts_with(b"[5n") {
+            out.extend(b"\x1b[0n");
+        } else if rest.starts_with(b"[c") || rest.starts_with(b"[0c") {
+            out.extend(b"\x1b[?1;2c");
+        }
+    }
+    out
+}
+
+/// Where a terminal query that may continue in the next chunk of output
+/// starts, if one is cut off at the end of `output`.
+fn partial_query(output: &[u8]) -> usize {
+    output
+        .iter()
+        .rposition(|&b| b == 0x1b)
+        .filter(|&p| {
+            output.len() - p <= 3
+                && !output[p..]
+                    .iter()
+                    .skip(2)
+                    .any(|b| (b'@'..=b'~').contains(b))
+        })
+        .unwrap_or(output.len())
+}
+
+/// Draw the emulated screen into the area.
+fn paint_screen(screen: &vt100::Screen, area: Rect, buf: &mut Buffer) {
+    let color = |c: vt100::Color| match c {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(i) => Color::Indexed(i),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    };
+    for row in 0..area.height {
+        for col in 0..area.width {
+            let Some(cell) = screen.cell(row, col) else {
+                continue;
+            };
+            if cell.is_wide_continuation() {
+                continue;
+            }
+            let mut style = Style::new()
+                .fg(color(cell.fgcolor()))
+                .bg(color(cell.bgcolor()));
+            for (on, m) in [
+                (cell.bold(), Modifier::BOLD),
+                (cell.italic(), Modifier::ITALIC),
+                (cell.underline(), Modifier::UNDERLINED),
+                (cell.inverse(), Modifier::REVERSED),
+            ] {
+                if on {
+                    style = style.add_modifier(m);
+                }
+            }
+            let text = cell.contents();
+            let dst = &mut buf[(area.x + col, area.y + row)];
+            dst.set_symbol(if text.is_empty() { " " } else { text });
+            dst.set_style(style);
+        }
+    }
 }
 
 /// One target to show: a name and the environment describing it.
@@ -381,6 +741,8 @@ enum Msg {
     Unit(usize, Option<UnitInfo>),
     /// Output of extra command `.1` of target `.0`, from run `.2`.
     ExtraLine(usize, usize, u64, Line<'static>),
+    /// Raw terminal output of interactive command `.1` of target `.0`, run `.2`.
+    ConsoleData(usize, usize, u64, Vec<u8>),
     /// The run ended; the exit code, or none when it was killed by a signal.
     ExtraDone(usize, usize, u64, Option<i32>),
 }
@@ -570,6 +932,11 @@ struct App {
     extra_scroll: usize,
     extra_run: Option<ExtraRun>,
     extra_gen: u64,
+    /// Rows and columns of the console pane at the last frame, for the next
+    /// interactive command to start with.
+    console_size: (u16, u16),
+    /// A console was asked to restart: wait until the old one has ended.
+    restart_wait: Option<Arc<AtomicBool>>,
     /// Height of the extra pane, in percent of the space it shares with the activity.
     extra_pct: u16,
     msg_tx: Sender<Msg>,
@@ -878,6 +1245,8 @@ pub fn run(
         extra_scroll: 0,
         extra_run: None,
         extra_gen: 0,
+        console_size: (24, 80),
+        restart_wait: None,
         extra_pct: 50,
         msg_tx: tx,
     };
@@ -897,13 +1266,19 @@ pub fn run(
 }
 
 fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, rx: &Receiver<Msg>) -> Result<()> {
+    // The first frame tells a console how big it is before it starts.
+    terminal.draw(|f| app.draw(f))?;
     while !app.quit {
-        while let Ok(msg) = rx.try_recv() {
+        // Not all of a flood of console output at once: keep the keys responsive.
+        for _ in 0..256 {
+            let Ok(msg) = rx.try_recv() else { break };
             app.apply(msg);
         }
         app.fetch_extra();
         terminal.draw(|f| app.draw(f))?;
-        if event::poll(Duration::from_millis(150))? {
+        // A console echoes what you type: look back soon for its output.
+        let wait = if app.console_live() { 15 } else { 150 };
+        if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     app.key(key.code, key.modifiers)
@@ -986,6 +1361,9 @@ impl App {
     /// target is selected, and start it again every refresh interval once it
     /// has ended.
     fn fetch_extra(&mut self) {
+        if let Some(pty) = self.extra_run.as_mut().and_then(|r| r.pty.as_mut()) {
+            pty.flush();
+        }
         let want = if !self.has_extras || self.visible().is_empty() {
             None
         } else {
@@ -999,14 +1377,27 @@ impl App {
         {
             self.stop_extra(false);
         }
+        if let Some(old) = &self.restart_wait {
+            if !old.load(Ordering::SeqCst) {
+                return;
+            }
+            self.restart_wait = None;
+        }
         let Some((t, c)) = want else { return };
         let refresh = self.refresh;
         let target = &mut self.targets[t];
         if target.error.is_some() {
             return;
         }
+        let interactive = target.cmds[c].interactive;
         let slot = &mut target.extra[c];
-        if slot.running || slot.finished_at.is_some_and(|a| a.elapsed() < refresh) {
+        // A console that ended stays as it is (its screen shows how); the
+        // output of other commands is fetched again every refresh interval.
+        if slot.running
+            || slot
+                .finished_at
+                .is_some_and(|a| interactive || a.elapsed() < refresh)
+        {
             return;
         }
         self.extra_gen += 1;
@@ -1015,13 +1406,41 @@ impl App {
         slot.running = true;
         slot.restart = true;
         slot.finished_at = None;
-        match spawn_extra(
-            &target.cmds[c].command,
-            (t, c, run_id),
-            (&target.name, &target.host),
-            self.msg_tx.clone(),
-        ) {
-            Ok((pgid, ended)) => self.extra_run = Some(ExtraRun { t, c, pgid, ended }),
+        slot.screen = None;
+        slot.query_tail.clear();
+        let started = if interactive {
+            let (rows, cols) = self.console_size;
+            spawn_console(
+                &target.cmds[c].command,
+                (t, c, run_id),
+                (&target.name, &target.host),
+                (rows, cols),
+                self.msg_tx.clone(),
+            )
+            .map(|(pgid, ended, pty)| {
+                slot.screen = Some(vt100::Parser::new(rows, cols, EXTRA_LINES));
+                slot.restart = false;
+                (pgid, ended, Some(pty))
+            })
+        } else {
+            spawn_extra(
+                &target.cmds[c].command,
+                (t, c, run_id),
+                (&target.name, &target.host),
+                self.msg_tx.clone(),
+            )
+            .map(|(pgid, ended)| (pgid, ended, None))
+        };
+        match started {
+            Ok((pgid, ended, pty)) => {
+                self.extra_run = Some(ExtraRun {
+                    t,
+                    c,
+                    pgid,
+                    ended,
+                    pty,
+                })
+            }
             Err(e) => {
                 slot.lines = vec![Line::from(format!("cannot run command: {e}"))];
                 slot.run_id = 0;
@@ -1030,6 +1449,110 @@ impl App {
                 slot.finished_at = Some(Instant::now());
             }
         }
+    }
+
+    /// The selected target's console (`.0` target, `.1` command), if its
+    /// shown command is interactive.
+    fn console_cmd(&self) -> Option<(usize, usize)> {
+        if !self.has_extras || self.logs_full || self.visible().is_empty() {
+            return None;
+        }
+        let t = self.selected();
+        let c = self.extra_c(t);
+        self.targets[t].cmds.get(c)?.interactive.then_some((t, c))
+    }
+
+    /// A console pane has the focus, with no dialog in the way. Its reserved
+    /// keys (restart, release) work now, even when the command has ended.
+    fn console_focus(&self) -> Option<(usize, usize)> {
+        if self.focus != Focus::Extra
+            || self.confirm.is_some()
+            || self.help
+            || self.info
+            || self.filtering
+        {
+            return None;
+        }
+        self.console_cmd()
+    }
+
+    /// The keyboard goes to the console: its pane has the focus and the
+    /// command has not ended (while it starts, keys are dropped rather than
+    /// acted on by the dashboard).
+    fn console_captured(&self) -> bool {
+        self.console_focus().is_some_and(|(t, c)| {
+            let target = &self.targets[t];
+            let slot = &target.extra[c];
+            target.error.is_none() && (slot.running || slot.finished_at.is_none())
+        })
+    }
+
+    /// An interactive command runs: poll often, its output is echo.
+    fn console_live(&self) -> bool {
+        self.extra_run.as_ref().is_some_and(|r| r.pty.is_some())
+    }
+
+    /// Start the console again, once the old one is gone: it may have to
+    /// clean up first (such as deleting a console connection).
+    fn restart_console(&mut self) {
+        let old = self.extra_run.as_ref().map(|r| r.ended.clone());
+        self.stop_extra(false);
+        self.restart_wait = old;
+        if let Some((t, c)) = self.console_cmd() {
+            let slot = &mut self.targets[t].extra[c];
+            slot.finished_at = None;
+            slot.running = false;
+            self.extra_scroll = 0;
+        }
+    }
+
+    /// A key while a console pane has the focus. `false`: not for the
+    /// console, the dashboard handles it as usual.
+    fn console_key(&mut self, (t, c): (usize, usize), code: KeyCode, mods: KeyModifiers) -> bool {
+        if is_console_escape(code, mods) {
+            // Back to the dashboard: the target list has the focus.
+            self.focus = Focus::List;
+            self.extra_full = false;
+            return true;
+        }
+        if is_console_restart(code, mods) {
+            self.restart_console();
+            return true;
+        }
+        let shift = mods.contains(KeyModifiers::SHIFT);
+        match code {
+            // Shift+arrows keep moving the focus, as everywhere.
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down if shift => {
+                return false;
+            }
+            KeyCode::PageUp | KeyCode::PageDown if shift => {
+                let page = usize::from(self.console_size.0.saturating_sub(1)).max(1);
+                self.scroll_extra(code == KeyCode::PageUp, page);
+                return true;
+            }
+            _ => {}
+        }
+        if !self.console_captured() {
+            return false;
+        }
+        let app_cursor = self.targets[t].extra[c]
+            .screen
+            .as_ref()
+            .is_some_and(|p| p.screen().application_cursor());
+        let bytes = encode_key(code, mods, app_cursor);
+        if !bytes.is_empty() {
+            // Typing goes back to the live screen.
+            self.extra_scroll = 0;
+            if let Some(pty) = self
+                .extra_run
+                .as_mut()
+                .filter(|r| (r.t, r.c) == (t, c))
+                .and_then(|r| r.pty.as_mut())
+            {
+                pty.write(&bytes);
+            }
+        }
+        true
     }
 
     fn scroll_extra(&mut self, up: bool, by: usize) {
@@ -1080,6 +1603,31 @@ impl App {
                     self.extra_scroll += 1; // keep the scrolled view in place
                 }
             }
+            Msg::ConsoleData(i, c, run_id, data) => {
+                let shown = self.selected() == i && self.extra_c(i) == c;
+                let slot = &mut self.targets[i].extra[c];
+                let Some(parser) = slot.screen.as_mut().filter(|_| slot.run_id == run_id) else {
+                    return;
+                };
+                parser.process(&data);
+                let mut seen = std::mem::take(&mut slot.query_tail);
+                seen.extend_from_slice(&data);
+                let replies = terminal_replies(&seen, parser.screen().cursor_position());
+                slot.query_tail = seen[partial_query(&seen)..].to_vec();
+                if self.extra_scroll > 0 && shown && !parser.screen().alternate_screen() {
+                    // Keep the scrolled view in place.
+                    self.extra_scroll += data.iter().filter(|b| **b == b'\n').count();
+                }
+                if !replies.is_empty()
+                    && let Some(pty) = self
+                        .extra_run
+                        .as_mut()
+                        .filter(|r| (r.t, r.c) == (i, c))
+                        .and_then(|r| r.pty.as_mut())
+                {
+                    pty.write(&replies);
+                }
+            }
             Msg::ExtraDone(i, c, run_id, code) => {
                 let slot = &mut self.targets[i].extra[c];
                 if slot.run_id != run_id {
@@ -1088,10 +1636,17 @@ impl App {
                 if std::mem::take(&mut slot.restart) {
                     slot.lines.clear();
                 }
-                match code {
-                    Some(0) => {}
-                    Some(n) => slot.lines.push(Line::from(format!("[exit {n}]"))),
-                    None => slot.lines.push(Line::from("[killed]")),
+                let note = match code {
+                    Some(0) => None,
+                    Some(n) => Some(format!("[exit {n}]")),
+                    None => Some("[killed]".to_string()),
+                };
+                if let Some(parser) = slot.screen.as_mut() {
+                    // On the console's own screen, with the way out.
+                    let note = note.unwrap_or_else(|| "[exited]".into());
+                    parser.process(format!("\r\n{note} Ctrl+R or F5 restarts\r\n").as_bytes());
+                } else if let Some(note) = note {
+                    slot.lines.push(Line::from(note));
                 }
                 slot.running = false;
                 slot.finished_at = Some(Instant::now());
@@ -1127,6 +1682,11 @@ impl App {
         if self.help || self.info {
             self.help = false;
             self.info = false;
+            return;
+        }
+        if let Some(console) = self.console_focus()
+            && self.console_key(console, code, mods)
+        {
             return;
         }
         if self.filtering {
@@ -1620,7 +2180,20 @@ impl App {
             }
         }
 
-        let hints = if self.extra_full && self.confirm.is_none() {
+        let hints = if self.console_captured() {
+            Line::from(
+                pick(
+                    footer.width,
+                    &[
+                        " the console has the keyboard · Ctrl+] back to the dashboard · Ctrl+R/F5 restart · ⇧+arrows move focus · wheel/⇧PgUp scroll",
+                        " console keyboard · Ctrl+] release · Ctrl+R/F5 restart · ⇧+arrows focus",
+                        " Ctrl+] release · Ctrl+R/F5 restart",
+                        " Ctrl+] release",
+                    ],
+                )
+                .yellow(),
+            )
+        } else if self.extra_full && self.confirm.is_none() {
             Line::from(
                 pick(
                     footer.width,
@@ -1711,6 +2284,11 @@ impl App {
             ("l", "activity full screen (l or Esc goes back)"),
             ("C", "console (extra command) full screen"),
             ("c", "next console command"),
+            (
+                "Ctrl+]",
+                "interactive console: give the keyboard back to the dashboard",
+            ),
+            ("Ctrl+R  F5", "interactive console: restart it"),
             ("PgUp PgDn Home End", "scroll the focused log or console"),
             (
                 "mouse",
@@ -2015,11 +2593,6 @@ impl App {
         }
         let c = self.extra_c(idx);
         let (cmd, slot) = (&t.cmds[c], &t.extra[c]);
-        let height = area.height.saturating_sub(2) as usize;
-        let total = slot.lines.len();
-        self.extra_scroll = self.extra_scroll.min(total.saturating_sub(height));
-        let end = total - self.extra_scroll;
-        let window: Vec<Line> = slot.lines[end.saturating_sub(height)..end].to_vec();
         let mut title = format!(" {} · {}", cmd.label, t.name);
         if t.cmds.len() > 1 {
             title.push_str(&format!(" · c next {}/{}", c + 1, t.cmds.len()));
@@ -2035,6 +2608,15 @@ impl App {
             title.push_str(&format!(" · ↑{}", self.extra_scroll));
         }
         title.push(' ');
+        if cmd.interactive && slot.screen.is_some() {
+            self.draw_console(f, area, (idx, c), title);
+            return;
+        }
+        let height = area.height.saturating_sub(2) as usize;
+        let total = slot.lines.len();
+        self.extra_scroll = self.extra_scroll.min(total.saturating_sub(height));
+        let end = total - self.extra_scroll;
+        let window: Vec<Line> = slot.lines[end.saturating_sub(height)..end].to_vec();
         f.render_widget(
             Paragraph::new(window).wrap(Wrap { trim: false }).block(
                 Block::bordered()
@@ -2043,6 +2625,53 @@ impl App {
             ),
             area,
         );
+    }
+
+    /// An interactive command's pane: its emulated screen, the cursor while
+    /// it has the keyboard, and the window size the child is told about.
+    fn draw_console(&mut self, f: &mut Frame, area: Rect, (idx, c): (usize, usize), title: String) {
+        let captured = self.console_captured();
+        let mut block = Block::bordered().title(title).border_style(if captured {
+            Style::new().yellow().bold()
+        } else {
+            self.border(Focus::Extra)
+        });
+        if captured {
+            block = block.title_bottom(
+                Line::from(" Ctrl+] back to dashboard · Ctrl+R/F5 restart ").right_aligned(),
+            );
+        } else if self.console_live() {
+            block = block.title_bottom(Line::from(" click or ⇧↓ to type ").right_aligned());
+        }
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        self.console_size = (inner.height, inner.width);
+        let scroll = self.extra_scroll;
+        let Some(parser) = self.targets[idx].extra[c].screen.as_mut() else {
+            return;
+        };
+        if parser.screen().size() != (inner.height, inner.width) {
+            parser.screen_mut().set_size(inner.height, inner.width);
+        }
+        parser.screen_mut().set_scrollback(scroll);
+        let screen = parser.screen();
+        self.extra_scroll = screen.scrollback();
+        paint_screen(screen, inner, f.buffer_mut());
+        let (row, col) = screen.cursor_position();
+        if captured && !screen.hide_cursor() && screen.scrollback() == 0 {
+            f.set_cursor_position((inner.x + col, inner.y + row));
+        }
+        if let Some(pty) = self
+            .extra_run
+            .as_mut()
+            .filter(|r| (r.t, r.c) == (idx, c))
+            .and_then(|r| r.pty.as_mut())
+        {
+            pty.resize(inner.height, inner.width);
+        }
     }
 
     fn draw_confirm(&mut self, f: &mut Frame, idx: usize, force: bool) {
@@ -2205,6 +2834,8 @@ mod tests {
             extra_scroll: 0,
             extra_run: None,
             extra_gen: 0,
+            console_size: (24, 80),
+            restart_wait: None,
             extra_pct: 50,
             msg_tx: mpsc::channel().0,
         }
@@ -2689,6 +3320,346 @@ mod tests {
             assert!(Instant::now() < end, "process group still alive");
             thread::sleep(Duration::from_millis(20));
         }
+        a.stop_extra(true);
+    }
+
+    #[test]
+    fn interactive_marker_parses() {
+        let c = ExtraCmd::parse("@ssh -t host");
+        assert!(c.interactive);
+        assert_eq!(
+            (c.label.as_str(), c.command.as_str()),
+            ("ssh", "ssh -t host")
+        );
+        let c = ExtraCmd::parse("oci=@  oci-console --x=1");
+        assert!(c.interactive);
+        assert_eq!(
+            (c.label.as_str(), c.command.as_str()),
+            ("oci", "oci-console --x=1")
+        );
+        let c = ExtraCmd::parse("logs=journalctl -f");
+        assert!(!c.interactive && c.command == "journalctl -f");
+        assert!(!ExtraCmd::parse("echo a@b").interactive);
+        // A target's own command replaces the common one with its label.
+        let merged = merge_extras(
+            &[ExtraCmd::parse("oci=journalctl")],
+            vec![ExtraCmd::parse("oci=@console")],
+        );
+        assert!(merged.len() == 1 && merged[0].interactive && merged[0].command == "console");
+    }
+
+    #[test]
+    fn keys_are_encoded_like_a_terminal() {
+        let enc = |code, mods| encode_key(code, mods, false);
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        let alt = KeyModifiers::ALT;
+        assert_eq!(enc(KeyCode::Char('a'), none), b"a");
+        assert_eq!(enc(KeyCode::Char('A'), KeyModifiers::SHIFT), b"A");
+        assert_eq!(enc(KeyCode::Char('é'), none), "é".as_bytes());
+        assert_eq!(enc(KeyCode::Char('c'), ctrl), [3]);
+        assert_eq!(enc(KeyCode::Char('d'), ctrl), [4]);
+        assert_eq!(enc(KeyCode::Char('5'), ctrl), [0x1d]);
+        assert_eq!(enc(KeyCode::Char('x'), alt), b"\x1bx");
+        assert_eq!(enc(KeyCode::Enter, none), b"\r");
+        assert_eq!(enc(KeyCode::Esc, none), b"\x1b");
+        assert_eq!(enc(KeyCode::Tab, none), b"\t");
+        assert_eq!(enc(KeyCode::BackTab, KeyModifiers::SHIFT), b"\x1b[Z");
+        assert_eq!(enc(KeyCode::Backspace, none), [0x7f]);
+        assert_eq!(enc(KeyCode::Up, none), b"\x1b[A");
+        assert_eq!(encode_key(KeyCode::Up, none, true), b"\x1bOA");
+        assert_eq!(enc(KeyCode::Left, ctrl), b"\x1b[1;5D");
+        assert_eq!(enc(KeyCode::Home, none), b"\x1b[H");
+        assert_eq!(enc(KeyCode::Delete, none), b"\x1b[3~");
+        assert_eq!(enc(KeyCode::PageUp, none), b"\x1b[5~");
+        assert_eq!(enc(KeyCode::F(1), none), b"\x1bOP");
+        assert_eq!(enc(KeyCode::F(5), none), b"\x1b[15~");
+        assert_eq!(enc(KeyCode::F(5), ctrl), b"\x1b[15;5~");
+        assert_eq!(enc(KeyCode::F(12), none), b"\x1b[24~");
+        assert!(enc(KeyCode::CapsLock, none).is_empty());
+    }
+
+    #[test]
+    fn reserved_keys_are_recognised() {
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        assert!(is_console_escape(KeyCode::Char(']'), ctrl));
+        assert!(is_console_escape(KeyCode::Char('5'), ctrl));
+        assert!(!is_console_escape(KeyCode::Char(']'), none));
+        assert!(!is_console_escape(KeyCode::Esc, none));
+        assert!(is_console_restart(KeyCode::Char('r'), ctrl));
+        assert!(is_console_restart(KeyCode::Char('R'), ctrl));
+        assert!(is_console_restart(KeyCode::F(5), none));
+        assert!(!is_console_restart(KeyCode::Char('r'), none));
+        assert!(!is_console_restart(KeyCode::F(5), ctrl));
+        assert!(!is_console_restart(KeyCode::F(6), none));
+    }
+
+    #[test]
+    fn terminal_queries_are_answered() {
+        assert_eq!(terminal_replies(b"x\x1b[6ny", (4, 9)), b"\x1b[5;10R");
+        assert_eq!(terminal_replies(b"\x1b[5n", (0, 0)), b"\x1b[0n");
+        assert_eq!(terminal_replies(b"\x1b[c", (0, 0)), b"\x1b[?1;2c");
+        assert!(terminal_replies(b"\x1b[31mred", (0, 0)).is_empty());
+        // A query cut in two chunks is kept for the next one.
+        assert_eq!(partial_query(b"abc\x1b["), 3);
+        assert_eq!(partial_query(b"abc\x1b"), 3);
+        assert_eq!(partial_query(b"abc\x1b[6n"), 7);
+        assert_eq!(partial_query(b"abc"), 3);
+    }
+
+    /// An app whose selected target runs an interactive command, with the
+    /// console focused.
+    fn console_app(command: &str) -> (App, Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel();
+        let mut a = app(1);
+        a.msg_tx = tx;
+        set_extras(&mut a, vec![ExtraCmd::parse(&format!("con=@{command}"))]);
+        a.focus = Focus::Extra;
+        a.fetch_extra();
+        assert!(a.extra_run.as_ref().is_some_and(|r| r.pty.is_some()));
+        render(&mut a, 160, 40);
+        (a, rx)
+    }
+
+    fn screen_text(a: &App) -> String {
+        a.targets[0].extra[0]
+            .screen
+            .as_ref()
+            .map(|p| p.screen().contents())
+            .unwrap_or_default()
+    }
+
+    fn type_text(a: &mut App, text: &str) {
+        for ch in text.chars() {
+            a.key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+    }
+
+    /// Like `pump`, and keeps the dashboard's own housekeeping going.
+    fn pump_fetch(a: &mut App, rx: &Receiver<Msg>, done: impl Fn(&App) -> bool) {
+        let end = Instant::now() + Duration::from_secs(15);
+        while !done(a) {
+            assert!(Instant::now() < end, "timed out");
+            if let Ok(m) = rx.recv_timeout(Duration::from_millis(20)) {
+                a.apply(m);
+            }
+            a.fetch_extra();
+        }
+    }
+
+    fn gone(pgid: i32) -> bool {
+        let end = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(-pgid, 0) } == 0 {
+            if Instant::now() > end {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    #[test]
+    fn console_shows_a_prompt_and_takes_typing() {
+        let (mut a, rx) = console_app("printf 'login: '; read u; printf '\\nhello %s\\n' \"$u\"");
+        assert!(a.console_captured());
+        // The prompt has no newline, and shows at once.
+        pump(&mut a, &rx, |a| screen_text(a).contains("login:"));
+        assert_eq!(screen_text(&a).trim(), "login:");
+        assert!(a.targets[0].extra[0].running);
+        let out = render(&mut a, 160, 40);
+        assert!(out.contains("login:"), "{out}");
+        assert!(out.contains("Ctrl+] back to dashboard"), "{out}");
+        assert!(out.contains("Ctrl+R/F5 restart"), "{out}");
+        // The keys go to the program, which echoes them.
+        type_text(&mut a, "bob");
+        pump(&mut a, &rx, |a| screen_text(a).contains("login: bob"));
+        a.key(KeyCode::Enter, KeyModifiers::NONE);
+        pump(&mut a, &rx, |a| !a.targets[0].extra[0].running);
+        let text = screen_text(&a);
+        assert!(text.contains("hello bob"), "{text}");
+        assert!(text.contains("[exited]"), "{text}");
+        // An ended console does not keep the keyboard.
+        assert!(!a.console_captured());
+        assert!(a.extra_run.is_none());
+        assert!(!a.quit);
+    }
+
+    #[test]
+    fn console_gets_every_key_unchanged() {
+        let (mut a, rx) = console_app("stty raw -echo opost; echo RAW; head -c 6 | od -An -tx1");
+        pump(&mut a, &rx, |a| screen_text(a).contains("RAW"));
+        // `q` quits and Esc leaves the dashboard otherwise; Ctrl+C is the
+        // dashboard's quit key in the filter. Here the program gets them all.
+        a.key(KeyCode::Char('q'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        a.key(KeyCode::Esc, KeyModifiers::NONE);
+        a.key(KeyCode::Tab, KeyModifiers::NONE);
+        a.key(KeyCode::Char('?'), KeyModifiers::NONE);
+        a.key(KeyCode::Up, KeyModifiers::NONE);
+        pump(&mut a, &rx, |a| !a.targets[0].extra[0].running);
+        let text = screen_text(&a);
+        assert!(text.contains("71 03 1b 09 3f 1b"), "{text}");
+        assert!(!a.quit && !a.help && a.focus == Focus::Extra);
+    }
+
+    #[test]
+    fn console_follows_the_pane_size() {
+        let (mut a, rx) =
+            console_app("trap 'stty size' WINCH; stty size; while :; do sleep 0.05; done");
+        // Started with the size of the pane when the first screen was drawn.
+        let (rows, cols) = a.console_size;
+        assert_ne!((rows, cols), (24, 80));
+        let want = format!("{rows} {cols}");
+        pump(&mut a, &rx, |a| {
+            screen_text(a).lines().any(|l| l.trim() == want)
+        });
+        // A new window size is passed on (SIGWINCH).
+        render(&mut a, 100, 30);
+        let (rows, cols) = a.console_size;
+        assert_ne!((rows, cols), (24, 80));
+        let want = format!("{rows} {cols}");
+        pump(&mut a, &rx, |a| {
+            screen_text(a).lines().any(|l| l.trim() == want)
+        });
+        let screen = a.targets[0].extra[0].screen.as_ref().unwrap().screen();
+        assert_eq!(screen.size(), (rows, cols));
+        a.stop_extra(true);
+    }
+
+    #[test]
+    fn ctrl_bracket_gives_the_keyboard_back() {
+        for (code, name) in [(KeyCode::Char(']'), "]"), (KeyCode::Char('5'), "5")] {
+            let (mut a, rx) = console_app("cat");
+            let pgid = a.extra_run.as_ref().unwrap().pgid;
+            assert!(a.console_captured());
+            a.key(code, KeyModifiers::CONTROL);
+            assert!(
+                a.focus == Focus::List && !a.console_captured(),
+                "Ctrl+{name}"
+            );
+            assert!(!a.quit);
+            // Nothing was typed into the console (`cat` echoes everything).
+            let end = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < end {
+                if let Ok(m) = rx.recv_timeout(Duration::from_millis(20)) {
+                    a.apply(m);
+                }
+            }
+            assert_eq!(screen_text(&a).trim(), "");
+            assert!(a.targets[0].extra[0].running);
+            // It still runs, and keeps running with the dashboard focused.
+            assert!(a.extra_run.is_some());
+            let out = render(&mut a, 160, 40);
+            assert!(!out.contains("Ctrl+] back to dashboard"), "{out}");
+            a.stop_extra(true);
+            assert!(gone(pgid));
+        }
+    }
+
+    #[test]
+    fn shift_arrows_and_clicks_leave_the_console_too() {
+        let (mut a, _rx) = console_app("cat");
+        a.key(KeyCode::Up, KeyModifiers::SHIFT);
+        assert!(a.focus != Focus::Extra && !a.console_captured());
+        a.stop_extra(true);
+    }
+
+    #[test]
+    fn ctrl_r_and_f5_restart_the_console() {
+        for (code, mods) in [
+            (KeyCode::Char('r'), KeyModifiers::CONTROL),
+            (KeyCode::F(5), KeyModifiers::NONE),
+        ] {
+            let (mut a, rx) = console_app("printf 'pid:%s\\n' $$; sleep 30");
+            let pid_of = |a: &App| {
+                screen_text(a)
+                    .split("pid:")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<i32>().ok())
+            };
+            pump(&mut a, &rx, |a| pid_of(a).is_some());
+            let (old_pid, old_pgid) = (pid_of(&a).unwrap(), a.extra_run.as_ref().unwrap().pgid);
+            let old_run = a.targets[0].extra[0].run_id;
+            // Not sent to the program: the console starts again instead.
+            a.key(code, mods);
+            assert!(a.focus == Focus::Extra && !a.quit);
+            pump_fetch(&mut a, &rx, |a| {
+                pid_of(a).is_some_and(|p| p != old_pid) && a.targets[0].extra[0].running
+            });
+            assert_ne!(a.targets[0].extra[0].run_id, old_run);
+            assert!(gone(old_pgid), "the old console is still running");
+            assert!(a.console_captured());
+            let new_pgid = a.extra_run.as_ref().unwrap().pgid;
+            a.stop_extra(true);
+            assert!(gone(new_pgid));
+        }
+    }
+
+    #[test]
+    fn an_ended_console_restarts_with_ctrl_r() {
+        let (mut a, rx) = console_app("echo once");
+        pump(&mut a, &rx, |a| !a.targets[0].extra[0].running);
+        let text = screen_text(&a);
+        assert!(text.contains("once") && text.contains("[exited]"), "{text}");
+        assert!(text.contains("Ctrl+R or F5 restarts"), "{text}");
+        let old_run = a.targets[0].extra[0].run_id;
+        // It is not started again on its own.
+        for _ in 0..5 {
+            a.fetch_extra();
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!a.targets[0].extra[0].running && a.extra_run.is_none());
+        // The keys of the console still work, the others are the dashboard's.
+        a.key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        pump_fetch(&mut a, &rx, |a| {
+            a.targets[0].extra[0].run_id != old_run && a.targets[0].extra[0].run_id != 0
+        });
+        pump(&mut a, &rx, |a| !a.targets[0].extra[0].running);
+        assert!(screen_text(&a).contains("once"));
+        assert!(!a.console_captured());
+    }
+
+    #[test]
+    fn console_programs_get_answers_to_their_queries() {
+        let (mut a, rx) =
+            console_app("stty raw -echo opost; printf '\\033[6n'; head -c 6 | od -An -tx1");
+        pump(&mut a, &rx, |a| !a.targets[0].extra[0].running);
+        let text = screen_text(&a);
+        assert!(text.contains("1b 5b 31 3b 31 52"), "{text}");
+    }
+
+    #[test]
+    fn console_scrolls_back_with_shift_page_up() {
+        let (mut a, rx) =
+            console_app("i=1; while [ $i -le 100 ]; do echo line$i; i=$((i+1)); done; sleep 30");
+        pump(&mut a, &rx, |a| screen_text(a).contains("line100"));
+        let out = render(&mut a, 160, 40);
+        assert!(out.contains("line100") && !out.contains("line1 "), "{out}");
+        for _ in 0..10 {
+            a.key(KeyCode::PageUp, KeyModifiers::SHIFT);
+        }
+        let out = render(&mut a, 160, 40);
+        assert!(a.extra_scroll > 0);
+        assert!(out.contains("line1 ") && !out.contains("line100"), "{out}");
+        // Typing goes back to the end.
+        a.key(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(a.extra_scroll, 0);
+        a.stop_extra(true);
+    }
+
+    #[test]
+    fn console_footer_names_the_escape() {
+        let (mut a, _rx) = console_app("cat");
+        let out = render(&mut a, 160, 40);
+        assert!(out.contains("Ctrl+] back to the dashboard"), "{out}");
+        a.key(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        let out = render(&mut a, 160, 40);
+        assert!(!out.contains("Ctrl+] back to the dashboard"), "{out}");
+        a.key(KeyCode::Char('?'), KeyModifiers::NONE);
+        let out = render(&mut a, 160, 40);
+        assert!(out.contains("Ctrl+R  F5"), "{out}");
         a.stop_extra(true);
     }
 

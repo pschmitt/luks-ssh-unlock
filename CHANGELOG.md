@@ -9,6 +9,15 @@ options and the container interface are compatible.
 
 ### New
 
+- `tui`: interactive consoles. An extra command marked with `@`
+  (`--extra-command 'oci=@COMMAND'`, or in `tui-commands`) runs on a real
+  pseudo-terminal of the pane's size, shown through a terminal emulator:
+  prompts without a newline, line editing, colors, resizing and scrollback
+  (`Shift`+`PageUp`, the wheel) work. While the console pane has the focus it
+  captures the keyboard, so `q`, `Esc`, `Ctrl+C` and the arrows reach the
+  program. `Ctrl+]` gives the keyboard back to the dashboard (so do
+  `Shift`+arrows and clicking another pane), `Ctrl+R` and `F5` restart the
+  console. Commands without `@` stream line by line as before.
 - `tui`: the target details moved from a pane into a dialog (`i`), which
   leaves more room for the activity and the extra command pane. In wide
   terminals the console spans the full width below the targets and activity;

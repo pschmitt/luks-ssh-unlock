@@ -28,7 +28,9 @@ initrd host keys, and optionally a signed checksum of the initrd's contents.
   signed with its SSH host key (`ssh-keygen -Y`), optionally with a minimal
   BusyBox bundle uploaded to the target.
 - **Dashboard**: `luks-ssh-unlock tui` shows every target's live state,
-  details and logs, and unlocks one after confirmation. See
+  details and logs, and unlocks one after confirmation; an interactive
+  console pane (`@COMMAND`) takes the keyboard while focused (`Ctrl+]` leaves
+  it, `Ctrl+R`/`F5` restarts it). See
   [the dashboard](docs/usage.md#dashboard).
 - **Status reports**: `status` and `status --json` show what a host is doing
   without sending anything.
