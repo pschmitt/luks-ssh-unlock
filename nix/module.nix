@@ -302,6 +302,12 @@ in
           text = concatStringsSep "\n" instance.tuiCommands + "\n";
         }
       ) (filterAttrs (_: instance: instance.tuiCommands != [ ]) cfg.instances))
+      // (mapAttrs' (
+        name: instance:
+        nameValuePair "luks-ssh-unlock/${name}.console.json" {
+          text = builtins.toJSON instance.console;
+        }
+      ) (filterAttrs (_: instance: instance.console != null) cfg.instances))
       // optionalAttrs (cfg.tui.extraCommands != [ ]) {
         "luks-ssh-unlock/tui-commands".text = concatStringsSep "\n" cfg.tui.extraCommands + "\n";
       };
@@ -667,6 +673,78 @@ in
               };
               default = { };
               description = "Optional DHCP-triggered unlock listener settings.";
+            };
+            console = mkOption {
+              type = types.nullOr (
+                types.submodule (
+                  { config, ... }:
+                  {
+                    options = {
+                      type = mkOption {
+                        type = types.enum [
+                          "command"
+                          "oci"
+                          "openstack"
+                        ];
+                        description = "Console provider. OpenStack support is not implemented yet.";
+                      };
+                      parameters = mkOption {
+                        type =
+                          if config.type == "command" then
+                            types.submodule {
+                              options = {
+                                command = mkOption { type = types.str; };
+                                interactive = mkOption {
+                                  type = types.bool;
+                                  default = false;
+                                };
+                              };
+                            }
+                          else if config.type == "oci" then
+                            types.submodule {
+                              options = {
+                                instance = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                };
+                                identity = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                };
+                                configFile = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                };
+                                cliRcFile = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                };
+                                profile = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                };
+                                compartmentId = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                };
+                                keep = mkOption {
+                                  type = types.bool;
+                                  default = false;
+                                };
+                              };
+                            }
+                          else
+                            types.attrsOf types.anything;
+                        default = { };
+                        description = "Provider-specific console parameters. Paths must be runtime path strings, not Nix paths.";
+                      };
+                    };
+                  }
+                )
+              );
+              default = null;
+              description = "Typed dashboard console configuration for this target.";
+              example = literalExpression ''{ type = "oci"; parameters.identity = "/home/user/.ssh/id_rsa"; }'';
             };
             tuiCommands = mkOption {
               type = types.listOf types.str;

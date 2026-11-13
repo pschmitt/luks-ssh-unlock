@@ -9,6 +9,10 @@ options and the container interface are compatible.
 
 ### New
 
+- `tui`: typed per-target console settings support OCI serial consoles and
+  command consoles. OCI connection management runs in LSU using the OCI CLI
+  and OpenSSH; only the connection created by LSU is removed on exit.
+
 - `tui`: interactive consoles. An extra command marked with `@`
   (`--extra-command 'oci=@COMMAND'`, or in `tui-commands`) runs on a real
   pseudo-terminal of the pane's size, shown through a terminal emulator:

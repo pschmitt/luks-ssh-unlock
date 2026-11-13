@@ -708,12 +708,17 @@ pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
         .map(|p| {
             let text =
                 fs::read_to_string(p).with_context(|| format!("cannot read {}", p.display()))?;
+            let name = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string());
+            let mut extras = read_extras(&p.with_extension("tui-commands"));
+            if let Some(console) = crate::console::read(&p.with_extension("console.json"), &name)? {
+                extras = merge_extras(&extras, vec![console]);
+            }
             Ok(Source {
-                extras: read_extras(&p.with_extension("tui-commands")),
-                name: p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.display().to_string()),
+                extras,
+                name,
                 env: Some(parse_env_file(&text)),
             })
         })

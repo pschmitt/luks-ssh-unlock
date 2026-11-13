@@ -2,12 +2,14 @@
 //! passphrase over SSH, after making sure it is the initrd we expect.
 
 mod checksum;
+mod console;
 mod ctx;
 mod daemon;
 mod dhcp;
 mod elevate;
 mod log;
 mod notify;
+mod oci;
 mod probe;
 mod process;
 mod settings;
@@ -84,11 +86,44 @@ enum Cmd {
         #[arg(long = "extra-command", value_name = "[LABEL=]COMMAND")]
         extra_commands: Vec<String>,
     },
+    /// Connect to a provider's interactive console
+    Console {
+        #[command(subcommand)]
+        provider: ConsoleProvider,
+    },
     /// Print shell completions
     Completions { shell: clap_complete::Shell },
     /// Start a one-shot unlock when the target's initrd requests a DHCP lease
     #[command(hide = true)]
     DhcpListener(dhcp::DhcpArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ConsoleProvider {
+    /// Connect to an Oracle Cloud Infrastructure serial console
+    Oci {
+        /// Instance display name or OCID
+        #[arg(long)]
+        instance: String,
+        /// RSA private key (defaults to ~/.ssh/id_rsa)
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        /// OCI CLI configuration file
+        #[arg(long)]
+        config_file: Option<PathBuf>,
+        /// OCI CLI defaults file
+        #[arg(long)]
+        cli_rc_file: Option<PathBuf>,
+        /// OCI CLI profile
+        #[arg(long)]
+        profile: Option<String>,
+        /// Compartment for instance name lookup
+        #[arg(long)]
+        compartment_id: Option<String>,
+        /// Keep the console connection after disconnecting
+        #[arg(long)]
+        keep: bool,
+    },
 }
 
 fn process_env(key: &str) -> Option<String> {
@@ -172,6 +207,33 @@ fn real_main() -> Result<bool> {
             )?;
             Ok(true)
         }
+        Cmd::Console {
+            provider:
+                ConsoleProvider::Oci {
+                    instance,
+                    identity,
+                    config_file,
+                    cli_rc_file,
+                    profile,
+                    compartment_id,
+                    keep,
+                },
+        } => {
+            let code = oci::run(&oci::Options {
+                instance,
+                identity,
+                config_file,
+                cli_rc_file,
+                profile,
+                compartment_id,
+                keep,
+                ..Default::default()
+            })?;
+            if code != 0 {
+                bail!(Exit(code, "OCI console ended unsuccessfully".into()));
+            }
+            Ok(true)
+        }
         Cmd::Completions { shell } => {
             clap_complete::generate(
                 shell,
@@ -226,6 +288,29 @@ mod tests {
     #[test]
     fn cli_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn oci_console_invocation_parses() {
+        let cli = Cli::try_parse_from([
+            "luks-ssh-unlock",
+            "console",
+            "oci",
+            "--instance",
+            "example",
+            "--identity",
+            "/home/user/.ssh/id_rsa",
+            "--profile",
+            "DEFAULT",
+            "--keep",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Cmd::Console {
+                provider: ConsoleProvider::Oci { keep: true, .. }
+            })
+        ));
     }
 
     #[test]

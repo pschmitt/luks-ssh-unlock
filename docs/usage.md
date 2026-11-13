@@ -150,6 +150,37 @@ ones, and an empty command (`console=`) removes that label for the target.
 This is how a host that is not an OpenStack VM gets a different console
 command, or none.
 
+A target can instead specify a typed console in `<name>.console.json` next to
+its environment file. It replaces the `console` command from either the target
+or the common commands. The NixOS module writes this file from the instance's
+`console` option:
+
+```nix
+console = {
+  type = "oci";
+  parameters = {
+    instance = "example-instance"; # Defaults to the target name.
+    identity = "/home/user/.ssh/id_rsa";
+    profile = "DEFAULT";
+  };
+};
+```
+
+OCI supports serial consoles and requires the OCI CLI and OpenSSH in the
+console user's PATH, plus an RSA private key and its `.pub` file. Optional
+parameters are `instance`, `identity`, `configFile`, `cliRcFile`, `profile`,
+`compartmentId`, and `keep`. LSU creates a console connection and attempts to
+remove only that connection when the session ends; `keep = true` leaves it in
+place. A connection can also be started directly with
+`luks-ssh-unlock console oci --instance example-instance`.
+
+For existing shell commands, use `type = "command"` with
+`parameters.command` and optionally `parameters.interactive = true`. Legacy
+`tuiCommands` remain supported. The `openstack` type is reserved for future
+support and is not yet implemented. The console pane currently renders text
+terminal output only; graphical terminal protocols such as Kitty graphics are
+not passed through, so a graphical VNC viewer cannot yet be embedded there.
+
 The dashboard follows each service's journal live (this needs root or the
 `systemd-journal` group) and checks a target again as soon as its service logs
 something, so state changes show up within a couple of seconds rather than at

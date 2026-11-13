@@ -70,6 +70,10 @@
                           hostname = "target.example.invalid";
                           key = "/run/secrets/ssh_key";
                           passphraseFile = "/run/secrets/luks";
+                          console = {
+                            type = "oci";
+                            parameters.identity = "/home/user/.ssh/id_rsa";
+                          };
                           dhcpListener = {
                             enable = true;
                             interface = "any";
@@ -89,7 +93,10 @@
                 inherit (nixos.config.systemd) services;
                 start = builtins.unsafeDiscardStringContext services.luks-ssh-unlock-smoke.serviceConfig.ExecStart;
                 dhcp = builtins.unsafeDiscardStringContext services.luks-ssh-unlock-dhcp-listener-smoke.serviceConfig.ExecStart;
+                console = builtins.fromJSON nixos.config.environment.etc."luks-ssh-unlock/smoke.console.json".text;
               in
+              assert console.type == "oci";
+              assert console.parameters.identity == "/home/user/.ssh/id_rsa";
               assert start == builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock";
               assert nixpkgs.lib.hasPrefix
                 (builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock-dhcp-listener")
