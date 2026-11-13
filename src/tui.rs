@@ -1,5 +1,5 @@
 //! Interactive dashboard: every configured target with its live state,
-//! details, activity (the service's journal plus its own actions), and one-key (confirmed) unlocks.
+//! details (a dialog), activity (the service's journal plus its own actions), and one-key (confirmed) unlocks.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -513,7 +513,6 @@ impl Entry {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
     List,
-    Details,
     Activity,
     Extra,
 }
@@ -529,10 +528,8 @@ enum Dir {
 /// A pane border that can be dragged with the mouse.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Edge {
-    /// Between the target list and the details.
+    /// Between the target list and the activity.
     List,
-    /// Between the details and the activity.
-    Details,
     /// Between the activity and the extra pane.
     Extra,
 }
@@ -554,14 +551,13 @@ struct App {
     extra_full: bool,
     /// The key help is shown (`?`).
     help: bool,
+    /// The selected target's details are shown (`i`).
+    info: bool,
     drag: Option<Edge>,
     /// Pane sizes set by dragging the borders (otherwise sized to their
-    /// content): landscape list width and height of the top row; portrait
-    /// list height; and the portrait details height in percent.
+    /// content): landscape list width, and portrait list height.
     land_list_w: Option<u16>,
-    land_top_h: Option<u16>,
     port_list_h: Option<u16>,
-    port_details_pct: u16,
     /// Screen areas of the last frame, for mouse hit-testing.
     hit: Hit,
     last_click: Option<(Instant, usize)>,
@@ -583,14 +579,12 @@ struct App {
 struct Hit {
     body: Rect,
     list: Rect,
-    details: Rect,
     logs: Rect,
     extra: Rect,
     /// The activity and the extra pane together, and the border between them.
     split: Rect,
     edge_extra: Rect,
     edge_list: Rect,
-    edge_details: Rect,
     yes: Rect,
     cancel: Rect,
     dialog: Rect,
@@ -871,11 +865,10 @@ pub fn run(
         logs_full: false,
         extra_full: false,
         help: false,
+        info: false,
         drag: None,
         land_list_w: None,
-        land_top_h: None,
         port_list_h: None,
-        port_details_pct: 45,
         hit: Hit::default(),
         last_click: None,
         filter,
@@ -1131,8 +1124,9 @@ impl App {
             }
             return;
         }
-        if self.help {
+        if self.help || self.info {
             self.help = false;
+            self.info = false;
             return;
         }
         if self.filtering {
@@ -1177,6 +1171,7 @@ impl App {
             // for them.
             _ if shift && dir.is_some() => self.move_focus(dir.expect("checked")),
             KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('i') if n > 0 => self.info = true,
             KeyCode::Char('l') if n > 0 => {
                 self.logs_full = !self.logs_full;
                 self.extra_full = false;
@@ -1303,12 +1298,10 @@ impl App {
         }
         let extra = self.has_extras;
         self.focus = match (self.portrait, self.focus, dir) {
-            (false, Focus::List, Dir::Right) => Focus::Details,
-            (false, Focus::Details | Focus::Activity | Focus::Extra, Dir::Left) => Focus::List,
-            (true, Focus::Details, Dir::Up) => Focus::List,
-            (true, Focus::List, Dir::Down) => Focus::Details,
-            (_, Focus::Details, Dir::Down) => Focus::Activity,
-            (_, Focus::Activity, Dir::Up) => Focus::Details,
+            (false, Focus::List, Dir::Right) => Focus::Activity,
+            (false, Focus::Activity | Focus::Extra, Dir::Left) => Focus::List,
+            (true, Focus::List, Dir::Down) => Focus::Activity,
+            (true, Focus::Activity, Dir::Up) => Focus::List,
             (_, Focus::Activity, Dir::Down) if extra => Focus::Extra,
             (_, Focus::Extra, Dir::Up) => Focus::Activity,
             (_, f, _) => f,
@@ -1319,7 +1312,7 @@ impl App {
         if self.logs_full || self.extra_full {
             return;
         }
-        let mut order = vec![Focus::List, Focus::Details, Focus::Activity];
+        let mut order = vec![Focus::List, Focus::Activity];
         if self.has_extras {
             order.push(Focus::Extra);
         }
@@ -1343,17 +1336,9 @@ impl App {
                 let w = x.saturating_sub(body.x) + 1;
                 self.land_list_w = Some(w.clamp(15, body.width.saturating_sub(20).max(15)));
             }
-            (false, Some(Edge::Details)) => {
-                let h = y.saturating_sub(body.y) + 1;
-                self.land_top_h = Some(h.clamp(6, body.height.saturating_sub(4).max(6)));
-            }
             (true, Some(Edge::List)) => {
                 let h = y.saturating_sub(body.y) + 1;
                 self.port_list_h = Some(h.clamp(4, body.height.saturating_sub(8).max(4)));
-            }
-            (true, Some(Edge::Details)) => {
-                let h = (u32::from(y) + 1).saturating_sub(u32::from(self.hit.details.y));
-                self.port_details_pct = (h * 100 / u32::from(body.height)).clamp(15, 70) as u16;
             }
             (_, Some(Edge::Extra)) => {
                 let area = self.hit.split;
@@ -1385,9 +1370,10 @@ impl App {
 
     fn mouse(&mut self, m: MouseEvent) {
         let (x, y) = (m.column, m.row);
-        if self.help {
+        if self.help || self.info {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.help = false;
+                self.info = false;
             }
             return;
         }
@@ -1407,8 +1393,6 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.drag = if contains(self.hit.edge_list, x, y) {
                     Some(Edge::List)
-                } else if contains(self.hit.edge_details, x, y) {
-                    Some(Edge::Details)
                 } else if contains(self.hit.edge_extra, x, y) {
                     Some(Edge::Extra)
                 } else {
@@ -1419,8 +1403,6 @@ impl App {
                 }
                 if contains(self.hit.list, x, y) {
                     self.focus = Focus::List;
-                } else if contains(self.hit.details, x, y) {
-                    self.focus = Focus::Details;
                 } else if contains(self.hit.logs, x, y) {
                     self.focus = Focus::Activity;
                 } else if contains(self.hit.extra, x, y) {
@@ -1489,13 +1471,12 @@ impl App {
         .areas(f.area());
         let area = f.area();
         self.hit.edge_list = Rect::default();
-        self.hit.edge_details = Rect::default();
         self.hit.extra = Rect::default();
         self.hit.edge_extra = Rect::default();
         // Cells are about twice as tall as wide: below this the side-by-side
         // layout is cramped, so stack the panes instead.
         self.portrait = area.width < 80 || u32::from(area.width) * 2 < u32::from(area.height) * 3;
-        let (left, details, logs) = if self.portrait {
+        let (left, logs) = if self.portrait {
             // Two rows per target, but never more than a third of the screen
             // unless dragged there.
             let auto = (self.targets.len() as u16)
@@ -1505,25 +1486,23 @@ impl App {
             let list_h = self
                 .port_list_h
                 .map_or(auto, |h| h.clamp(4, body.height.saturating_sub(8).max(4)));
-            let [l, d, g] = Layout::vertical([
-                Constraint::Length(list_h),
-                Constraint::Percentage(self.port_details_pct),
-                Constraint::Min(4),
-            ])
-            .areas(body);
+            let [l, g] =
+                Layout::vertical([Constraint::Length(list_h), Constraint::Min(4)]).areas(body);
             self.hit.edge_list = Rect::new(body.x, l.bottom().saturating_sub(1), body.width, 2);
-            self.hit.edge_details = Rect::new(body.x, d.bottom().saturating_sub(1), body.width, 2);
-            (l, d, g)
+            (l, g)
         } else {
-            // The list is as wide as its content needs, next to the details;
-            // the activity gets the full width below.
+            // The list is as wide as its content needs, over the full height;
+            // the activity (and the extra pane) take the rest.
             let content_w = self
                 .targets
                 .iter()
                 .map(|t| {
                     let warn = t.unit.as_ref().is_some_and(|u| u.warning().is_some());
                     let title = 2 + t.name.chars().count() + if warn { 10 } else { 0 };
-                    title.max(3 + summary(t).1.chars().count())
+                    title.max(
+                        3 + summary(t).1.chars().count()
+                            + if healthcheck_ok(t).is_some() { 6 } else { 0 },
+                    )
                 })
                 .max()
                 .unwrap_or(0) as u16
@@ -1533,19 +1512,10 @@ impl App {
                 .map_or(content_w.clamp(24, (body.width * 2 / 5).max(24)), |w| {
                     w.clamp(15, body.width.saturating_sub(20).max(15))
                 });
-            let top_h = self
-                .land_top_h
-                .map_or(14, |h| h.clamp(6, body.height.saturating_sub(4).max(6)))
-                .min(body.height.saturating_sub(3))
-                .max(3);
             let [left, right] =
                 Layout::horizontal([Constraint::Length(list_w), Constraint::Min(10)]).areas(body);
-            let [details, logs] =
-                Layout::vertical([Constraint::Length(top_h), Constraint::Min(3)]).areas(right);
             self.hit.edge_list = Rect::new(left.right().saturating_sub(1), body.y, 2, body.height);
-            self.hit.edge_details =
-                Rect::new(right.x, details.bottom().saturating_sub(1), right.width, 2);
-            (left, details, logs)
+            (left, right)
         };
         let (logs, extra) = if !self.has_extras || self.logs_full {
             (logs, None)
@@ -1560,7 +1530,6 @@ impl App {
             (a, Some(b))
         };
         self.hit.body = body;
-        self.hit.details = details;
 
         let inactive = self
             .targets
@@ -1617,17 +1586,14 @@ impl App {
             let any = !self.visible().is_empty();
             if self.logs_full && any {
                 self.hit.list = Rect::default();
-                self.hit.details = Rect::default();
                 self.draw_logs(f, body, sel);
             } else if self.extra_full && any && self.has_extras {
                 self.hit.list = Rect::default();
-                self.hit.details = Rect::default();
                 self.hit.logs = Rect::default();
                 self.draw_extra(f, body, sel);
             } else {
                 self.draw_list(f, left);
                 if any {
-                    self.draw_details(f, details, sel);
                     self.draw_logs(f, logs, sel);
                     if let Some(extra) = extra {
                         self.draw_extra(f, extra, sel);
@@ -1637,7 +1603,7 @@ impl App {
                     f.render_widget(
                         Paragraph::new(format!("No target matches “{}”.", self.filter))
                             .block(Block::bordered()),
-                        details,
+                        logs,
                     );
                 }
             }
@@ -1696,8 +1662,8 @@ impl App {
                 pick(
                     footer.width,
                     &[
-                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · r/R refresh · u/double-click unlock · F force · S service · l full-screen activity · C full-screen console · c next command · ? help · q quit",
-                        " ↑↓ select · / filter · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · S service · l log · C console · ? help · q quit",
+                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · i details · r/R refresh · u/double-click unlock · F force · S service · l full-screen activity · C full-screen console · c next command · ? help · q quit",
+                        " ↑↓ select · / filter · i info · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · S service · l log · C console · ? help · q quit",
                         " ↑↓ select · r refresh · u unlock · q quit",
                         " ↑↓ · r · u · q",
                     ],
@@ -1709,6 +1675,9 @@ impl App {
 
         if let Some((idx, force)) = self.confirm {
             self.draw_confirm(f, idx, force);
+        }
+        if self.info && !self.visible().is_empty() {
+            self.draw_info(f, self.selected());
         }
         if self.help {
             self.draw_help(f);
@@ -1724,6 +1693,7 @@ impl App {
             ("⇧+arrows  Tab", "move the focus to another pane"),
             ("/", "filter targets by name or host (⏎ keeps, Esc clears)"),
             ("r  R", "check the selected target / all targets now"),
+            ("i", "details of the selected target (dialog)"),
             ("u", "unlock the selected target (asks first)"),
             ("F", "force unlock (skips integrity and host-key checks)"),
             ("S", "stop the target's service, or start it when stopped"),
@@ -1778,10 +1748,20 @@ impl App {
                 if t.unit.as_ref().is_some_and(|u| u.warning().is_some()) {
                     title.push(Span::styled(" ⚠ service", Style::new().yellow().bold()));
                 }
-                ListItem::new(vec![
-                    Line::from(title),
-                    Line::from(Span::styled(format!("   {label}"), Style::new().fg(color))),
-                ])
+                let label = match t.busy {
+                    Some(b) => format!("{label} · {b}…"),
+                    None => label,
+                };
+                // The healthcheck result, as a dot next to the state.
+                let mut sub = vec![Span::styled(format!("   {label}"), Style::new().fg(color))];
+                if let Some(ok) = healthcheck_ok(t) {
+                    sub.push(Span::styled("  hc ", Style::new().dim()));
+                    sub.push(Span::styled(
+                        "●",
+                        Style::new().fg(if ok { Color::Green } else { Color::Red }),
+                    ));
+                }
+                ListItem::new(vec![Line::from(title), Line::from(sub)])
             })
             .collect();
         let list = List::new(items)
@@ -1806,9 +1786,10 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.list);
     }
 
-    fn draw_details(&self, f: &mut Frame, area: Rect, idx: usize) {
+    /// The details of a target, for the dialog.
+    fn details_lines(&self, idx: usize) -> Vec<Line<'static>> {
         let t = &self.targets[idx];
-        let mut lines: Vec<Line> = Vec::new();
+        let mut lines: Vec<Line<'static>> = Vec::new();
         let key_width = if self.portrait { 16 } else { 18 };
         let row = |k: &str, v: String, style: Style| {
             Line::from(vec![
@@ -1931,15 +1912,32 @@ impl App {
                 Style::new().dim(),
             )));
         }
+        lines
+    }
+
+    /// The selected target's details, as a dialog (`i`).
+    fn draw_info(&self, f: &mut Frame, idx: usize) {
+        let t = &self.targets[idx];
+        let lines = self.details_lines(idx);
+        let screen = f.area();
+        let width = screen.width.min(96);
+        let inner = usize::from(width.saturating_sub(2)).max(1);
+        let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(inner)).sum();
+        let height = u16::try_from(rows)
+            .unwrap_or(u16::MAX)
+            .saturating_add(2)
+            .min(screen.height);
+        let area = centered(screen, width, height);
         let title = match t.busy {
-            Some(b) => format!(" {} · {b}… ", t.name),
-            None => format!(" {} ", t.name),
+            Some(b) => format!(" {} · {b}… · any key closes ", t.name),
+            None => format!(" {} · any key closes ", t.name),
         };
+        f.render_widget(Clear, area);
         f.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }).block(
                 Block::bordered()
                     .title(title)
-                    .border_style(self.border(Focus::Details)),
+                    .border_style(Style::new().cyan()),
             ),
             area,
         );
@@ -2128,6 +2126,15 @@ fn pick<'a>(width: u16, options: &[&'a str]) -> &'a str {
         .unwrap_or_else(|| options[options.len() - 1])
 }
 
+/// The healthcheck result of a target: none when it has no healthcheck or no
+/// report yet, else whether it passes (it can only pass once unlocked).
+fn healthcheck_ok(t: &Target) -> Option<bool> {
+    let r = t.report.as_ref()?;
+    r.healthcheck
+        .as_ref()
+        .map(|_| matches!(r.state, TargetState::Unlocked(_)))
+}
+
 fn summary(t: &Target) -> (&'static str, String, Color) {
     if t.error.is_some() {
         return ("✖", "config error".into(), Color::Red);
@@ -2191,11 +2198,10 @@ mod tests {
             logs_full: false,
             extra_full: false,
             help: false,
+            info: false,
             drag: None,
             land_list_w: None,
-            land_top_h: None,
             port_list_h: None,
-            port_details_pct: 45,
             hit: Hit::default(),
             last_click: None,
             filter: String::new(),
@@ -2230,13 +2236,10 @@ mod tests {
         let mut a = app(2);
         render(&mut a, 120, 30);
         assert!(!a.portrait);
-        // The list on the left over the full height; details above the
-        // activity on the right.
-        assert!(a.hit.details.x > a.hit.list.x);
-        assert!(a.hit.logs.y > a.hit.details.y);
-        assert_eq!(a.hit.logs.x, a.hit.details.x);
+        // The list on the left, the activity next to it, both full height.
+        assert!(a.hit.logs.x > a.hit.list.x);
         assert_eq!(a.hit.logs.right(), 120);
-        assert!(a.hit.list.height > a.hit.details.height);
+        assert_eq!(a.hit.logs.height, a.hit.list.height);
         // The list is as wide as its content, not a third of the screen.
         assert!(a.hit.list.width < 40, "{}", a.hit.list.width);
     }
@@ -2273,6 +2276,9 @@ mod tests {
             a.help = true;
             render(&mut a, w, h);
             a.help = false;
+            a.info = true;
+            render(&mut a, w, h);
+            a.info = false;
             set_extras(&mut a, vec![ExtraCmd::parse("echo hi")]);
             a.extra_full = true;
             render(&mut a, w, h);
@@ -2303,24 +2309,20 @@ mod tests {
         let mut a = app(2);
         render(&mut a, 120, 30);
         a.key(KeyCode::Right, KeyModifiers::SHIFT);
-        assert!(a.focus == Focus::Details);
-        a.key(KeyCode::Down, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::Activity);
         a.key(KeyCode::Left, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::List);
         a.key(KeyCode::Tab, KeyModifiers::NONE);
-        assert!(a.focus == Focus::Details);
+        assert!(a.focus == Focus::Activity);
         a.key(KeyCode::BackTab, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::List);
 
         let mut p = app(2);
         render(&mut p, 45, 40);
         p.key(KeyCode::Down, KeyModifiers::SHIFT);
-        assert!(p.focus == Focus::Details);
-        p.key(KeyCode::Down, KeyModifiers::SHIFT);
         assert!(p.focus == Focus::Activity);
         p.key(KeyCode::Up, KeyModifiers::SHIFT);
-        assert!(p.focus == Focus::Details);
+        assert!(p.focus == Focus::List);
     }
 
     #[test]
@@ -2330,8 +2332,6 @@ mod tests {
         a.key(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(a.selected(), 1);
         a.key(KeyCode::Right, KeyModifiers::NONE);
-        assert!(a.focus == Focus::Details);
-        a.key(KeyCode::Down, KeyModifiers::NONE);
         assert!(a.focus == Focus::Activity);
         a.key(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(a.log_scroll, 1);
@@ -2347,11 +2347,6 @@ mod tests {
         drag(&mut a, (edge.x, 10), (60, 10));
         render(&mut a, 120, 30);
         assert!(a.hit.list.width > before, "{} > {before}", a.hit.list.width);
-
-        let edge = a.hit.edge_details;
-        drag(&mut a, (edge.x + 5, edge.y), (edge.x + 5, 20));
-        render(&mut a, 120, 30);
-        assert_eq!(a.hit.details.height, 20);
     }
 
     #[test]
@@ -2363,10 +2358,6 @@ mod tests {
         render(&mut a, 45, 40);
         // The border follows the pointer: rows 1 (below the header) to 15.
         assert_eq!(a.hit.list.height, 15);
-        let edge = a.hit.edge_details;
-        drag(&mut a, (10, edge.y), (10, 30));
-        render(&mut a, 45, 40);
-        assert!(a.hit.details.height > 14);
     }
 
     #[test]
@@ -2539,6 +2530,61 @@ mod tests {
         a.targets[0].unit.as_mut().unwrap().load = "not-found".into();
         a.key(KeyCode::Char('S'), KeyModifiers::NONE);
         assert!(rx.try_recv().is_err());
+    }
+
+    fn report(state: TargetState, healthcheck: Option<&str>) -> Report {
+        Report {
+            hostname: "h".into(),
+            route: "root@h:22".into(),
+            luks_type: "systemd",
+            healthcheck: healthcheck.map(Into::into),
+            checksum_file: None,
+            signature_required: false,
+            host_keys_pinned: true,
+            baseline_refreshed: None,
+            uptime: None,
+            remote_baseline_date: None,
+            state,
+            unlockable: false,
+            notes: Vec::new(),
+            checked_at: Local::now(),
+            duration_ms: 100,
+        }
+    }
+
+    #[test]
+    fn list_shows_state_and_healthcheck() {
+        let mut a = app(3);
+        a.targets[0].report = Some(report(TargetState::Unlocked("up".into()), Some("hc")));
+        a.targets[1].report = Some(report(TargetState::Unreachable, Some("hc")));
+        a.targets[2].report = Some(report(TargetState::Unlocked("up".into()), None));
+        assert_eq!(healthcheck_ok(&a.targets[0]), Some(true));
+        assert_eq!(healthcheck_ok(&a.targets[1]), Some(false));
+        assert_eq!(healthcheck_ok(&a.targets[2]), None);
+        let out = render(&mut a, 120, 30);
+        // Two targets have a healthcheck, the third none.
+        assert_eq!(out.matches("hc ●").count(), 2, "{out}");
+        assert!(out.contains("unlocked") && out.contains("unreachable"));
+    }
+
+    #[test]
+    fn i_shows_the_details_dialog() {
+        let mut a = app(2);
+        let out = render(&mut a, 120, 30);
+        assert!(!out.contains("Checking"), "details are not in the layout");
+        a.key(KeyCode::Char('i'), KeyModifiers::NONE);
+        assert!(a.info);
+        let out = render(&mut a, 120, 30);
+        assert!(out.contains("Checking h0.example"));
+        // Any key closes it, and is not acted on.
+        a.key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!a.info && !a.quit);
+        // With the filter matching nothing, `i` does nothing.
+        a.key(KeyCode::Char('/'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('z'), KeyModifiers::NONE);
+        a.key(KeyCode::Enter, KeyModifiers::NONE);
+        a.key(KeyCode::Char('i'), KeyModifiers::NONE);
+        assert!(!a.info);
     }
 
     #[test]

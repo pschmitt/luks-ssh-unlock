@@ -48,20 +48,23 @@ turn this off). Services and scripts never do this.
 
 On a narrow or tall terminal (under 80 columns, or taller than about two
 thirds of its width, such as a phone) the panes are stacked instead: targets
-on top, then the details, then the activity. `Shift`+`Up`/`Down` moves the
+on top, then the activity. `Shift`+`Up`/`Down` moves the
 focus between them.
 
 The target list (as wide as its content needs) takes the full height on the
-left. On the right, from top to bottom: the selected target's details, the
-activity and, if configured, the extra command pane. The activity is the
-service's journal
+left; each target shows its state and, when it has a healthcheck, a green or
+red `hc ●`. Next to it, the activity: the service's journal
 (`journalctl -u luks-ssh-unlock-<name>.service`, live) interleaved with what
 the dashboard itself does (check results, unlocks), marked `svc` and `tui`.
+The extra command pane, if configured, is below the activity. `i` shows the
+selected target's details (route, LUKS method, healthcheck, integrity checks,
+host keys, uptime) in a dialog.
 
 | Key | Action |
 | --- | --- |
 | `Up`/`Down`, `j`/`k` | Select a target (scroll, when the activity has the focus) |
 | `Shift`+arrows, `Tab`/`Shift`+`Tab` | Move the focus to another pane (highlighted border) |
+| `i` | Details of the selected target, in a dialog; any key closes it |
 | Arrows | Also move the focus when the focused pane has no use for them |
 | `l` | Show the activity full screen; `l` or `Esc` goes back |
 | `C` | Show the console (extra command pane) full screen; `C` or `Esc` goes back |

@@ -9,6 +9,10 @@ options and the container interface are compatible.
 
 ### New
 
+- `tui`: the target details moved from a pane into a dialog (`i`), which
+  leaves more room for the activity and the extra command pane. The target
+  list shows each target's healthcheck result as a green or red `hc ●` next
+  to its state.
 - `tui`: `/` filters the targets by name or host as you type (`Enter` keeps
   the filter, `Esc` clears it); `--filter TEXT` starts with one. `--extra-command '[LABEL=]COMMAND'`
   (repeatable) adds an optional pane below the activity that shows
