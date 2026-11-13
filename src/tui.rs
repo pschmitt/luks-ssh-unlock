@@ -546,6 +546,10 @@ struct App {
     focus: Focus,
     /// The activity fills the whole screen (`l`).
     logs_full: bool,
+    /// The extra command pane fills the whole screen (`C`).
+    extra_full: bool,
+    /// The key help is shown (`?`).
+    help: bool,
     drag: Option<Edge>,
     /// Pane sizes set by dragging the borders (otherwise sized to their
     /// content): landscape list width and height of the top row; portrait
@@ -823,6 +827,8 @@ pub fn run(
         portrait: false,
         focus: Focus::List,
         logs_full: false,
+        extra_full: false,
+        help: false,
         drag: None,
         land_list_w: None,
         land_top_h: None,
@@ -1083,6 +1089,10 @@ impl App {
             }
             return;
         }
+        if self.help {
+            self.help = false;
+            return;
+        }
         if self.filtering {
             let n = self.visible().len();
             let pos = self.list.selected().unwrap_or(0);
@@ -1124,11 +1134,21 @@ impl App {
             // the focused pane and move the focus where the pane has no use
             // for them.
             _ if shift && dir.is_some() => self.move_focus(dir.expect("checked")),
+            KeyCode::Char('?') => self.help = true,
             KeyCode::Char('l') if n > 0 => {
                 self.logs_full = !self.logs_full;
+                self.extra_full = false;
                 self.focus = Focus::Activity;
             }
-            KeyCode::Esc if self.logs_full => self.logs_full = false,
+            KeyCode::Char('C') if n > 0 && self.has_extras => {
+                self.extra_full = !self.extra_full;
+                self.logs_full = false;
+                self.focus = Focus::Extra;
+            }
+            KeyCode::Esc if self.logs_full || self.extra_full => {
+                self.logs_full = false;
+                self.extra_full = false;
+            }
             KeyCode::Char('/') if !self.targets.is_empty() => self.filtering = true,
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
@@ -1207,7 +1227,7 @@ impl App {
     /// Focus the neighbouring pane in a direction (the layout decides which
     /// that is).
     fn move_focus(&mut self, dir: Dir) {
-        if self.logs_full {
+        if self.logs_full || self.extra_full {
             return;
         }
         let extra = self.has_extras;
@@ -1225,7 +1245,7 @@ impl App {
     }
 
     fn cycle_focus(&mut self, forward: bool) {
-        if self.logs_full {
+        if self.logs_full || self.extra_full {
             return;
         }
         let mut order = vec![Focus::List, Focus::Details, Focus::Activity];
@@ -1294,6 +1314,12 @@ impl App {
 
     fn mouse(&mut self, m: MouseEvent) {
         let (x, y) = (m.column, m.row);
+        if self.help {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.help = false;
+            }
+            return;
+        }
         if self.confirm.is_some() {
             if m.kind == MouseEventKind::Down(MouseButton::Left) {
                 let (idx, force) = self.confirm.take().expect("checked above");
@@ -1522,6 +1548,11 @@ impl App {
                 self.hit.list = Rect::default();
                 self.hit.details = Rect::default();
                 self.draw_logs(f, body, sel);
+            } else if self.extra_full && any && self.has_extras {
+                self.hit.list = Rect::default();
+                self.hit.details = Rect::default();
+                self.hit.logs = Rect::default();
+                self.draw_extra(f, body, sel);
             } else {
                 self.draw_list(f, left);
                 if any {
@@ -1541,7 +1572,19 @@ impl App {
             }
         }
 
-        let hints = if self.logs_full && self.confirm.is_none() {
+        let hints = if self.extra_full && self.confirm.is_none() {
+            Line::from(
+                pick(
+                    footer.width,
+                    &[
+                        " ↑↓/PgUp/PgDn/wheel scroll · Home/End oldest/newest · c next command · C/Esc back · q quit",
+                        " ↑↓ scroll · c next · C/Esc back · q quit",
+                        " C back · q quit",
+                    ],
+                )
+                .dim(),
+            )
+        } else if self.logs_full && self.confirm.is_none() {
             Line::from(
                 pick(
                     footer.width,
@@ -1582,8 +1625,8 @@ impl App {
                 pick(
                     footer.width,
                     &[
-                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · r/R refresh · u/⏎/double-click unlock · F force · l full-screen activity · c next command · q quit",
-                        " ↑↓ select · / filter · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · l log · q quit",
+                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · r/R refresh · u/⏎/double-click unlock · F force · l full-screen activity · C full-screen console · c next command · ? help · q quit",
+                        " ↑↓ select · / filter · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · l log · C console · ? help · q quit",
                         " ↑↓ select · r refresh · u unlock · q quit",
                         " ↑↓ · r · u · q",
                     ],
@@ -1596,6 +1639,54 @@ impl App {
         if let Some((idx, force)) = self.confirm {
             self.draw_confirm(f, idx, force);
         }
+        if self.help {
+            self.draw_help(f);
+        }
+    }
+
+    fn draw_help(&self, f: &mut Frame) {
+        let keys: &[(&str, &str)] = &[
+            (
+                "↑ ↓  j k",
+                "select a target (scroll in the focused log or console)",
+            ),
+            ("⇧+arrows  Tab", "move the focus to another pane"),
+            ("/", "filter targets by name or host (⏎ keeps, Esc clears)"),
+            ("r  R", "check the selected target / all targets now"),
+            ("u  ⏎", "unlock the selected target (asks first)"),
+            ("F", "force unlock (skips integrity and host-key checks)"),
+            ("l", "activity full screen (l or Esc goes back)"),
+            ("C", "console (extra command) full screen"),
+            ("c", "next console command"),
+            ("PgUp PgDn Home End", "scroll the focused log or console"),
+            (
+                "mouse",
+                "click select · double-click unlock · wheel · drag borders",
+            ),
+            ("?", "this help"),
+            ("q  Esc", "quit"),
+        ];
+        let mut lines: Vec<Line> = keys
+            .iter()
+            .map(|(k, d)| {
+                Line::from(vec![
+                    Span::styled(format!("{k:<20}"), Style::new().cyan().bold()),
+                    Span::raw(*d),
+                ])
+            })
+            .collect();
+        lines.push(Line::default());
+        lines.push(Line::from("any key closes this help".dim()));
+        let area = centered(f.area(), 84, lines.len() as u16 + 2);
+        f.render_widget(Clear, area);
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+                Block::bordered()
+                    .title(" Keys ")
+                    .border_style(Style::new().cyan()),
+            ),
+            area,
+        );
     }
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
@@ -2026,6 +2117,8 @@ mod tests {
             portrait: false,
             focus: Focus::List,
             logs_full: false,
+            extra_full: false,
+            help: false,
             drag: None,
             land_list_w: None,
             land_top_h: None,
@@ -2103,6 +2196,13 @@ mod tests {
             a.confirm = Some((1, true));
             render(&mut a, w, h);
             a.logs_full = true;
+            render(&mut a, w, h);
+            a.logs_full = false;
+            a.help = true;
+            render(&mut a, w, h);
+            a.help = false;
+            set_extras(&mut a, vec![ExtraCmd::parse("echo hi")]);
+            a.extra_full = true;
             render(&mut a, w, h);
         }
     }
@@ -2327,6 +2427,38 @@ mod tests {
         assert!(a.extra_run.is_none());
         assert!(render(&mut a, 120, 30).contains("no command configured"));
         a.key(KeyCode::Char('c'), KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn help_and_fullscreen_console() {
+        let mut a = app(2);
+        set_extras(&mut a, vec![ExtraCmd::parse("echo hi")]);
+        a.targets[0].extra[0].lines = vec![Line::from("console line")];
+        render(&mut a, 120, 30);
+        a.key(KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(a.help);
+        assert!(render(&mut a, 120, 30).contains("Keys"));
+        // Any key closes it, and is not acted on.
+        a.key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!a.help && !a.quit);
+
+        a.key(KeyCode::Char('C'), KeyModifiers::NONE);
+        let out = render(&mut a, 120, 30);
+        assert!(a.extra_full && a.focus == Focus::Extra);
+        assert!(out.contains("console line"));
+        assert_eq!(a.hit.extra.width, 120);
+        assert_eq!(a.hit.list.width, 0);
+        // `l` switches to the activity, Esc goes back, then quits.
+        a.key(KeyCode::Char('l'), KeyModifiers::NONE);
+        assert!(a.logs_full && !a.extra_full);
+        a.key(KeyCode::Char('C'), KeyModifiers::NONE);
+        assert!(a.extra_full && !a.logs_full);
+        a.key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!a.extra_full && !a.quit);
+        // Without extra commands `C` does nothing.
+        let mut b = app(1);
+        b.key(KeyCode::Char('C'), KeyModifiers::NONE);
+        assert!(!b.extra_full);
     }
 
     #[test]

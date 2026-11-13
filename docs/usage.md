@@ -64,6 +64,8 @@ the dashboard itself does (check results, unlocks), marked `svc` and `tui`.
 | `Shift`+arrows, `Tab`/`Shift`+`Tab` | Move the focus to another pane (highlighted border) |
 | Arrows | Also move the focus when the focused pane has no use for them |
 | `l` | Show the activity full screen; `l` or `Esc` goes back |
+| `C` | Show the console (extra command pane) full screen; `C` or `Esc` goes back |
+| `?` | Show the keys; any key closes it |
 | `/` | Filter the targets by name or host while typing; `Enter` keeps the filter, `Esc` clears it |
 | `c` | Next extra command (see below) |
 | `r` / `R` | Check the selected target / every target now |
