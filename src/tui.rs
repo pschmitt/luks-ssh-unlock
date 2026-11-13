@@ -362,7 +362,11 @@ pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
 
 enum Cmd {
     Probe,
-    Unlock { force: bool },
+    Unlock {
+        force: bool,
+    },
+    /// Start (`true`) or stop the target's systemd service.
+    Service(bool),
 }
 
 enum Msg {
@@ -637,6 +641,44 @@ fn worker(
                 }
                 let _ = tx.send(Msg::Unit(idx, UnitInfo::query(&unit)));
                 next = Instant::now() + refresh;
+            }
+            Cmd::Service(start) => {
+                let verb = if start { "start" } else { "stop" };
+                let _ = tx.send(Msg::Busy(
+                    idx,
+                    Some(if start {
+                        "starting service"
+                    } else {
+                        "stopping service"
+                    }),
+                ));
+                ctx.log.info(format!("systemctl {verb} {unit}"));
+                match Command::new("systemctl")
+                    .args([verb, "--no-ask-password", &unit])
+                    .stdin(Stdio::null())
+                    .output()
+                {
+                    Ok(o) if o.status.success() => {
+                        ctx.log.info(format!(
+                            "Service {}",
+                            if start { "started" } else { "stopped" }
+                        ));
+                    }
+                    Ok(o) => {
+                        let err = String::from_utf8_lossy(&o.stderr);
+                        ctx.log.error(format!(
+                            "systemctl {verb} failed: {}{}",
+                            err.lines().next().unwrap_or("no output"),
+                            if unsafe { libc::geteuid() } == 0 {
+                                ""
+                            } else {
+                                " (run as root?)"
+                            }
+                        ));
+                    }
+                    Err(e) => ctx.log.error(format!("cannot run systemctl: {e}")),
+                }
+                let _ = tx.send(Msg::Unit(idx, UnitInfo::query(&unit)));
             }
             Cmd::Unlock { force } => {
                 let _ = tx.send(Msg::Busy(
@@ -1212,7 +1254,36 @@ impl App {
             KeyCode::Char('F') if n > 0 && self.targets[sel].tx.is_some() => {
                 self.confirm = Some((sel, true))
             }
+            KeyCode::Char('s') if n > 0 && self.targets[sel].tx.is_some() => {
+                self.toggle_service(sel)
+            }
             _ => {}
+        }
+    }
+
+    /// Stop the target's service when it runs, else start it.
+    fn toggle_service(&mut self, i: usize) {
+        let note = match &self.targets[i].unit {
+            Some(u) if u.load == "not-found" => {
+                Some("the service is not installed on this host: nothing to start or stop")
+            }
+            Some(u) => {
+                let running = matches!(u.active.as_str(), "active" | "activating");
+                self.send(i, Cmd::Service(!running));
+                None
+            }
+            None => Some("the service state is not known yet"),
+        };
+        if let Some(note) = note {
+            self.push_entry(
+                i,
+                Entry {
+                    at: Local::now(),
+                    level: Level::Warning,
+                    service: false,
+                    message: note.into(),
+                },
+            );
         }
     }
 
@@ -1626,7 +1697,7 @@ impl App {
                     footer.width,
                     &[
                         " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · r/R refresh · u/⏎/double-click unlock · F force · l full-screen activity · C full-screen console · c next command · ? help · q quit",
-                        " ↑↓ select · / filter · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · l log · C console · ? help · q quit",
+                        " ↑↓ select · / filter · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · s service · l log · C console · ? help · q quit",
                         " ↑↓ select · r refresh · u unlock · q quit",
                         " ↑↓ · r · u · q",
                     ],
@@ -1655,6 +1726,7 @@ impl App {
             ("r  R", "check the selected target / all targets now"),
             ("u  ⏎", "unlock the selected target (asks first)"),
             ("F", "force unlock (skips integrity and host-key checks)"),
+            ("s", "stop the target's service, or start it when stopped"),
             ("l", "activity full screen (l or Esc goes back)"),
             ("C", "console (extra command) full screen"),
             ("c", "next console command"),
@@ -2427,6 +2499,39 @@ mod tests {
         assert!(a.extra_run.is_none());
         assert!(render(&mut a, 120, 30).contains("no command configured"));
         a.key(KeyCode::Char('c'), KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn s_stops_and_starts_the_service() {
+        let unit = |active: &str| UnitInfo {
+            load: "loaded".into(),
+            active: active.into(),
+            sub: "x".into(),
+            enabled: "enabled".into(),
+        };
+        let (tx, rx) = mpsc::channel();
+        let mut a = app(1);
+        a.targets[0].tx = Some(tx);
+        // Unknown state: a note, nothing sent.
+        a.key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(rx.try_recv().is_err());
+        assert!(
+            a.targets[0]
+                .logs
+                .back()
+                .unwrap()
+                .message
+                .contains("not known")
+        );
+        a.targets[0].unit = Some(unit("active"));
+        a.key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Service(false))));
+        a.targets[0].unit = Some(unit("failed"));
+        a.key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Service(true))));
+        a.targets[0].unit.as_mut().unwrap().load = "not-found".into();
+        a.key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
