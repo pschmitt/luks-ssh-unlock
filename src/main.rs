@@ -72,6 +72,11 @@ enum Cmd {
         /// Seconds between two status checks of a target
         #[arg(long, default_value_t = 30, value_name = "SECONDS")]
         refresh: u64,
+        /// Show a command's output in a fourth pane, right of the activity
+        /// (repeatable; `c` switches). `{host}` and `{name}` are replaced by
+        /// the selected target's host and name. Run with `sh -c`, 30s limit.
+        #[arg(long = "extra-command", value_name = "[LABEL=]COMMAND")]
+        extra_commands: Vec<String>,
     },
     /// Print shell completions
     Completions { shell: clap_complete::Shell },
@@ -122,7 +127,11 @@ fn real_main() -> Result<bool> {
             }
             Ok(report.ok())
         }
-        Cmd::Tui { files, refresh } => {
+        Cmd::Tui {
+            files,
+            refresh,
+            extra_commands,
+        } => {
             let mut sources = tui::discover(&files)?;
             if sources.is_empty()
                 && (cli.opts.host.is_some() || process_env("SSH_HOSTNAME").is_some())
@@ -135,7 +144,16 @@ fn real_main() -> Result<bool> {
                     .unwrap_or_default();
                 sources.push(tui::Source { name, env: None });
             }
-            tui::run(sources, &cli.opts, Duration::from_secs(refresh.max(5)))?;
+            let extras = extra_commands
+                .iter()
+                .map(|s| tui::ExtraCmd::parse(s))
+                .collect();
+            tui::run(
+                sources,
+                &cli.opts,
+                Duration::from_secs(refresh.max(5)),
+                extras,
+            )?;
             Ok(true)
         }
         Cmd::Completions { shell } => {

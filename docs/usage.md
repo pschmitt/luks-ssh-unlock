@@ -62,6 +62,8 @@ the dashboard itself does (check results, unlocks), marked `svc` and `tui`.
 | `Shift`+arrows, `Tab`/`Shift`+`Tab` | Move the focus to another pane (highlighted border) |
 | Arrows | Also move the focus when the focused pane has no use for them |
 | `l` | Show the activity full screen; `l` or `Esc` goes back |
+| `/` | Filter the targets by name or host while typing; `Enter` keeps the filter, `Esc` clears it |
+| `c` | Next extra command (see below) |
 | `r` / `R` | Check the selected target / every target now |
 | `u`, `Enter` | Unlock the selected target, after confirmation. All checks still apply. |
 | `F` | Force unlock, after confirmation. Skips the integrity and host-key checks. |
@@ -72,6 +74,24 @@ With a mouse: click a target to select it, double-click to unlock it (the
 confirmation dialog has clickable **Yes** and **Cancel** buttons), click a
 pane to focus it, scroll the wheel over the target list or the activity, and
 drag the borders between the panes to resize them.
+
+### Extra command pane
+
+`--extra-command '[LABEL=]COMMAND'` (repeatable) adds an optional fourth pane
+right of the activity (below it on a narrow terminal) that shows the output of
+a command for the selected target, for example a cloud console log:
+
+```sh
+luks-ssh-unlock tui --extra-command 'console=openstack::console-log {host}'
+```
+
+`{host}` and `{name}` are replaced by the target's host and name (shell-quoted,
+also exported as `LUKS_SSH_UNLOCK_HOST` and `LUKS_SSH_UNLOCK_NAME`). The command
+runs with `sh -c` (so it must be an executable on `PATH`, not a shell function),
+for the selected target only, again on selection and every refresh interval
+(`r` re-runs it), and is stopped after 30 seconds. Output (stdout and stderr,
+last 2000 lines) is scrollable when the pane has the focus; `c` switches
+between several commands.
 
 The dashboard follows each service's journal live (this needs root or the
 `systemd-journal` group) and checks a target again as soon as its service logs

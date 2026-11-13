@@ -32,11 +32,106 @@ use crate::status::{Report, Severity, TargetState};
 use chrono::{DateTime, Local, TimeZone};
 
 const LOG_LINES: usize = 500;
+const EXTRA_LINES: usize = 2000;
 /// Minimum time between two checks triggered by new journal lines.
 const EVENT_PROBE_GAP: Duration = Duration::from_secs(2);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const WHEEL_LINES: usize = 3;
 pub const DEFAULT_CONFIG_DIR: &str = "/etc/luks-ssh-unlock";
+
+/// An extra command whose output is shown in an optional fourth pane.
+#[derive(Clone)]
+pub struct ExtraCmd {
+    pub label: String,
+    pub command: String,
+}
+
+impl ExtraCmd {
+    /// `[LABEL=]COMMAND`. Without a label, the command's first word is used.
+    pub fn parse(spec: &str) -> Self {
+        if let Some((label, command)) = spec.split_once('=')
+            && !label.is_empty()
+            && label
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+        {
+            return Self {
+                label: label.into(),
+                command: command.trim().into(),
+            };
+        }
+        Self {
+            label: spec.split_whitespace().next().unwrap_or(spec).into(),
+            command: spec.trim().into(),
+        }
+    }
+}
+
+/// Last output of one extra command for one target.
+#[derive(Default)]
+struct ExtraOut {
+    lines: Vec<String>,
+    fetched: Option<Instant>,
+    running: bool,
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Drop escape sequences and control characters: they would garble the screen.
+fn sanitize(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => {
+                if chars.next_if_eq(&'[').is_some() {
+                    for n in chars.by_ref() {
+                        if ('@'..='~').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+            }
+            '\t' => out.push_str("    "),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Run an extra command for a target (`{host}` and `{name}` are replaced by
+/// the quoted values, and also exported as `LUKS_SSH_UNLOCK_HOST` and
+/// `LUKS_SSH_UNLOCK_NAME`). Bounded to 30 seconds.
+fn run_extra(command: &str, name: &str, host: &str) -> Vec<String> {
+    let script = command
+        .replace("{host}", &shell_quote(host))
+        .replace("{name}", &shell_quote(name));
+    let out = Command::new("timeout")
+        .args(["--kill-after=5", "30", "sh", "-c", &script])
+        .env("LUKS_SSH_UNLOCK_NAME", name)
+        .env("LUKS_SSH_UNLOCK_HOST", host)
+        .stdin(Stdio::null())
+        .output();
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => return vec![format!("cannot run command: {e}")],
+    };
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    let mut lines: Vec<String> = text.lines().map(sanitize).collect();
+    let skip = lines.len().saturating_sub(EXTRA_LINES);
+    lines.drain(..skip);
+    if !out.status.success() {
+        lines.push(format!(
+            "[exit {}]",
+            out.status.code().map_or("signal".into(), |c| c.to_string())
+        ));
+    }
+    lines
+}
 
 /// One target to show: a name and the environment describing it.
 pub struct Source {
@@ -109,6 +204,8 @@ enum Msg {
     /// One new entry of the service journal.
     Service(usize, Entry),
     Unit(usize, Option<UnitInfo>),
+    /// Output of extra command `.1` for target `.0`.
+    Extra(usize, usize, Vec<String>),
 }
 
 /// What systemd says about the target's service.
@@ -177,6 +274,7 @@ struct Target {
     logs: VecDeque<Entry>,
     unit: Option<UnitInfo>,
     tx: Option<Sender<Cmd>>,
+    extra: Vec<ExtraOut>,
 }
 
 /// One line of the activity pane: something the service logged to its
@@ -238,6 +336,7 @@ enum Focus {
     List,
     Details,
     Activity,
+    Extra,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -281,6 +380,14 @@ struct App {
     /// Screen areas of the last frame, for mouse hit-testing.
     hit: Hit,
     last_click: Option<(Instant, usize)>,
+    /// Target filter (`/`): typed text, and whether it is being edited.
+    filter: String,
+    filtering: bool,
+    /// Optional extra commands, shown in a fourth pane; `c` switches.
+    extras: Vec<ExtraCmd>,
+    extra_idx: usize,
+    extra_scroll: usize,
+    msg_tx: Sender<Msg>,
 }
 
 #[derive(Default)]
@@ -289,6 +396,7 @@ struct Hit {
     list: Rect,
     details: Rect,
     logs: Rect,
+    extra: Rect,
     edge_list: Rect,
     edge_details: Rect,
     yes: Rect,
@@ -443,7 +551,12 @@ fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>)
     ));
 }
 
-pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result<()> {
+pub fn run(
+    sources: Vec<Source>,
+    opts: &GlobalOpts,
+    refresh: Duration,
+    extras: Vec<ExtraCmd>,
+) -> Result<()> {
     let (tx, rx) = mpsc::channel::<Msg>();
     let mut targets = Vec::new();
     for (idx, src) in sources.into_iter().enumerate() {
@@ -478,6 +591,7 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
             logs: VecDeque::new(),
             unit: None,
             tx: None,
+            extra: (0..extras.len()).map(|_| ExtraOut::default()).collect(),
         };
         match settings.and_then(|mut s| {
             s.once = true;
@@ -504,8 +618,6 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
         }
         targets.push(target);
     }
-    drop(tx);
-
     if targets
         .iter()
         .any(|t| t.error.as_ref().is_some_and(|e| e.contains("not readable")))
@@ -530,6 +642,12 @@ pub fn run(sources: Vec<Source>, opts: &GlobalOpts, refresh: Duration) -> Result
         port_details_pct: 45,
         hit: Hit::default(),
         last_click: None,
+        filter: String::new(),
+        filtering: false,
+        extras,
+        extra_idx: 0,
+        extra_scroll: 0,
+        msg_tx: tx,
     };
     let mut terminal = ratatui::init();
     // ratatui's panic hook restores the screen but knows nothing of the mouse.
@@ -550,6 +668,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, rx: &Receiver<Msg>)
         while let Ok(msg) = rx.try_recv() {
             app.apply(msg);
         }
+        app.fetch_extra();
         terminal.draw(|f| app.draw(f))?;
         if event::poll(Duration::from_millis(150))? {
             match event::read()? {
@@ -565,11 +684,66 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, rx: &Receiver<Msg>)
 }
 
 impl App {
+    /// Indexes of the targets matching the filter, in display order.
+    fn visible(&self) -> Vec<usize> {
+        let f = self.filter.to_lowercase();
+        (0..self.targets.len())
+            .filter(|&i| {
+                let t = &self.targets[i];
+                f.is_empty()
+                    || t.name.to_lowercase().contains(&f)
+                    || t.host.to_lowercase().contains(&f)
+            })
+            .collect()
+    }
+
+    /// Index (into `targets`) of the selected target; 0 when the filter
+    /// matches nothing (callers check `visible()` first).
     fn selected(&self) -> usize {
-        self.list
-            .selected()
-            .unwrap_or(0)
-            .min(self.targets.len().saturating_sub(1))
+        let v = self.visible();
+        let pos = self.list.selected().unwrap_or(0);
+        v.get(pos).or(v.last()).copied().unwrap_or(0)
+    }
+
+    fn set_filter(&mut self) {
+        self.list.select(Some(0));
+        self.log_scroll = 0;
+        self.extra_scroll = 0;
+    }
+
+    /// Start the selected target's extra command when it has no recent output.
+    fn fetch_extra(&mut self) {
+        if self.extras.is_empty() || self.visible().is_empty() {
+            return;
+        }
+        let (t, c) = (self.selected(), self.extra_idx);
+        let refresh = self.refresh;
+        let target = &mut self.targets[t];
+        if target.error.is_some() {
+            return;
+        }
+        let slot = &mut target.extra[c];
+        if slot.running || slot.fetched.is_some_and(|a| a.elapsed() < refresh) {
+            return;
+        }
+        slot.running = true;
+        let (command, name, host) = (
+            self.extras[c].command.clone(),
+            target.name.clone(),
+            target.host.clone(),
+        );
+        let tx = self.msg_tx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(Msg::Extra(t, c, run_extra(&command, &name, &host)));
+        });
+    }
+
+    fn scroll_extra(&mut self, up: bool, by: usize) {
+        self.extra_scroll = if up {
+            self.extra_scroll.saturating_add(by)
+        } else {
+            self.extra_scroll.saturating_sub(by)
+        };
     }
 
     fn send(&self, idx: usize, cmd: Cmd) {
@@ -594,6 +768,12 @@ impl App {
             Msg::Busy(i, b) => self.targets[i].busy = b,
             Msg::Done(i, state) => self.targets[i].last_unlock = Some((Instant::now(), state)),
             Msg::Unit(i, unit) => self.targets[i].unit = unit,
+            Msg::Extra(i, c, lines) => {
+                let slot = &mut self.targets[i].extra[c];
+                slot.lines = lines;
+                slot.fetched = Some(Instant::now());
+                slot.running = false;
+            }
         }
     }
 
@@ -615,7 +795,33 @@ impl App {
             }
             return;
         }
-        let n = self.targets.len();
+        if self.filtering {
+            let n = self.visible().len();
+            let pos = self.list.selected().unwrap_or(0);
+            match code {
+                KeyCode::Esc => {
+                    self.filter.clear();
+                    self.filtering = false;
+                    self.set_filter();
+                }
+                KeyCode::Enter => self.filtering = false,
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                    self.set_filter();
+                }
+                KeyCode::Down if n > 0 => self.select((pos + 1) % n),
+                KeyCode::Up if n > 0 => self.select((pos + n - 1) % n),
+                KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
+                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+                    self.filter.push(c);
+                    self.set_filter();
+                }
+                _ => {}
+            }
+            return;
+        }
+        let n = self.visible().len();
+        let pos = self.list.selected().unwrap_or(0).min(n.saturating_sub(1));
         let sel = self.selected();
         let shift = mods.contains(KeyModifiers::SHIFT);
         let dir = match code {
@@ -635,16 +841,33 @@ impl App {
                 self.focus = Focus::Activity;
             }
             KeyCode::Esc if self.logs_full => self.logs_full = false,
+            KeyCode::Char('/') if !self.targets.is_empty() => self.filtering = true,
+            KeyCode::Esc if !self.filter.is_empty() => {
+                self.filter.clear();
+                self.set_filter();
+            }
             KeyCode::Tab => self.cycle_focus(true),
             KeyCode::BackTab => self.cycle_focus(false),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Char('c') if !self.extras.is_empty() => {
+                self.extra_idx = (self.extra_idx + 1) % self.extras.len();
+                self.extra_scroll = 0;
+            }
             KeyCode::Down | KeyCode::Char('j') if n > 0 && self.focus == Focus::List => {
-                self.select((sel + 1) % n)
+                self.select((pos + 1) % n)
             }
             KeyCode::Up | KeyCode::Char('k') if n > 0 && self.focus == Focus::List => {
-                self.select((sel + n - 1) % n)
+                self.select((pos + n - 1) % n)
             }
+            KeyCode::Down | KeyCode::Char('j') if self.focus == Focus::Extra => {
+                self.scroll_extra(false, 1)
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.focus == Focus::Extra => {
+                self.scroll_extra(true, 1)
+            }
+            KeyCode::Home if self.focus == Focus::Extra => self.scroll_extra(true, usize::MAX),
+            KeyCode::End if self.focus == Focus::Extra => self.extra_scroll = 0,
             KeyCode::Down | KeyCode::Char('j') if self.focus == Focus::Activity => {
                 self.scroll_logs(false, 1)
             }
@@ -654,9 +877,20 @@ impl App {
             KeyCode::Home if self.focus == Focus::Activity => self.scroll_logs(true, usize::MAX),
             KeyCode::End if self.focus == Focus::Activity => self.log_scroll = 0,
             _ if dir.is_some() => self.move_focus(dir.expect("checked")),
+            KeyCode::PageUp if self.focus == Focus::Extra => {
+                self.scroll_extra(true, self.hit.extra.height as usize)
+            }
+            KeyCode::PageDown if self.focus == Focus::Extra => {
+                self.scroll_extra(false, self.hit.extra.height as usize)
+            }
             KeyCode::PageUp => self.scroll_logs(true, self.hit.logs.height as usize),
             KeyCode::PageDown => self.scroll_logs(false, self.hit.logs.height as usize),
-            KeyCode::Char('r') => self.send(sel, Cmd::Probe),
+            KeyCode::Char('r') if n > 0 => {
+                self.send(sel, Cmd::Probe);
+                if let Some(slot) = self.targets[sel].extra.get_mut(self.extra_idx) {
+                    slot.fetched = None;
+                }
+            }
             KeyCode::Char('R') => (0..n).for_each(|i| self.send(i, Cmd::Probe)),
             KeyCode::Char('u') | KeyCode::Enter if n > 0 && self.targets[sel].tx.is_some() => {
                 self.confirm = Some((sel, false));
@@ -682,10 +916,16 @@ impl App {
         if self.logs_full {
             return;
         }
+        let extra = !self.extras.is_empty();
         self.focus = match (self.portrait, self.focus, dir) {
             (false, Focus::List, Dir::Right) => Focus::Details,
             (false, Focus::Details | Focus::Activity, Dir::Left) => Focus::List,
             (false, Focus::List, Dir::Down) => Focus::Activity,
+            (false, Focus::Activity, Dir::Right) if extra => Focus::Extra,
+            (false, Focus::Extra, Dir::Left) => Focus::Activity,
+            (false, Focus::Extra, Dir::Up) => Focus::Details,
+            (true, Focus::Activity, Dir::Down) if extra => Focus::Extra,
+            (true, Focus::Extra, Dir::Up) => Focus::Activity,
             (true, Focus::Details, Dir::Up) => Focus::List,
             (true, Focus::List, Dir::Down) => Focus::Details,
             (_, Focus::Details, Dir::Down) => Focus::Activity,
@@ -698,11 +938,17 @@ impl App {
         if self.logs_full {
             return;
         }
-        self.focus = match (self.focus, forward) {
-            (Focus::List, true) | (Focus::Activity, false) => Focus::Details,
-            (Focus::Details, true) | (Focus::List, false) => Focus::Activity,
-            (Focus::Activity, true) | (Focus::Details, false) => Focus::List,
-        };
+        let mut order = vec![Focus::List, Focus::Details, Focus::Activity];
+        if !self.extras.is_empty() {
+            order.push(Focus::Extra);
+        }
+        let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        let len = order.len();
+        self.focus = order[if forward {
+            (at + 1) % len
+        } else {
+            (at + len - 1) % len
+        }];
     }
 
     /// Move the dragged border to the pointer.
@@ -733,8 +979,9 @@ impl App {
     }
 
     fn select(&mut self, i: usize) {
-        if i != self.selected() || self.list.selected().is_none() {
+        if Some(i) != self.list.selected() {
             self.log_scroll = 0;
+            self.extra_scroll = 0;
         }
         self.list.select(Some(i));
     }
@@ -780,6 +1027,8 @@ impl App {
                     self.focus = Focus::Details;
                 } else if contains(self.hit.logs, x, y) {
                     self.focus = Focus::Activity;
+                } else if contains(self.hit.extra, x, y) {
+                    self.focus = Focus::Extra;
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.drag.is_some() => {
@@ -789,7 +1038,8 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => self.drag = None,
             _ => {}
         }
-        let n = self.targets.len();
+        let vis = self.visible();
+        let n = vis.len();
         if n == 0 {
             return;
         }
@@ -798,12 +1048,14 @@ impl App {
                 let up = m.kind == MouseEventKind::ScrollUp;
                 if contains(self.hit.logs, x, y) {
                     self.scroll_logs(up, WHEEL_LINES);
+                } else if contains(self.hit.extra, x, y) {
+                    self.scroll_extra(up, WHEEL_LINES);
                 } else if contains(self.hit.list, x, y) {
-                    let sel = self.selected();
+                    let pos = self.list.selected().unwrap_or(0).min(n - 1);
                     let next = if up {
-                        sel.saturating_sub(1)
+                        pos.saturating_sub(1)
                     } else {
-                        (sel + 1).min(n - 1)
+                        (pos + 1).min(n - 1)
                     };
                     self.select(next);
                 }
@@ -820,9 +1072,9 @@ impl App {
                                 .last_click
                                 .is_some_and(|(at, i)| i == idx && at.elapsed() < DOUBLE_CLICK);
                             self.last_click = Some((Instant::now(), idx));
-                            if double && self.targets[idx].tx.is_some() {
+                            if double && self.targets[vis[idx]].tx.is_some() {
                                 self.last_click = None;
-                                self.confirm = Some((idx, false));
+                                self.confirm = Some((vis[idx], false));
                             }
                         }
                     }
@@ -842,6 +1094,7 @@ impl App {
         let area = f.area();
         self.hit.edge_list = Rect::default();
         self.hit.edge_details = Rect::default();
+        self.hit.extra = Rect::default();
         // Cells are about twice as tall as wide: below this the side-by-side
         // layout is cramped, so stack the panes instead.
         self.portrait = area.width < 80 || u32::from(area.width) * 2 < u32::from(area.height) * 3;
@@ -901,6 +1154,18 @@ impl App {
                 Rect::new(body.x, top.bottom().saturating_sub(1), body.width, 2);
             (left, details, logs)
         };
+        let (logs, extra) = if self.extras.is_empty() || self.logs_full {
+            (logs, None)
+        } else if self.portrait {
+            let [a, b] = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(logs);
+            (a, Some(b))
+        } else {
+            let [a, b] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(logs);
+            (a, Some(b))
+        };
         self.hit.body = body;
         self.hit.details = details;
 
@@ -956,14 +1221,27 @@ impl App {
             );
         } else {
             let sel = self.selected();
-            if self.logs_full {
+            let any = !self.visible().is_empty();
+            if self.logs_full && any {
                 self.hit.list = Rect::default();
                 self.hit.details = Rect::default();
                 self.draw_logs(f, body, sel);
             } else {
                 self.draw_list(f, left);
-                self.draw_details(f, details, sel);
-                self.draw_logs(f, logs, sel);
+                if any {
+                    self.draw_details(f, details, sel);
+                    self.draw_logs(f, logs, sel);
+                    if let Some(extra) = extra {
+                        self.draw_extra(f, extra, sel);
+                    }
+                } else {
+                    self.hit.logs = Rect::default();
+                    f.render_widget(
+                        Paragraph::new(format!("No target matches “{}”.", self.filter))
+                            .block(Block::bordered()),
+                        details,
+                    );
+                }
             }
         }
 
@@ -978,6 +1256,18 @@ impl App {
                     ],
                 )
                 .dim(),
+            )
+        } else if self.filtering {
+            Line::from(
+                pick(
+                    footer.width,
+                    &[
+                        " filter: type to match name or host · ↑↓ select · ⏎ keep filter · Esc clear",
+                        " type to filter · ⏎ keep · Esc clear",
+                        " ⏎ keep · Esc clear",
+                    ],
+                )
+                .yellow(),
             )
         } else if self.confirm.is_some() {
             Line::from(
@@ -996,8 +1286,8 @@ impl App {
                 pick(
                     footer.width,
                     &[
-                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · r/R refresh · u/⏎/double-click unlock · F force · l full-screen activity · q quit",
-                        " ↑↓ select · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · l log · q quit",
+                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · r/R refresh · u/⏎/double-click unlock · F force · l full-screen activity · c next command · q quit",
+                        " ↑↓ select · / filter · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · l log · q quit",
                         " ↑↓ select · r refresh · u unlock · q quit",
                         " ↑↓ · r · u · q",
                     ],
@@ -1013,9 +1303,13 @@ impl App {
     }
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .targets
+        let vis = self.visible();
+        if self.list.selected().is_some_and(|p| p >= vis.len()) {
+            self.list.select(Some(vis.len().saturating_sub(1)));
+        }
+        let items: Vec<ListItem> = vis
             .iter()
+            .map(|&i| &self.targets[i])
             .map(|t| {
                 let (icon, label, color) = summary(t);
                 let mut title = vec![
@@ -1034,7 +1328,13 @@ impl App {
         let list = List::new(items)
             .block(
                 Block::bordered()
-                    .title(" Targets ")
+                    .title(if self.filtering {
+                        format!(" Targets · /{}▏ ", self.filter)
+                    } else if self.filter.is_empty() {
+                        " Targets ".to_string()
+                    } else {
+                        format!(" Targets · /{} ", self.filter)
+                    })
                     .border_style(self.border(Focus::List)),
             )
             .highlight_style(
@@ -1239,6 +1539,45 @@ impl App {
         );
     }
 
+    fn draw_extra(&mut self, f: &mut Frame, area: Rect, idx: usize) {
+        self.hit.extra = area;
+        let cmd = &self.extras[self.extra_idx];
+        let slot = &self.targets[idx].extra[self.extra_idx];
+        let height = area.height.saturating_sub(2) as usize;
+        let total = slot.lines.len();
+        self.extra_scroll = self.extra_scroll.min(total.saturating_sub(height));
+        let end = total - self.extra_scroll;
+        let window: Vec<Line> = slot.lines[end.saturating_sub(height)..end]
+            .iter()
+            .map(|l| Line::from(l.as_str()))
+            .collect();
+        let mut title = format!(" {} · {}", cmd.label, self.targets[idx].name);
+        if self.extras.len() > 1 {
+            title.push_str(&format!(
+                " · c next {}/{}",
+                self.extra_idx + 1,
+                self.extras.len()
+            ));
+        }
+        if slot.running {
+            title.push_str(" · running…");
+        } else if slot.fetched.is_none() {
+            title.push_str(" · waiting");
+        }
+        if self.extra_scroll > 0 {
+            title.push_str(&format!(" · ↑{}", self.extra_scroll));
+        }
+        title.push(' ');
+        f.render_widget(
+            Paragraph::new(window).wrap(Wrap { trim: false }).block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(self.border(Focus::Extra)),
+            ),
+            area,
+        );
+    }
+
     fn draw_confirm(&mut self, f: &mut Frame, idx: usize, force: bool) {
         let t = &self.targets[idx];
         let area = centered(f.area(), 64, if force { 11 } else { 9 });
@@ -1372,6 +1711,7 @@ mod tests {
                     logs: VecDeque::new(),
                     unit: None,
                     tx: None,
+                    extra: Vec::new(),
                 })
                 .collect(),
             list: ListState::default().with_selected(Some(0)),
@@ -1389,6 +1729,12 @@ mod tests {
             port_details_pct: 45,
             hit: Hit::default(),
             last_click: None,
+            filter: String::new(),
+            filtering: false,
+            extras: Vec::new(),
+            extra_idx: 0,
+            extra_scroll: 0,
+            msg_tx: mpsc::channel().0,
         }
     }
 
@@ -1561,6 +1907,71 @@ mod tests {
         assert!(!a.logs_full);
         a.key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(a.quit);
+    }
+
+    #[test]
+    fn slash_filters_targets() {
+        let mut a = app(3);
+        render(&mut a, 120, 30);
+        a.key(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(a.filtering);
+        a.key(KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(a.visible(), vec![2]);
+        assert_eq!(a.selected(), 2);
+        let out = render(&mut a, 120, 30);
+        assert!(out.contains("host2") && !out.contains("host1"));
+        a.key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!a.filtering && a.filter == "2");
+        // Esc clears the filter before it quits.
+        a.key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.filter.is_empty() && !a.quit);
+        assert_eq!(a.visible().len(), 3);
+        // No match renders without panicking.
+        a.key(KeyCode::Char('/'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('z'), KeyModifiers::NONE);
+        let out = render(&mut a, 120, 30);
+        assert!(out.contains("No target matches"));
+        a.key(KeyCode::Char('u'), KeyModifiers::NONE);
+        a.key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(a.visible().len(), 3);
+    }
+
+    #[test]
+    fn extra_command_parsing_and_pane() {
+        let c = ExtraCmd::parse("console=openstack::console-log {host}");
+        assert_eq!(
+            (c.label.as_str(), c.command.as_str()),
+            ("console", "openstack::console-log {host}")
+        );
+        let c = ExtraCmd::parse("openstack::console-log {host}");
+        assert_eq!(c.label, "openstack::console-log");
+        let c = ExtraCmd::parse("echo a=b");
+        assert_eq!(c.label, "echo");
+        assert_eq!(
+            run_extra(
+                "echo {host} \"$LUKS_SSH_UNLOCK_NAME\"; echo err >&2; exit 3",
+                "n",
+                "h x"
+            ),
+            vec!["h x n", "err", "[exit 3]"]
+        );
+
+        let mut a = app(2);
+        a.extras = vec![c];
+        for t in &mut a.targets {
+            t.extra = vec![ExtraOut::default()];
+        }
+        a.targets[0].extra[0].lines = vec!["boot ok".into()];
+        let out = render(&mut a, 120, 30);
+        assert!(out.contains("boot ok"));
+        assert!(a.hit.extra.x >= a.hit.logs.right());
+        a.focus = Focus::Activity;
+        a.key(KeyCode::Right, KeyModifiers::SHIFT);
+        assert!(a.focus == Focus::Extra);
+        a.key(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(a.focus == Focus::List);
+        render(&mut a, 45, 40);
+        assert!(a.hit.extra.y > a.hit.logs.y);
     }
 
     #[test]
