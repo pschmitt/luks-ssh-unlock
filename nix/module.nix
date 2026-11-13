@@ -298,7 +298,7 @@ in
       ) (filterAttrs (_: instance: instance.initrdKnownHosts != "") cfg.instances))
       // optionalAttrs (cfg.tui.extraCommands != [ ]) {
         "luks-ssh-unlock/tui-commands".text = concatStringsSep "\n" cfg.tui.extraCommands + "\n";
-      });
+      };
 
     warnings = concatLists (
       mapAttrsToList (
