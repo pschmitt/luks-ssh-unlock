@@ -37,6 +37,8 @@ use serde_json::Value;
 
 use crate::process::shell_quote;
 
+pub mod vnc;
+
 /// How long one read-only `oci` call may take.
 const LIST_TIMEOUT: Duration = Duration::from_secs(120);
 const GET_TIMEOUT: Duration = Duration::from_secs(60);
@@ -173,10 +175,11 @@ fn check_signal() -> Result<()> {
     }
 }
 
-fn sleep_checked(total: Duration) -> Result<()> {
+/// Sleep for TOTAL, in short steps, ending early with INTERRUPT's error.
+fn sleep_with(total: Duration, interrupt: &dyn Fn() -> Result<()>) -> Result<()> {
     let end = Instant::now() + total;
     loop {
-        check_signal()?;
+        interrupt()?;
         let left = end.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Ok(());
@@ -481,9 +484,21 @@ impl OciCli {
 
     /// Wait until connection ID is ACTIVE; return its connection string.
     fn wait_active(&self, id: &str) -> Result<String> {
+        self.wait_active_field(id, "connection-string", &check_signal)
+    }
+
+    /// Wait until connection ID is ACTIVE; return its string FIELD
+    /// (`connection-string`: serial, `vnc-connection-string`: graphical).
+    /// INTERRUPT is checked between the steps and ends the wait with its error.
+    fn wait_active_field(
+        &self,
+        id: &str,
+        field: &str,
+        interrupt: &dyn Fn() -> Result<()>,
+    ) -> Result<String> {
         let deadline = Instant::now() + ACTIVE_TIMEOUT;
         loop {
-            check_signal()?;
+            interrupt()?;
             let cmd = self.command([
                 "compute".to_string(),
                 "instance-console-connection".to_string(),
@@ -499,10 +514,10 @@ impl OciCli {
             match state {
                 "ACTIVE" => {
                     return data
-                        .and_then(|d| d.get("connection-string"))
+                        .and_then(|d| d.get(field))
                         .and_then(Value::as_str)
                         .map(str::to_string)
-                        .ok_or_else(|| anyhow!("the console connection has no connection string"));
+                        .ok_or_else(|| anyhow!("the console connection has no {field}"));
                 }
                 "FAILED" | "DELETING" | "DELETED" => {
                     bail!("the console connection is {state} (not usable)")
@@ -512,7 +527,7 @@ impl OciCli {
             if Instant::now() >= deadline {
                 bail!("the console connection did not become active in time");
             }
-            sleep_checked(POLL_INTERVAL)?;
+            sleep_with(POLL_INTERVAL, interrupt)?;
         }
     }
 }
@@ -675,6 +690,8 @@ struct Supervisor {
     keep: bool,
     /// The helper gave up (the request failed): nothing to clean up
     ended: bool,
+    /// Print no notices (a full-screen UI owns the terminal)
+    quiet: bool,
 }
 
 impl Supervisor {
@@ -734,14 +751,22 @@ impl Supervisor {
             id: None,
             keep,
             ended: false,
+            quiet: false,
         })
     }
 
     /// Wait for the new connection; return its OCID.
     fn wait_created(&mut self) -> Result<String> {
+        self.wait_created_with(&check_signal)
+    }
+
+    /// Like [`Supervisor::wait_created`], with INTERRUPT checked in the loop:
+    /// its error ends the wait (the connection is still cleaned up by
+    /// [`Supervisor::finish`] or by dropping the supervisor).
+    fn wait_created_with(&mut self, interrupt: &dyn Fn() -> Result<()>) -> Result<String> {
         let deadline = Instant::now() + CREATE_WAIT;
         loop {
-            check_signal()?;
+            interrupt()?;
             match self.events.recv_timeout(Duration::from_millis(50)) {
                 Ok(Event::Id(id)) => {
                     self.id = Some(id.clone());
@@ -803,6 +828,12 @@ impl Supervisor {
             .unwrap_or_default()
     }
 
+    fn say(&self, msg: &str) {
+        if !self.quiet {
+            info(msg);
+        }
+    }
+
     /// End of the session: have the connection deleted (kept, with `keep`),
     /// and wait for that, not for long after a signal. The helper does the
     /// job in any case, also when we are gone before it is done.
@@ -813,8 +844,8 @@ impl Supervisor {
             return;
         }
         match (&self.id, self.keep) {
-            (Some(_), false) => info("cleaning up the console connection"),
-            (None, false) => info(
+            (Some(_), false) => self.say("cleaning up the console connection"),
+            (None, false) => self.say(
                 "the console connection, if it is created after all, is deleted in \
                  the background",
             ),
@@ -836,14 +867,14 @@ impl Supervisor {
                 Ok(Event::Id(id)) => self.id = Some(id),
                 Ok(Event::Failed(_) | Event::Deleted) => break,
                 Ok(Event::Kept) => {
-                    info(&format!(
+                    self.say(&format!(
                         "keeping console connection {}",
                         self.id.as_deref().unwrap_or("?")
                     ));
                     break;
                 }
                 Ok(Event::DeleteFailed(rc)) => {
-                    info(&format!(
+                    self.say(&format!(
                         "could not delete console connection {} (oci exit {rc}): delete it by hand",
                         self.id.as_deref().unwrap_or("?")
                     ));
@@ -852,7 +883,7 @@ impl Supervisor {
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {
                     if Instant::now() >= deadline {
-                        info("the console connection is deleted in the background");
+                        self.say("the console connection is deleted in the background");
                         return;
                     }
                 }
@@ -934,55 +965,12 @@ fn is_host_text(s: &str) -> bool {
         })
 }
 
-/// Parse and strictly validate the serial console connection string.
-///
-/// Accepted shape (what the service returns):
-/// `ssh -o ProxyCommand='ssh -W %h:%p -p 443 CONN@instance-console.REGION.HOST' INSTANCE`
-/// where CONN must be EXPECTED_CONN, the connection this run created, and
-/// INSTANCE must be EXPECTED_INSTANCE, the instance it was created for.
-fn parse_connection_string(
-    s: &str,
-    expected_conn: &str,
-    expected_instance: &str,
-) -> Result<Console> {
-    let bad = |what: &str| anyhow!("unexpected console connection string: {what}");
-    let outer = split_words(s.trim()).map_err(bad)?;
-    let mut it = outer.iter();
-    if it.next().map(String::as_str) != Some("ssh") {
-        return Err(bad("not an ssh command"));
-    }
-    let mut proxy: Option<&str> = None;
-    let mut target: Option<&str> = None;
-    while let Some(word) = it.next() {
-        match word.as_str() {
-            "-o" => {
-                let opt = it.next().ok_or_else(|| bad("dangling -o"))?;
-                let value = opt
-                    .split_once('=')
-                    .filter(|(k, _)| k.eq_ignore_ascii_case("ProxyCommand"))
-                    .map(|(_, v)| v)
-                    .ok_or_else(|| bad("an option other than ProxyCommand"))?;
-                if proxy.replace(value).is_some() {
-                    return Err(bad("more than one ProxyCommand"));
-                }
-            }
-            w if w.starts_with('-') => return Err(bad("an unsupported ssh option")),
-            w => {
-                if target.replace(w).is_some() {
-                    return Err(bad("more than one destination"));
-                }
-            }
-        }
-    }
-    let proxy = proxy.ok_or_else(|| bad("no ProxyCommand (not a serial console)"))?;
-    let target = target.ok_or_else(|| bad("no destination"))?;
-    if !target.starts_with("ocid1.instance.") || !is_ocid_text(target) {
-        return Err(bad("the destination is not an instance OCID"));
-    }
-    if target != expected_instance {
-        return Err(bad("it is for another instance"));
-    }
-
+/// Parse and strictly validate the ProxyCommand of a console connection string
+/// (`ssh -W %h:%p [-p PORT] CONN@instance-console.HOST`, the same for the
+/// serial and the graphical console): returns the user (EXPECTED_CONN), the
+/// host and the optional port.
+fn parse_proxy_command(proxy: &str, expected_conn: &str) -> Result<(String, String, Option<u16>)> {
+    let bad = bad_string;
     let inner = split_words(proxy).map_err(bad)?;
     let mut it = inner.iter();
     if it.next().map(String::as_str) != Some("ssh") {
@@ -1032,11 +1020,68 @@ fn parse_connection_string(
             "the console service host is not an instance-console host",
         ));
     }
+    Ok((user.to_string(), host.to_string(), port))
+}
+
+fn bad_string(what: &str) -> anyhow::Error {
+    anyhow!("unexpected console connection string: {what}")
+}
+
+/// Parse and strictly validate the serial console connection string.
+///
+/// Accepted shape (what the service returns):
+/// `ssh -o ProxyCommand='ssh -W %h:%p -p 443 CONN@instance-console.REGION.HOST' INSTANCE`
+/// where CONN must be EXPECTED_CONN, the connection this run created, and
+/// INSTANCE must be EXPECTED_INSTANCE, the instance it was created for.
+fn parse_connection_string(
+    s: &str,
+    expected_conn: &str,
+    expected_instance: &str,
+) -> Result<Console> {
+    let bad = bad_string;
+    let outer = split_words(s.trim()).map_err(bad)?;
+    let mut it = outer.iter();
+    if it.next().map(String::as_str) != Some("ssh") {
+        return Err(bad("not an ssh command"));
+    }
+    let mut proxy: Option<&str> = None;
+    let mut target: Option<&str> = None;
+    while let Some(word) = it.next() {
+        match word.as_str() {
+            "-o" => {
+                let opt = it.next().ok_or_else(|| bad("dangling -o"))?;
+                let value = opt
+                    .split_once('=')
+                    .filter(|(k, _)| k.eq_ignore_ascii_case("ProxyCommand"))
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| bad("an option other than ProxyCommand"))?;
+                if proxy.replace(value).is_some() {
+                    return Err(bad("more than one ProxyCommand"));
+                }
+            }
+            w if w.starts_with('-') => return Err(bad("an unsupported ssh option")),
+            w => {
+                if target.replace(w).is_some() {
+                    return Err(bad("more than one destination"));
+                }
+            }
+        }
+    }
+    let proxy = proxy.ok_or_else(|| bad("no ProxyCommand (not a serial console)"))?;
+    let target = target.ok_or_else(|| bad("no destination"))?;
+    if !target.starts_with("ocid1.instance.") || !is_ocid_text(target) {
+        return Err(bad("the destination is not an instance OCID"));
+    }
+    if target != expected_instance {
+        return Err(bad("it is for another instance"));
+    }
+
+    let (proxy_user, proxy_host, proxy_port) = parse_proxy_command(proxy, expected_conn)?;
     Ok(Console {
         target: target.to_string(),
-        proxy_user: user.to_string(),
-        proxy_host: host.to_string(),
-        proxy_port: port,
+        proxy_user,
+        proxy_host,
+        proxy_port,
     })
 }
 
@@ -1212,12 +1257,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    const CONN: &str = "ocid1.instanceconsoleconnection.oc1.eu-frankfurt-1.own";
-    const FOREIGN: &str = "ocid1.instanceconsoleconnection.oc1.eu-frankfurt-1.foreign";
-    const INST: &str = "ocid1.instance.oc1.eu-frankfurt-1.inst";
-    const OTHER_INST: &str = "ocid1.instance.oc1.eu-frankfurt-1.other";
-    const COMP: &str = "ocid1.compartment.oc1..comp";
-    const HOST: &str = "instance-console.eu-frankfurt-1.oci.oraclecloud.com";
+    pub(super) const CONN: &str = "ocid1.instanceconsoleconnection.oc1.eu-frankfurt-1.own";
+    pub(super) const FOREIGN: &str = "ocid1.instanceconsoleconnection.oc1.eu-frankfurt-1.foreign";
+    pub(super) const INST: &str = "ocid1.instance.oc1.eu-frankfurt-1.inst";
+    pub(super) const OTHER_INST: &str = "ocid1.instance.oc1.eu-frankfurt-1.other";
+    pub(super) const COMP: &str = "ocid1.compartment.oc1..comp";
+    pub(super) const HOST: &str = "instance-console.eu-frankfurt-1.oci.oraclecloud.com";
 
     fn good() -> String {
         format!("ssh -o ProxyCommand='ssh -W %h:%p -p 443 {CONN}@{HOST}' {INST}")
@@ -1368,21 +1413,21 @@ mod tests {
 
     // ------------------------------------------------ fake oci and ssh
 
-    struct Fixture {
-        dir: tempfile::TempDir,
-        opts: Options,
+    pub(super) struct Fixture {
+        pub(super) dir: tempfile::TempDir,
+        pub(super) opts: Options,
     }
 
     impl Fixture {
-        fn path(&self, name: &str) -> PathBuf {
+        pub(super) fn path(&self, name: &str) -> PathBuf {
             self.dir.path().join(name)
         }
 
-        fn write(&self, name: &str, content: &str) {
+        pub(super) fn write(&self, name: &str, content: &str) {
             fs::write(self.path(name), content).unwrap();
         }
 
-        fn log(&self) -> Vec<String> {
+        pub(super) fn log(&self) -> Vec<String> {
             fs::read_to_string(self.path("oci.log"))
                 .unwrap_or_default()
                 .lines()
@@ -1390,21 +1435,21 @@ mod tests {
                 .collect()
         }
 
-        fn deletes(&self) -> Vec<String> {
+        pub(super) fn deletes(&self) -> Vec<String> {
             self.log()
                 .into_iter()
                 .filter(|l| l.contains("instance-console-connection delete"))
                 .collect()
         }
 
-        fn lists(&self) -> Vec<String> {
+        pub(super) fn lists(&self) -> Vec<String> {
             self.log()
                 .into_iter()
                 .filter(|l| l.contains("instance-console-connection list"))
                 .collect()
         }
 
-        fn ssh_args(&self) -> Option<Vec<String>> {
+        pub(super) fn ssh_args(&self) -> Option<Vec<String>> {
             fs::read_to_string(self.path("ssh.args"))
                 .ok()
                 .map(|s| s.lines().map(str::to_string).collect())
@@ -1412,7 +1457,7 @@ mod tests {
     }
 
     /// Wait up to 15 s for COND.
-    fn eventually(cond: impl Fn() -> bool) -> bool {
+    pub(super) fn eventually(cond: impl Fn() -> bool) -> bool {
         let end = Instant::now() + Duration::from_secs(15);
         while Instant::now() < end {
             if cond() {
@@ -1437,7 +1482,7 @@ mod tests {
     /// * `get` from `conn.json`, `delete` with nothing
     /// * `list` only when it is filtered by the tag (else exit 97), with the
     ///   contents of `list_result`
-    fn fixture(connstr: &str, instances: Value, ssh_body: &str) -> Fixture {
+    pub(super) fn fixture(connstr: &str, instances: Value, ssh_body: &str) -> Fixture {
         // Scripts are written while no other test spawns a process: a child
         // forked meanwhile would hold the file open ("text file busy").
         let _lock = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1491,7 +1536,7 @@ esac
         Fixture { dir, opts }
     }
 
-    fn instances() -> Value {
+    pub(super) fn instances() -> Value {
         serde_json::json!({"data": [
             {"id": "ocid1.instance.oc1.eu-frankfurt-1.old", "display-name": "web",
              "lifecycle-state": "TERMINATED", "compartment-id": COMP},

@@ -66,7 +66,7 @@ luks-ssh-unlock --host target.example.com \
   --ssh-initrd-known-hosts-file ~/.ssh/known_hosts_initrd \
   --luks-passphrase-file /run/secrets/luks_target \
   --healthcheck-cmd 'systemctl is-system-running'           # watch and unlock
-sudo luks-ssh-unlock tui                                    # all targets in /etc/luks-ssh-unlock
+luks-ssh-unlock tui                                         # all targets in /etc/luks-ssh-unlock
 ```
 
 Every option also has an environment variable; see

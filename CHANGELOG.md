@@ -9,9 +9,27 @@ options and the container interface are compatible.
 
 ### New
 
-- `tui`: typed per-target console settings support OCI serial consoles and
-  command consoles. OCI connection management runs in LSU using the OCI CLI
-  and OpenSSH; only the connection created by LSU is removed on exit.
+- `tui`: embedded VNC console support uses an in-process RFB client and Kitty
+  graphics renderer, including tmux passthrough support.
+- `tui`: typed per-target console settings support OCI and OpenStack serial
+  consoles and command consoles. OpenStack graphical consoles are also
+  supported, including through the NixOS module's `vnc.type = "openstack"`.
+  OCI connection management runs in LSU using the OCI CLI and OpenSSH; only
+  the connection created by LSU is removed on exit.
+- `tui`: restore terminal state and clean up owned Kitty images on SIGTERM,
+  SIGHUP or terminal-input hangup as well as normal exit.
+
+- `tui`: OCI graphical consoles are supported through the built-in viewer and
+  the NixOS module's `vnc.type = "oci"`.
+  It requests a console connection, validates the `vnc-connection-string`
+  strictly, rebuilds the `ssh` command and tunnels port 5900 of the instance
+  to a Unix socket in a private (`0700`) directory, so that other local users
+  cannot take the console (OCI serves one client at a time). The caller gets a
+  connected stream from `VncSession::connect`, after the socket is checked to
+  be ours and served by our `ssh` (`SO_PEERCRED`). Readiness is read from
+  `/proc/net/unix` (a probe connection would use OCI's single client slot),
+  and the tunnel, its socket directory and the connection are cleaned up on
+  normal close or cancellation. A crash can leave the socket directory behind.
 
 - `tui`: interactive consoles. An extra command marked with `@`
   (`--extra-command 'oci=@COMMAND'`, or in `tui-commands`) runs on a real
@@ -53,10 +71,17 @@ options and the container interface are compatible.
   The details show the healthcheck result as a green or red dot next to the
   state, instead of repeating the command; the activity marks service lines
   (magenta) and dashboard lines (blue) with different colors.
-- When run interactively without the permissions to read keys, passphrases
-  or the target configuration, the command re-runs itself with `sudo`
-  (`--no-sudo` or `LUKS_SSH_UNLOCK_NO_SUDO=1` disable this). Without a
-  terminal, nothing changes: the error and exit status stay as they were.
+- `tui` and the provider consoles never run as root and never re-run under
+  `sudo`; `tui` refuses to start as root. OCI and OpenStack use the invoking
+  user's own keys and environment. Targets whose configuration, key or
+  passphrase only root can read are served by the new privileged helper
+  (`luks-ssh-unlock helper serve`, socket-activated per connection by the NixOS
+  option `services.luks-ssh-unlock.helper`, with a basic and an admin group).
+  It answers with closed states and coarse error codes only, never a secret.
+  See "Privileged helper" in `docs/usage.md` for the setup, limitations and a
+  recipe to test with a real configuration. Other commands keep the `sudo`
+  re-run when interactive (`--no-sudo` or `LUKS_SSH_UNLOCK_NO_SUDO=1` disable
+  it); without a terminal nothing changes.
 - `status --json`, and a `status` exit status that tells whether the host is
   up or can be unlocked.
 - `completions SHELL`; the Nix package installs bash, zsh and fish
@@ -72,6 +97,25 @@ options and the container interface are compatible.
 
 ### Fixed
 
+- `tui`: VNC uses explicit Kitty placements in tmux, including normal panes,
+  avoiding blank frames from rapidly changing virtual placeholders. Placements
+  remain pane-sized and are redrawn when the tmux layout changes. On pane resize,
+  old placements are deleted in the same synchronized frame as their replacements
+  to avoid a blank interval.
+- `tui`: VNC frames are sent to the terminal zlib-compressed (Kitty `o=z`), as
+  RGB instead of RGBA for tmux virtual placements. A typical console frame
+  shrinks from about 4 MB to well under 100 kB, so a typed character no
+  longer queues dozens of 64 kB writes through tmux before it shows.
+- `tui`: an unchanged VNC picture is no longer placed again on every pass of
+  the event loop (about 50 times a second).
+- `tui`: when the terminal or tmux layout changes, the VNC picture stays up
+  until its rescaled replacement is placed, instead of being deleted first and
+  leaving the pane blank during the upload.
+- `tui`: VNC scaling averages source pixel coverage when shrinking and
+  interpolates between pixels when enlarging, rather than selecting only
+  nearest-neighbor samples. The viewer uses terminal-reported cell dimensions
+  for aspect fitting and pointer mapping, with a safe fallback when unavailable;
+  the captured-key footers only advertise F6 when another view is available.
 - `SSH_PORT` is now used for every SSH connection. Before, only scp and the
   port probe used it, so non-22 ports could never be unlocked.
 - The jumphost's own SSH (name resolution, port probe) now uses

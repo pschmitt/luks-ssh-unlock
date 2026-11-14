@@ -9,10 +9,20 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::CommandFactory;
 
 use crate::ctx::Exit;
+
+static FORBIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// Never re-run under sudo from here on. The dashboard and the provider
+/// consoles act with the invoking user's own keys and environment; what needs
+/// root goes through the privileged helper instead.
+pub fn forbid() {
+    FORBIDDEN.store(true, Ordering::SeqCst);
+}
 
 pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
@@ -32,7 +42,7 @@ fn disabled() -> bool {
 
 /// Does this error come from missing permissions that root would have?
 pub fn needs_root(e: &anyhow::Error) -> bool {
-    if is_root() {
+    if is_root() || FORBIDDEN.load(Ordering::SeqCst) {
         return false;
     }
     if let Some(Exit(_, msg)) = e.downcast_ref::<Exit>() {
@@ -93,7 +103,7 @@ fn env_to_keep() -> Vec<String> {
 /// Replace this process with `sudo luks-ssh-unlock <same arguments>`.
 /// Returns only when that is not possible or not wanted.
 pub fn reexec() {
-    if is_root() || disabled() || !interactive() {
+    if is_root() || FORBIDDEN.load(Ordering::SeqCst) || disabled() || !interactive() {
         return;
     }
     let Some(exe) = self_path() else { return };
@@ -144,5 +154,16 @@ mod tests {
             "SSH key /k is not readable: denied".into()
         ))));
         assert!(!needs_root(&anyhow::anyhow!("something else")));
+
+        // The flag is process-wide, so it is exercised here, after the
+        // checks that need it clear, and cleared again.
+        forbid();
+        assert!(!needs_root(&denied));
+        assert!(!needs_root(&anyhow::Error::new(Exit(
+            2,
+            "SSH key /k is not readable: denied".into()
+        ))));
+        reexec();
+        FORBIDDEN.store(false, Ordering::SeqCst);
     }
 }

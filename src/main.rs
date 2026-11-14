@@ -7,15 +7,19 @@ mod ctx;
 mod daemon;
 mod dhcp;
 mod elevate;
+mod helper;
 mod log;
 mod notify;
 mod oci;
+mod openstack;
 mod probe;
 mod process;
 mod settings;
 mod status;
 mod tui;
 mod unlock;
+mod vnc;
+mod vnc_graphics;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -96,10 +100,36 @@ enum Cmd {
     /// Start a one-shot unlock when the target's initrd requests a DHCP lease
     #[command(hide = true)]
     DhcpListener(dhcp::DhcpArgs),
+    /// Serve the privileged helper on the connection given as standard input
+    /// (started by its systemd socket unit, never by hand)
+    #[command(hide = true, subcommand)]
+    Helper(HelperCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum HelperCmd {
+    /// Answer the requests of one connection
+    Serve {
+        /// What the connection may do: `basic` (list, probe, unlock) or
+        /// `admin` (also forced unlock and service start and stop)
+        #[arg(long, value_enum)]
+        policy: HelperPolicy,
+        /// The initrd checksum program for configurations that name none
+        #[arg(long, value_name = "PATH")]
+        checksum_script: Option<PathBuf>,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum HelperPolicy {
+    Basic,
+    Admin,
 }
 
 #[derive(Subcommand, Debug)]
 enum ConsoleProvider {
+    /// Connect to an OpenStack serial console
+    Openstack(console::OpenstackSerialArgs),
     /// Connect to an Oracle Cloud Infrastructure serial console
     Oci {
         /// Instance display name or OCID
@@ -143,6 +173,9 @@ fn context(opts: &GlobalOpts, mode: Mode) -> Result<Ctx> {
 
 fn real_main() -> Result<bool> {
     let cli = Cli::parse();
+    if matches!(cli.command, Some(Cmd::Console { .. } | Cmd::Helper(_))) {
+        elevate::forbid();
+    }
     match cli.command.unwrap_or(Cmd::Run) {
         Cmd::Run => {
             let mut ctx = context(&cli.opts, Mode::Run)?;
@@ -174,6 +207,16 @@ fn real_main() -> Result<bool> {
             filter,
             extra_commands,
         } => {
+            // The dashboard and the consoles it starts act as the invoking
+            // user, with that user's keys and environment: root is neither
+            // wanted nor accepted, and what needs it goes to the helper.
+            elevate::forbid();
+            if elevate::is_root() {
+                bail!(Exit(
+                    2,
+                    "the dashboard must not run as root: run it as your own user, with the privileged helper enabled for the targets whose configuration is protected".into()
+                ));
+            }
             let mut sources = tui::discover(&files)?;
             if sources.is_empty()
                 && (cli.opts.host.is_some() || process_env("SSH_HOSTNAME").is_some())
@@ -188,6 +231,7 @@ fn real_main() -> Result<bool> {
                     name,
                     env: None,
                     extras: Vec::new(),
+                    privileged: tui::Privileged::Never,
                 });
             }
             let extras = if extra_commands.is_empty() {
@@ -234,6 +278,15 @@ fn real_main() -> Result<bool> {
             }
             Ok(true)
         }
+        Cmd::Console {
+            provider: ConsoleProvider::Openstack(args),
+        } => {
+            let code = console::run_openstack_serial(&args)?;
+            if code != 0 {
+                bail!(Exit(code, "OpenStack console ended unsuccessfully".into()));
+            }
+            Ok(true)
+        }
         Cmd::Completions { shell } => {
             clap_complete::generate(
                 shell,
@@ -241,6 +294,21 @@ fn real_main() -> Result<bool> {
                 "luks-ssh-unlock",
                 &mut std::io::stdout(),
             );
+            Ok(true)
+        }
+        Cmd::Helper(HelperCmd::Serve {
+            policy,
+            checksum_script,
+        }) => {
+            let policy = match policy {
+                HelperPolicy::Basic => helper::Policy::default(),
+                HelperPolicy::Admin => helper::Policy {
+                    allow_force: true,
+                    allow_service: true,
+                },
+            };
+            helper::server::run_stdio(policy, checksum_script)
+                .map_err(|e| Exit(1, format!("helper: {e}")))?;
             Ok(true)
         }
         Cmd::DhcpListener(args) => {
@@ -309,6 +377,26 @@ mod tests {
             cli.command,
             Some(Cmd::Console {
                 provider: ConsoleProvider::Oci { keep: true, .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn openstack_console_invocation_parses() {
+        let cli = Cli::try_parse_from([
+            "luks-ssh-unlock",
+            "console",
+            "openstack",
+            "--server",
+            "example",
+            "--cloud",
+            "example-cloud",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Cmd::Console {
+                provider: ConsoleProvider::Openstack(_)
             })
         ));
     }

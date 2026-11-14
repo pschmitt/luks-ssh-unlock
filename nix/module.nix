@@ -16,6 +16,25 @@ let
   pathOrStr = types.either types.path types.str;
   nullPathOrStr = types.nullOr pathOrStr;
   inherit (cfg) package;
+  # Settings of one graphical source that the others' files must not carry
+  # (the file rejects settings it does not know).
+  openstackOnly = [
+    "server"
+    "cloud"
+    "cloudsFile"
+    "caFile"
+    "allowInsecure"
+    "openstackBin"
+  ];
+  ociOnly = [
+    "instance"
+    "identity"
+    "configFile"
+    "cliRcFile"
+    "profile"
+    "compartmentId"
+    "keep"
+  ];
   adHocUnlockers = mapAttrsToList (
     name: instance:
     pkgs.writeShellApplication {
@@ -25,6 +44,15 @@ let
         pkgs.systemd
       ];
       text = ''
+        # The dashboard acts as the invoking user and never runs as root: what
+        # needs root goes through the privileged helper.
+        case "''${1:-}" in
+          tui|ui)
+            shift
+            exec ${package}/bin/luks-ssh-unlock tui "$@" /etc/luks-ssh-unlock/${name}.env
+            ;;
+        esac
+
         if [[ "$EUID" -ne 0 ]]
         then
           exec /run/wrappers/bin/sudo -- "$0" "$@"
@@ -43,10 +71,6 @@ let
               --unit=luks-ssh-unlock-${name}.service \
               "$@" \
               --output=cat
-            ;;
-          tui|ui)
-            shift
-            exec ${package}/bin/luks-ssh-unlock tui "$@" /etc/luks-ssh-unlock/${name}.env
             ;;
           start|stop)
             if [[ $# -ne 1 ]]
@@ -308,6 +332,38 @@ in
           text = builtins.toJSON instance.console;
         }
       ) (filterAttrs (_: instance: instance.console != null) cfg.instances))
+      // (mapAttrs' (
+        name: instance:
+        nameValuePair "luks-ssh-unlock/${name}.vnc.json" {
+          text = builtins.toJSON {
+            inherit (instance.vnc) type;
+            # Each source takes only its own settings (the file rejects others).
+            parameters = filterAttrs (_: value: value != null) (
+              removeAttrs instance.vnc (
+                [ "type" ]
+                ++ (
+                  if instance.vnc.type == "openstack" then
+                    [
+                      "host"
+                      "port"
+                      "allowRemote"
+                    ]
+                    ++ ociOnly
+                  else if instance.vnc.type == "oci" then
+                    [
+                      "host"
+                      "port"
+                      "allowRemote"
+                    ]
+                    ++ openstackOnly
+                  else
+                    openstackOnly ++ ociOnly
+                )
+              )
+            );
+          };
+        }
+      ) (filterAttrs (_: instance: instance.vnc != null) cfg.instances))
       // optionalAttrs (cfg.tui.extraCommands != [ ]) {
         "luks-ssh-unlock/tui-commands".text = concatStringsSep "\n" cfg.tui.extraCommands + "\n";
       };
@@ -366,6 +422,73 @@ in
         message = ''
           services.luks-ssh-unlock.instances.${name}.dhcpListener.enable requires
           both interface and clientHostname.
+        '';
+      }) cfg.instances)
+      ++ (mapAttrsToList (name: instance: {
+        assertion =
+          instance.vnc == null
+          || instance.vnc.passwordFile == null
+          || (
+            hasPrefix "/" instance.vnc.passwordFile && !hasPrefix builtins.storeDir instance.vnc.passwordFile
+          );
+        message = ''
+          services.luks-ssh-unlock.instances.${name}.vnc.passwordFile must be an absolute
+          runtime path outside the Nix store (the store is world-readable).
+        '';
+      }) cfg.instances)
+      ++ (mapAttrsToList (name: instance: {
+        assertion =
+          instance.vnc == null
+          || instance.vnc.type != "vnc"
+          || instance.vnc.allowRemote
+          || instance.vnc.host == "127.0.0.1"
+          || instance.vnc.host == "::1"
+          || instance.vnc.host == "localhost";
+        message = ''
+          services.luks-ssh-unlock.instances.${name}.vnc.host is not a loopback address:
+          raw VNC is not encrypted. Tunnel it to a loopback port, or set
+          vnc.allowRemote = true to accept the risk.
+        '';
+      }) cfg.instances)
+      ++ (mapAttrsToList (name: instance: {
+        assertion =
+          instance.vnc == null
+          || instance.vnc.type != "openstack"
+          || (
+            all (path: path == null || hasPrefix "/" path) [
+              instance.vnc.cloudsFile
+              instance.vnc.caFile
+              instance.vnc.openstackBin
+            ]
+            && (instance.vnc.cloudsFile == null || !hasPrefix builtins.storeDir instance.vnc.cloudsFile)
+          );
+        message = ''
+          services.luks-ssh-unlock.instances.${name}.vnc: cloudsFile, caFile and
+          openstackBin must be absolute paths, and cloudsFile (it holds
+          credentials) must be a runtime path outside the Nix store.
+        '';
+      }) cfg.instances)
+      ++ (mapAttrsToList (name: instance: {
+        assertion =
+          instance.vnc == null
+          || instance.vnc.type != "oci"
+          || (
+            all (path: path == null || hasPrefix "/" path) [
+              instance.vnc.configFile
+              instance.vnc.cliRcFile
+            ]
+            && (
+              instance.vnc.identity == null
+              || (
+                (hasPrefix "/" instance.vnc.identity || hasPrefix "~/" instance.vnc.identity)
+                && !hasPrefix builtins.storeDir instance.vnc.identity
+              )
+            )
+          );
+        message = ''
+          services.luks-ssh-unlock.instances.${name}.vnc: configFile and cliRcFile
+          must be absolute paths, and identity (a private key) must be an
+          absolute or ~/ runtime path outside the Nix store.
         '';
       }) cfg.instances);
 
@@ -686,7 +809,11 @@ in
                           "oci"
                           "openstack"
                         ];
-                        description = "Console provider. OpenStack support is not implemented yet.";
+                        description = ''
+                          Console provider. `openstack` is the serial console of an
+                          OpenStack server (the `openstack` CLI must be in the console
+                          user's PATH, or set `openstackBin`).
+                        '';
                       };
                       parameters = mkOption {
                         type =
@@ -733,6 +860,41 @@ in
                                 };
                               };
                             }
+                          else if config.type == "openstack" then
+                            types.submodule {
+                              options = {
+                                server = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                  description = "Server name or ID. Defaults to the target name.";
+                                };
+                                cloud = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                  description = "Cloud name in clouds.yaml (--os-cloud).";
+                                };
+                                cloudsFile = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                  description = "Runtime path of clouds.yaml (never a Nix store path).";
+                                };
+                                caFile = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                  description = "CA bundle for the console proxy (wss).";
+                                };
+                                allowInsecure = mkOption {
+                                  type = types.bool;
+                                  default = false;
+                                  description = "Accept a plain ws:// console proxy on a non-loopback host.";
+                                };
+                                openstackBin = mkOption {
+                                  type = types.nullOr types.str;
+                                  default = null;
+                                  description = "Absolute path of the openstack CLI.";
+                                };
+                              };
+                            }
                           else
                             types.attrsOf types.anything;
                         default = { };
@@ -745,6 +907,169 @@ in
               default = null;
               description = "Typed dashboard console configuration for this target.";
               example = literalExpression ''{ type = "oci"; parameters.identity = "/home/user/.ssh/id_rsa"; }'';
+            };
+            vnc = mkOption {
+              type = types.nullOr (
+                types.submodule {
+                  options = {
+                    type = mkOption {
+                      type = types.enum [
+                        "vnc"
+                        "openstack"
+                        "oci"
+                      ];
+                      default = "vnc";
+                      description = ''
+                        Where the desktop comes from: `vnc` is a direct VNC endpoint
+                        (`host`, `port`); `openstack` is the noVNC console of an
+                        OpenStack server, reached through the `openstack` CLI and
+                        its console proxy (`server`, `cloud`, ...); `oci` is the
+                        graphical console of an OCI instance, reached through the
+                        `oci` CLI and an `ssh` tunnel to a private Unix socket
+                        (`instance`, `identity`, `profile`, ...). OCI allows one
+                        console client at a time.
+                      '';
+                    };
+                    instance = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "OCI instance display name or OCID (type oci). Defaults to the target name.";
+                    };
+                    identity = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = ''
+                        Runtime path of the RSA private key whose `.pub` file is
+                        registered with the console connection (type oci;
+                        `~/.ssh/id_rsa` by default). Never a Nix store path.
+                      '';
+                    };
+                    configFile = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "Absolute path of the OCI CLI config, --config-file (type oci).";
+                    };
+                    cliRcFile = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "Absolute path of the OCI CLI rc file, --cli-rc-file (type oci).";
+                    };
+                    profile = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "OCI CLI profile, --profile (type oci).";
+                    };
+                    compartmentId = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "Compartment OCID for the lookup of the instance by name (type oci).";
+                    };
+                    keep = mkOption {
+                      type = types.bool;
+                      default = false;
+                      description = "Keep the console connection at the provider on exit (type oci).";
+                    };
+                    server = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "OpenStack server name or ID (type openstack). Defaults to the target name.";
+                    };
+                    cloud = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "OpenStack cloud name in clouds.yaml, --os-cloud (type openstack).";
+                    };
+                    cloudsFile = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = ''
+                        Runtime path of clouds.yaml (type openstack). It holds
+                        credentials: never a Nix store path.
+                      '';
+                    };
+                    caFile = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "CA bundle for the console proxy (type openstack).";
+                    };
+                    allowInsecure = mkOption {
+                      type = types.bool;
+                      default = false;
+                      description = ''
+                        Accept a plain ws:// console proxy on a non-loopback host
+                        (type openstack). The pane is then marked UNENCRYPTED.
+                      '';
+                    };
+                    openstackBin = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "Absolute path of the openstack CLI (type openstack).";
+                    };
+                    host = mkOption {
+                      type = types.str;
+                      default = "127.0.0.1";
+                      description = ''
+                        VNC server host. Raw VNC is not encrypted: keep this on
+                        loopback (for example the local end of an SSH tunnel).
+                      '';
+                    };
+                    port = mkOption {
+                      type = types.port;
+                      default = 5900;
+                      description = "VNC server port.";
+                    };
+                    passwordFile = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = ''
+                        Runtime path of a file holding the VNC password (mode 0600,
+                        owned by root or the invoking user). It is read by the
+                        dashboard when a session starts and is never copied into
+                        the Nix store or put on a command line. Must not be a Nix
+                        store path.
+                      '';
+                      example = "/run/secrets/vnc-password";
+                    };
+                    viewOnly = mkOption {
+                      type = types.bool;
+                      default = false;
+                      description = "Start without forwarding the keyboard and mouse (Ctrl+T toggles).";
+                    };
+                    quality = mkOption {
+                      type = types.nullOr (types.ints.between 0 9);
+                      default = null;
+                      description = "Tight JPEG quality, 0 to 9.";
+                    };
+                    compression = mkOption {
+                      type = types.nullOr (types.ints.between 0 9);
+                      default = null;
+                      description = "Tight compression level, 0 to 9.";
+                    };
+                    resizeRemote = mkOption {
+                      type = types.bool;
+                      default = false;
+                      description = "Ask the remote desktop to take the size of the dashboard pane.";
+                    };
+                    allowRemote = mkOption {
+                      type = types.bool;
+                      default = false;
+                      description = ''
+                        Accept a host that is not a loopback address. The
+                        connection is then unencrypted and the dashboard says so.
+                      '';
+                    };
+                  };
+                }
+              );
+              default = null;
+              description = ''
+                Graphical console of this target, shown by the dashboard's
+                built-in viewer next to the serial console: a direct VNC endpoint
+                the noVNC console of an OpenStack server (`type = "openstack"`) or
+                the graphical console of an OCI instance (`type = "oci"`).
+                It does not depend on the console provider.
+              '';
+              example = literalExpression ''{ port = 5901; passwordFile = "/run/secrets/vnc"; }'';
             };
             tuiCommands = mkOption {
               type = types.listOf types.str;

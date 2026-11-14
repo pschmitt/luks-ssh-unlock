@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -32,7 +32,12 @@ use crate::daemon::State;
 use crate::log::{Level, LogLine, Logger};
 use crate::settings::{GlobalOpts, Settings, parse_env_file};
 use crate::status::{Report, Severity, TargetState};
+use crate::vnc_graphics::{self, Renderer};
 use chrono::{DateTime, Local, TimeZone};
+
+mod helper_worker;
+mod viewer;
+mod vnc;
 
 const LOG_LINES: usize = 500;
 const EXTRA_LINES: usize = 2000;
@@ -52,9 +57,18 @@ pub struct ExtraCmd {
     /// Runs on a pseudo-terminal in an emulated screen, and gets the
     /// keyboard while its pane has the focus (`@` before the command).
     pub interactive: bool,
+    /// A direct VNC endpoint, shown by the built-in viewer: no command runs
+    /// (`command` is only a description), and the pane has the keyboard
+    /// like an interactive console does.
+    pub vnc: Option<crate::console::VncEndpoint>,
 }
 
 impl ExtraCmd {
+    /// Does this pane take the keyboard (an interactive command or VNC)?
+    fn is_console(&self) -> bool {
+        self.interactive || self.vnc.is_some()
+    }
+
     /// `[LABEL=][@]COMMAND`. Without a label, the command's first word is
     /// used. `@` makes the command interactive (a console you type into).
     pub fn parse(spec: &str) -> Self {
@@ -80,6 +94,7 @@ impl ExtraCmd {
                 .unwrap_or_else(|| command.split_whitespace().next().unwrap_or(command).into()),
             command: command.into(),
             interactive,
+            vnc: None,
         }
     }
 }
@@ -132,6 +147,10 @@ struct ExtraOut {
     screen: Option<vt100::Parser>,
     /// The end of the last output, in case a terminal query is split in two.
     query_tail: Vec<u8>,
+    /// VNC panes: what the session last said (progress, or why it ended).
+    vnc_note: String,
+    /// VNC panes: the keyboard toggle (`Ctrl+T`); the configured value until set.
+    vnc_view_only: Option<bool>,
 }
 
 /// The extra command that is running now (at most one: the selected
@@ -145,6 +164,71 @@ struct ExtraRun {
     ended: Arc<AtomicBool>,
     /// The pseudo-terminal of an interactive command.
     pty: Option<Pty>,
+}
+
+/// Events and pixel bytes taken from a VNC session per turn of the loop.
+const VNC_EVENTS: usize = 64;
+const VNC_BYTES: usize = 8 << 20;
+/// How long the pane size has to hold still before the remote desktop is
+/// asked to follow it (only with `resizeRemote`).
+/// How long a tmux session gets to say whether it passes images through.
+const VNC_TMUX_PROBE: Duration = Duration::from_secs(2);
+const VNC_RESIZE_DELAY: Duration = Duration::from_millis(400);
+/// Smallest size worth asking a remote desktop for.
+const VNC_RESIZE_MIN: u16 = 160;
+
+/// The built-in VNC viewer's live session (at most one: the selected
+/// target's, in the active pane).
+struct VncRun {
+    t: usize,
+    c: usize,
+    session: vnc::Session,
+    /// The first pixels have arrived: the image can be drawn.
+    framed: bool,
+    layout: Option<crate::vnc::ScreenLayout>,
+    /// Pointer buttons held on the remote desktop, and where it is.
+    buttons: u8,
+    pointer: (u16, u16),
+    /// The pane size wanted by the remote desktop, and since when; the last
+    /// size that was asked for.
+    resize: Option<((u16, u16), Instant)>,
+    resized: Option<(u16, u16)>,
+}
+
+/// Everything the VNC viewer keeps between frames.
+#[derive(Default)]
+struct VncState {
+    run: Option<VncRun>,
+    /// Terminal graphics were looked for since the viewer last (re)started.
+    checked: bool,
+    /// When the terminal was first asked about graphics (inside tmux that is
+    /// answered by a background thread, a moment later).
+    probing: Option<Instant>,
+    /// What was found, or why the viewer cannot draw.
+    transport: Option<vnc_graphics::Transport>,
+    problem: Option<String>,
+    renderer: Option<Renderer>,
+    /// A renderer that was let go of, whose images are deleted at the next draw.
+    retired: Option<Renderer>,
+    /// The inside of the pane the image goes in; set while drawing a frame, and
+    /// only when the image is to be seen.
+    area: Option<Rect>,
+    /// The image is drawn with Unicode placeholders (tmux), not placed.
+    placeholders: bool,
+    /// Drawing waits for the rate limit.
+    more: bool,
+}
+
+impl VncState {
+    /// Let go of the renderer; its images go away at the next draw.
+    fn retire(&mut self) {
+        if let Some(r) = self.renderer.take() {
+            self.retired = Some(r);
+        }
+        self.area = None;
+        self.placeholders = false;
+        self.more = false;
+    }
 }
 
 fn shell_quote(s: &str) -> String {
@@ -661,17 +745,49 @@ fn paint_screen(screen: &vt100::Screen, area: Rect, buf: &mut Buffer) {
     }
 }
 
+/// Whether, and how, the privileged helper acts for a target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Privileged {
+    /// Never: the target is not the system one (another directory, or the
+    /// current options), so the helper knows nothing about it.
+    Never,
+    /// The system configuration was readable. The helper takes over only if
+    /// something it refers to (key, passphrase, baseline) is not.
+    IfNeeded,
+    /// Not even the configuration is readable by the user; the helper's
+    /// listing supplied the host name.
+    Always(String),
+}
+
 /// One target to show: a name and the environment describing it.
 pub struct Source {
     pub name: String,
     /// This target's own extra commands (`<name>.tui-commands`).
     pub extras: Vec<ExtraCmd>,
     pub env: Option<std::collections::HashMap<String, String>>,
+    pub privileged: Privileged,
+}
+
+fn permission_denied(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<std::io::Error>())
+        .any(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+fn helper_listing() -> Result<Vec<crate::helper::client::Listed>> {
+    crate::helper::client::Client::system()
+        .list()
+        .map_err(anyhow::Error::new)
 }
 
 /// Environment files given on the command line, or every `*.env` in the
-/// NixOS module's directory.
+/// NixOS module's directory. What the user cannot read there (the directory,
+/// or a file in it) is listed by the privileged helper instead; the sidecar
+/// files next to the environment files are always read directly, as the user,
+/// since they hold no protected material.
 pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
+    let system_dir = std::path::Path::new(DEFAULT_CONFIG_DIR);
+    let mut listing: Option<Vec<crate::helper::client::Listed>> = None;
     let paths: Vec<PathBuf> = if files.is_empty() {
         let mut found: Vec<PathBuf> = match fs::read_dir(DEFAULT_CONFIG_DIR) {
             Ok(rd) => rd
@@ -679,9 +795,17 @@ pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
                 .filter(|p| p.extension().is_some_and(|e| e == "env"))
                 .collect(),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                return Err(
-                    anyhow::Error::new(e).context(format!("cannot read {DEFAULT_CONFIG_DIR}"))
-                );
+                let listed = helper_listing().with_context(|| {
+                    format!(
+                        "cannot read {DEFAULT_CONFIG_DIR}, and the privileged helper cannot list it"
+                    )
+                })?;
+                let paths = listed
+                    .iter()
+                    .map(|t| system_dir.join(format!("{}.env", t.name)))
+                    .collect();
+                listing = Some(listed);
+                paths
             }
             Err(_) => Vec::new(),
         };
@@ -706,20 +830,73 @@ pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
     paths
         .iter()
         .map(|p| {
-            let text =
-                fs::read_to_string(p).with_context(|| format!("cannot read {}", p.display()))?;
             let name = p
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| p.display().to_string());
+            let in_system = p.parent() == Some(system_dir);
+            let (env, privileged) = match fs::read_to_string(p) {
+                Ok(text) => (
+                    parse_env_file(&text),
+                    if in_system {
+                        Privileged::IfNeeded
+                    } else {
+                        Privileged::Never
+                    },
+                ),
+                Err(e) if in_system && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    if listing.is_none() {
+                        listing = Some(helper_listing().with_context(|| {
+                            format!(
+                                "cannot read {}, and the privileged helper cannot list it",
+                                p.display()
+                            )
+                        })?);
+                    }
+                    let host = listing
+                        .iter()
+                        .flatten()
+                        .find(|t| t.name == name)
+                        .and_then(|t| t.host.clone())
+                        .with_context(|| {
+                            format!(
+                                "cannot read {}, and the privileged helper does not know it",
+                                p.display()
+                            )
+                        })?;
+                    (
+                        std::collections::HashMap::from([(
+                            "SSH_HOSTNAME".to_string(),
+                            host.clone(),
+                        )]),
+                        Privileged::Always(host),
+                    )
+                }
+                Err(e) => {
+                    return Err(
+                        anyhow::Error::new(e).context(format!("cannot read {}", p.display()))
+                    );
+                }
+            };
+            // The sidecars are the user's to read; the ones of a target whose
+            // directory is closed to the user are simply absent.
+            let lenient = matches!(privileged, Privileged::Always(_));
             let mut extras = read_extras(&p.with_extension("tui-commands"));
-            if let Some(console) = crate::console::read(&p.with_extension("console.json"), &name)? {
-                extras = merge_extras(&extras, vec![console]);
+            let console = crate::console::read(&p.with_extension("console.json"), &name);
+            let vnc = crate::console::read_vnc(&p.with_extension("vnc.json"), &name);
+            for sidecar in [console, vnc] {
+                match sidecar {
+                    Ok(Some(extra)) => extras = merge_extras(&extras, vec![extra]),
+                    Ok(None) => {}
+                    Err(e) if lenient && permission_denied(&e) => {}
+                    Err(e) => return Err(e),
+                }
             }
             Ok(Source {
                 extras,
                 name,
-                env: Some(parse_env_file(&text)),
+                env: Some(env),
+                privileged,
             })
         })
         .collect()
@@ -944,6 +1121,8 @@ struct App {
     restart_wait: Option<Arc<AtomicBool>>,
     /// Height of the extra pane, in percent of the space it shares with the activity.
     extra_pct: u16,
+    /// The built-in VNC viewer.
+    vnc: VncState,
     msg_tx: Sender<Msg>,
 }
 
@@ -1147,6 +1326,90 @@ fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>)
     ));
 }
 
+/// Set by the SIGTERM/SIGHUP handler; the event loop turns it into a quit,
+/// so the screen, the mouse mode and any Kitty image are restored.
+/// Holds the signal number, 0 while none arrived.
+static TERMINATE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn on_terminate(sig: libc::c_int) {
+    TERMINATE.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Route SIGTERM and SIGHUP to [`on_terminate`]. No `SA_RESTART`, so a
+/// blocking wait for input is interrupted rather than resumed.
+fn install_terminate_handler() {
+    // SAFETY: the handler only stores into an atomic, which is signal-safe.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_terminate as extern "C" fn(libc::c_int) as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = 0;
+        for sig in [libc::SIGTERM, libc::SIGHUP] {
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+}
+
+/// Did the terminal input stream close? Crossterm's Unix event poller can loop
+/// forever on EOF, so the main loop checks this independently of its reader.
+fn terminal_input_hung_up(fd: RawFd) -> bool {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll only borrows this one initialized pollfd for this call.
+    let ready = unsafe { libc::poll(&mut pollfd, 1, 0) };
+    if ready < 0 {
+        return last_errno() != libc::EINTR;
+    }
+    if ready == 0 {
+        return false;
+    }
+    if pollfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return true;
+    }
+    if pollfd.revents & libc::POLLIN == 0 {
+        return false;
+    }
+
+    // Some PTY implementations report EOF as readable with zero buffered
+    // bytes, not as POLLHUP. FIONREAD distinguishes that from queued keys.
+    let mut available: libc::c_int = 0;
+    // SAFETY: ioctl writes one integer to this initialized, writable location.
+    unsafe { libc::ioctl(fd, libc::FIONREAD, &mut available) == 0 && available == 0 }
+}
+
+/// Crossterm's poll/read path may spin forever when stdin reaches EOF. Keep
+/// that path off the UI thread; the UI independently watches stdin for HUP and
+/// can finish cleanup without waiting for this detached reader to return.
+fn start_event_reader() -> Result<(Receiver<std::io::Result<TermEvent>>, Arc<AtomicBool>)> {
+    let (tx, rx) = mpsc::channel();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let thread_stopped = Arc::clone(&stopped);
+    thread::Builder::new()
+        .name("terminal-events".into())
+        .spawn(move || {
+            while !thread_stopped.load(Ordering::Relaxed) {
+                match event::poll(Duration::from_millis(100)) {
+                    Ok(false) => continue,
+                    Ok(true) => {
+                        let event = event::read();
+                        let failed = event.is_err();
+                        if tx.send(event).is_err() || failed {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok((rx, stopped))
+}
+
 pub fn run(
     sources: Vec<Source>,
     opts: &GlobalOpts,
@@ -1156,8 +1419,14 @@ pub fn run(
 ) -> Result<()> {
     let (tx, rx) = mpsc::channel::<Msg>();
     let mut targets = Vec::new();
+    let mut helper_state: Option<Result<()>> = None;
     for (idx, src) in sources.into_iter().enumerate() {
+        let helper_host = match &src.privileged {
+            Privileged::Always(host) => Some(host.clone()),
+            _ => None,
+        };
         let settings = match &src.env {
+            _ if helper_host.is_some() => Err(anyhow::anyhow!("configuration read by the helper")),
             Some(map) => Settings::resolve(
                 &GlobalOpts {
                     debug: opts.debug,
@@ -1174,10 +1443,13 @@ pub fn run(
                 let _ = log_tx.send(Msg::Log(idx, line));
             }),
         );
-        let host = settings
-            .as_ref()
-            .map(|s| s.hostname.clone())
-            .unwrap_or_default();
+        let host = helper_host.clone().unwrap_or_else(|| {
+            settings
+                .as_ref()
+                .map(|s| s.hostname.clone())
+                .unwrap_or_default()
+        });
+        let spec_host = host.clone();
         let cmds = merge_extras(&extras, src.extras.clone());
         let mut target = Target {
             name: src.name.clone(),
@@ -1192,11 +1464,21 @@ pub fn run(
             extra: (0..cmds.len()).map(|_| ExtraOut::default()).collect(),
             cmds,
         };
-        match settings.and_then(|mut s| {
-            s.once = true;
-            Ctx::new(s, logger, Mode::Status)
-        }) {
-            Ok(ctx) => {
+        let direct = match helper_host {
+            Some(_) => None,
+            None => Some(settings.and_then(|mut s| {
+                s.once = true;
+                Ctx::new(s, logger.clone(), Mode::Status)
+            })),
+        };
+        let spec = || helper_worker::Spec {
+            idx,
+            name: src.name.clone(),
+            host: spec_host.clone(),
+            refresh,
+        };
+        match direct {
+            Some(Ok(ctx)) => {
                 let (ctx_tx, ctx_rx) = mpsc::channel();
                 let tx = tx.clone();
                 let unit = format!("luks-ssh-unlock-{}.service", src.name);
@@ -1207,21 +1489,44 @@ pub fn run(
                 thread::spawn(move || follow_journal(idx, unit, probe_tx, msg_tx));
                 target.tx = Some(ctx_tx);
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 let mut msg = format!("{e:#}");
-                if msg.contains("not readable") && unsafe { libc::geteuid() } != 0 {
-                    msg.push_str(" (run as root?)");
+                let protected = msg.contains("not readable");
+                if protected && src.privileged == Privileged::IfNeeded {
+                    // The user's own process stays as it is; the protected
+                    // part is handled by the helper, if there is one.
+                    match helper_state.get_or_insert_with(|| helper_listing().map(|_| ())) {
+                        Ok(()) => {
+                            target.tx = Some(helper_worker::spawn(
+                                spec(),
+                                crate::helper::client::Client::system(),
+                                logger,
+                                tx.clone(),
+                            ));
+                        }
+                        Err(h) => {
+                            msg.push_str(&format!(
+                                " (and the privileged helper is not usable: {h:#})"
+                            ));
+                        }
+                    }
+                } else if protected {
+                    msg.push_str(" (the dashboard does not run as root)");
                 }
-                target.error = Some(msg);
+                if target.tx.is_none() {
+                    target.error = Some(msg);
+                }
+            }
+            None => {
+                target.tx = Some(helper_worker::spawn(
+                    spec(),
+                    crate::helper::client::Client::system(),
+                    logger,
+                    tx.clone(),
+                ));
             }
         }
         targets.push(target);
-    }
-    if targets
-        .iter()
-        .any(|t| t.error.as_ref().is_some_and(|e| e.contains("not readable")))
-    {
-        crate::elevate::reexec();
     }
 
     let has_extras = targets.iter().any(|t| !t.cmds.is_empty());
@@ -1253,47 +1558,133 @@ pub fn run(
         console_size: (24, 80),
         restart_wait: None,
         extra_pct: 50,
+        vnc: VncState::default(),
         msg_tx: tx,
     };
     let mut terminal = ratatui::init();
     // ratatui's panic hook restores the screen but knows nothing of the mouse.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        hook(info);
+        if terminal_input_hung_up(libc::STDIN_FILENO) {
+            eprintln!("panic after PTY hangup: {info}");
+        } else {
+            let _ = execute!(std::io::stdout(), DisableMouseCapture);
+            hook(info);
+        }
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    let result = event_loop(&mut terminal, &mut app, &rx);
+    install_terminate_handler();
+    let (event_rx, event_reader_stopped) = match start_event_reader() {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = execute!(std::io::stdout(), DisableMouseCapture);
+            ratatui::restore();
+            return Err(error);
+        }
+    };
+    let result = event_loop(&mut terminal, &mut app, &rx, &event_rx);
+    let terminal_hung_up = matches!(&result, Ok(true));
+    // Do not join: Crossterm's event source can be stuck reading EOF. The UI
+    // exits promptly on the independent HUP check, and process exit reaps it.
+    event_reader_stopped.store(true, Ordering::Relaxed);
     app.stop_extra(true);
+    app.shutdown_vnc();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
-    ratatui::restore();
-    result
+    // The terminal is no longer writable after a PTY hangup; restoring it
+    // would only emit a misleading I/O error. Cleanup of child sessions and
+    // Kitty graphics above still runs.
+    if terminal_hung_up || terminal_input_hung_up(libc::STDIN_FILENO) {
+        // DefaultTerminal's drop tries to show the cursor, which fails once its
+        // PTY master is gone. This TUI invocation is ending with the process.
+        std::mem::forget(terminal);
+    } else {
+        ratatui::restore();
+    }
+    // Die of the signal after cleaning up, so the exit status says so.
+    let sig = TERMINATE.load(std::sync::atomic::Ordering::SeqCst);
+    if sig != 0 {
+        // SAFETY: restoring the default action, then re-raising.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+    result.map(|_| ())
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, rx: &Receiver<Msg>) -> Result<()> {
+fn draw_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<bool> {
+    match terminal.draw(|f| app.draw(f)) {
+        Ok(_) => Ok(true),
+        Err(_) if terminal_input_hung_up(libc::STDIN_FILENO) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn event_loop(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    rx: &Receiver<Msg>,
+    event_rx: &Receiver<std::io::Result<TermEvent>>,
+) -> Result<bool> {
     // The first frame tells a console how big it is before it starts.
-    terminal.draw(|f| app.draw(f))?;
+    if !draw_app(terminal, app)? {
+        return Ok(true);
+    }
     while !app.quit {
+        if TERMINATE.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            break;
+        }
+        if terminal_input_hung_up(libc::STDIN_FILENO) {
+            return Ok(true);
+        }
         // Not all of a flood of console output at once: keep the keys responsive.
         for _ in 0..256 {
             let Ok(msg) = rx.try_recv() else { break };
             app.apply(msg);
         }
+        app.pump_vnc();
         app.fetch_extra();
-        terminal.draw(|f| app.draw(f))?;
-        // A console echoes what you type: look back soon for its output.
-        let wait = if app.console_live() { 15 } else { 150 };
-        if event::poll(Duration::from_millis(wait))? {
-            match event::read()? {
+        if !draw_app(terminal, app)? {
+            return Ok(true);
+        }
+        // The picture of a remote desktop goes on after the frame's text.
+        app.draw_vnc_image();
+        // The event reader owns all Crossterm calls. This thread can continue
+        // UI and PTY cleanup if Crossterm spins internally after input EOF.
+        let event = match event_rx.recv_timeout(Duration::from_millis(app.poll_ms())) {
+            Ok(Ok(event)) => Some(event),
+            Ok(Err(_)) if terminal_input_hung_up(libc::STDIN_FILENO) => return Ok(true),
+            Ok(Err(error)) => return Err(error.into()),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) if terminal_input_hung_up(libc::STDIN_FILENO) => {
+                return Ok(true);
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(anyhow::anyhow!(
+                    "terminal event reader stopped unexpectedly"
+                ));
+            }
+        };
+        if let Some(event) = event {
+            match event {
                 TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     app.key(key.code, key.modifiers)
                 }
                 TermEvent::Mouse(m) => app.mouse(m),
+                TermEvent::Resize(..) => {
+                    app.vnc_resized();
+                    if let Err(error) = terminal.clear() {
+                        if terminal_input_hung_up(libc::STDIN_FILENO) {
+                            return Ok(true);
+                        }
+                        return Err(error.into());
+                    }
+                }
                 _ => {}
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 impl App {
@@ -1382,6 +1773,14 @@ impl App {
         {
             self.stop_extra(false);
         }
+        if self
+            .vnc
+            .run
+            .as_ref()
+            .is_some_and(|r| Some((r.t, r.c)) != want)
+        {
+            self.stop_vnc();
+        }
         if let Some(old) = &self.restart_wait {
             if !old.load(Ordering::SeqCst) {
                 return;
@@ -1392,6 +1791,10 @@ impl App {
         let refresh = self.refresh;
         let target = &mut self.targets[t];
         if target.error.is_some() {
+            return;
+        }
+        if target.cmds[c].vnc.is_some() {
+            self.fetch_vnc(t, c);
             return;
         }
         let interactive = target.cmds[c].interactive;
@@ -1464,7 +1867,17 @@ impl App {
         }
         let t = self.selected();
         let c = self.extra_c(t);
-        self.targets[t].cmds.get(c)?.interactive.then_some((t, c))
+        self.targets[t].cmds.get(c)?.is_console().then_some((t, c))
+    }
+
+    /// Show the target's next extra command (such as the serial console
+    /// after the graphical one).
+    fn cycle_extra(&mut self, t: usize) {
+        let len = self.targets[t].cmds.len();
+        if len > 0 {
+            self.extra_idx = (self.extra_c(t) + 1) % len;
+            self.extra_scroll = 0;
+        }
     }
 
     /// A console pane has the focus, with no dialog in the way. Its reserved
@@ -1488,7 +1901,10 @@ impl App {
         self.console_focus().is_some_and(|(t, c)| {
             let target = &self.targets[t];
             let slot = &target.extra[c];
-            target.error.is_none() && (slot.running || slot.finished_at.is_none())
+            // A view-only desktop leaves the keyboard to the dashboard.
+            target.error.is_none()
+                && (slot.running || slot.finished_at.is_none())
+                && !(target.cmds[c].vnc.is_some() && self.vnc_view_only(t, c))
         })
     }
 
@@ -1516,12 +1932,53 @@ impl App {
     fn console_key(&mut self, (t, c): (usize, usize), code: KeyCode, mods: KeyModifiers) -> bool {
         if is_console_escape(code, mods) {
             // Back to the dashboard: the target list has the focus.
+            self.vnc_release();
+            if self.extra_full {
+                self.vnc_resized();
+            }
             self.focus = Focus::List;
             self.extra_full = false;
             return true;
         }
         if is_console_restart(code, mods) {
-            self.restart_console();
+            if self.targets[t].cmds[c].vnc.is_some() {
+                self.restart_vnc();
+            } else {
+                self.restart_console();
+            }
+            return true;
+        }
+        let vnc = self.targets[t].cmds[c].vnc.is_some();
+        // `C` is the dashboard's fullscreen binding, including while a VNC
+        // pane owns the keyboard; do not send it to the remote desktop.
+        if vnc && code == KeyCode::Char('C') && self.has_extras {
+            return false;
+        }
+        // F6 shows the next view (graphical or serial console) of the target.
+        if code == KeyCode::F(6) && self.targets[t].cmds.len() > 1 {
+            self.cycle_extra(t);
+            return true;
+        }
+        if vnc {
+            // Ctrl+T: the keyboard goes to the desktop, or stays here.
+            if code == KeyCode::Char('t') && mods.contains(KeyModifiers::CONTROL) {
+                let view_only = self.vnc_view_only(t, c);
+                self.targets[t].extra[c].vnc_view_only = Some(!view_only);
+                self.vnc_release();
+                return true;
+            }
+            if mods.contains(KeyModifiers::SHIFT)
+                && matches!(
+                    code,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+                )
+            {
+                return false;
+            }
+            if !self.console_captured() {
+                return false;
+            }
+            self.vnc_send_key((t, c), code, mods);
             return true;
         }
         let shift = mods.contains(KeyModifiers::SHIFT);
@@ -1678,6 +2135,22 @@ impl App {
     }
 
     fn key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        if std::env::var_os("LSU_VNC_TRACE").is_some()
+            && (code == KeyCode::Char('C') || is_console_escape(code, mods))
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            eprintln!(
+                "[LSU_VNC_TRACE] {}.{:03} key code={code:?} mods={mods:?} focus_extra={} fullscreen={} console_focus={:?} captured={}",
+                now.as_secs(),
+                now.subsec_millis(),
+                self.focus == Focus::Extra,
+                self.extra_full,
+                self.console_focus(),
+                self.console_captured()
+            );
+        }
         if let Some((idx, force)) = self.confirm.take() {
             if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
                 self.send(idx, Cmd::Unlock { force });
@@ -1733,8 +2206,14 @@ impl App {
         match code {
             // Shift+arrows always move the focus; plain arrows act inside
             // the focused pane and move the focus where the pane has no use
-            // for them.
-            _ if shift && dir.is_some() => self.move_focus(dir.expect("checked")),
+            // for them. In a fullscreen console, first restore the dashboard
+            // layout so the focus transition is visible and can take effect.
+            _ if shift && dir.is_some() => {
+                if self.extra_full {
+                    self.extra_full = false;
+                }
+                self.move_focus(dir.expect("checked"));
+            }
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('i') if n > 0 => self.info = true,
             KeyCode::Char('l') if n > 0 => {
@@ -1743,6 +2222,7 @@ impl App {
                 self.focus = Focus::Activity;
             }
             KeyCode::Char('C') if n > 0 && self.has_extras => {
+                self.vnc_resized();
                 self.extra_full = !self.extra_full;
                 self.logs_full = false;
                 self.focus = Focus::Extra;
@@ -1760,13 +2240,7 @@ impl App {
             KeyCode::BackTab => self.cycle_focus(false),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Char('c') if self.has_extras && n > 0 => {
-                let len = self.targets[sel].cmds.len();
-                if len > 0 {
-                    self.extra_idx = (self.extra_c(sel) + 1) % len;
-                    self.extra_scroll = 0;
-                }
-            }
+            KeyCode::Char('c') | KeyCode::F(6) if self.has_extras && n > 0 => self.cycle_extra(sel),
             KeyCode::Down | KeyCode::Char('j') if n > 0 && self.focus == Focus::List => {
                 self.select((pos + 1) % n)
             }
@@ -1802,6 +2276,7 @@ impl App {
                 self.send(sel, Cmd::Probe);
                 // Run the extra command again from the start.
                 self.stop_extra(false);
+                self.restart_vnc();
                 let c = self.extra_c(sel);
                 if let Some(slot) = self.targets[sel].extra.get_mut(c) {
                     slot.finished_at = None;
@@ -1955,6 +2430,10 @@ impl App {
             }
             return;
         }
+        // Over the remote desktop (which has the keyboard), the mouse is its.
+        if self.vnc_mouse(m) {
+            return;
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.drag = if contains(self.hit.edge_list, x, y) {
@@ -2039,6 +2518,9 @@ impl App {
         self.hit.edge_list = Rect::default();
         self.hit.extra = Rect::default();
         self.hit.edge_extra = Rect::default();
+        // The remote desktop's image is only drawn where a frame puts it.
+        self.vnc.area = None;
+        self.vnc.placeholders = false;
         // Cells are about twice as tall as wide: below this the side-by-side
         // layout is cramped, so stack the panes instead.
         self.portrait = area.width < 80 || u32::from(area.width) * 2 < u32::from(area.height) * 3;
@@ -2185,7 +2667,42 @@ impl App {
             }
         }
 
-        let hints = if self.console_captured() {
+        let vnc_focus = self
+            .console_focus()
+            .filter(|&(t, c)| self.targets[t].cmds[c].vnc.is_some());
+        let hints = if let Some((t, c)) = vnc_focus
+            && self.targets[t].extra[c].running
+        {
+            let view_only = self.vnc_view_only(t, c);
+            let multiple_views = self.targets[t].cmds.len() > 1;
+            let choices = match (view_only, multiple_views) {
+                (true, true) => [
+                    " the desktop is view-only · Ctrl+T give it the keyboard · Ctrl+] back · F6 next view · Ctrl+R/F5 restart",
+                    " view-only · Ctrl+T keyboard · Ctrl+] back · F6 next",
+                    " Ctrl+] back · Ctrl+T mode",
+                    " Ctrl+] back",
+                ],
+                (false, true) => [
+                    " the desktop has the keyboard and mouse · Ctrl+] back · Ctrl+T view-only · F6 next view · Ctrl+R/F5 restart",
+                    " desktop keyboard · Ctrl+] back · Ctrl+T view-only · F6 next",
+                    " Ctrl+] back · Ctrl+T mode",
+                    " Ctrl+] back",
+                ],
+                (true, false) => [
+                    " the desktop is view-only · Ctrl+T give it the keyboard · Ctrl+] back · Ctrl+R/F5 restart",
+                    " view-only · Ctrl+T keyboard · Ctrl+] back",
+                    " Ctrl+] back · Ctrl+T mode",
+                    " Ctrl+] back",
+                ],
+                (false, false) => [
+                    " the desktop has the keyboard and mouse · Ctrl+] back · Ctrl+T view-only · Ctrl+R/F5 restart",
+                    " desktop keyboard · Ctrl+] back · Ctrl+T view-only",
+                    " Ctrl+] back · Ctrl+T mode",
+                    " Ctrl+] back",
+                ],
+            };
+            Line::from(pick(footer.width, &choices).yellow())
+        } else if self.console_captured() {
             Line::from(
                 pick(
                     footer.width,
@@ -2293,7 +2810,15 @@ impl App {
                 "Ctrl+]",
                 "interactive console: give the keyboard back to the dashboard",
             ),
-            ("Ctrl+R  F5", "interactive console: restart it"),
+            ("Ctrl+R  F5", "interactive console or desktop: restart it"),
+            (
+                "Ctrl+T",
+                "desktop (VNC): send the keyboard and mouse to it, or keep them here (view-only)",
+            ),
+            (
+                "F6",
+                "show the next view of the target (graphical or serial console)",
+            ),
             ("PgUp PgDn Home End", "scroll the focused log or console"),
             (
                 "mouse",
@@ -2613,6 +3138,10 @@ impl App {
             title.push_str(&format!(" · ↑{}", self.extra_scroll));
         }
         title.push(' ');
+        if cmd.vnc.is_some() {
+            self.draw_vnc_pane(f, area, (idx, c), title);
+            return;
+        }
         if cmd.interactive && slot.screen.is_some() {
             self.draw_console(f, area, (idx, c), title);
             return;
@@ -2799,6 +3328,48 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    #[test]
+    fn terminal_input_hangup_detects_closed_pipe() {
+        let mut pipe = [-1; 2];
+        // SAFETY: pipe initializes both descriptors in the supplied array.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        // SAFETY: pipe returned two newly-owned descriptors.
+        let reader = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+        // SAFETY: pipe returned two newly-owned descriptors.
+        let writer = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+
+        assert!(!terminal_input_hung_up(reader.as_raw_fd()));
+        drop(writer);
+        assert!(terminal_input_hung_up(reader.as_raw_fd()));
+    }
+
+    #[test]
+    fn terminal_input_hangup_detects_closed_pty_master() {
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: openpty initializes both descriptors on success.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        // SAFETY: openpty returned two newly-owned descriptors.
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        // SAFETY: openpty returned two newly-owned descriptors.
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+
+        assert!(!terminal_input_hung_up(slave.as_raw_fd()));
+        drop(master);
+        assert!(terminal_input_hung_up(slave.as_raw_fd()));
+    }
+
     fn app(n: usize) -> App {
         App {
             targets: (0..n)
@@ -2842,6 +3413,7 @@ mod tests {
             console_size: (24, 80),
             restart_wait: None,
             extra_pct: 50,
+            vnc: VncState::default(),
             msg_tx: mpsc::channel().0,
         }
     }
@@ -3666,6 +4238,210 @@ mod tests {
         let out = render(&mut a, 160, 40);
         assert!(out.contains("Ctrl+R  F5"), "{out}");
         a.stop_extra(true);
+    }
+
+    fn vnc_endpoint(view_only: bool) -> crate::console::VncEndpoint {
+        crate::console::VncEndpoint {
+            source: crate::console::VncSource::Direct(crate::console::DirectVnc {
+                host: "127.0.0.1".into(),
+                port: 5900,
+                allow_remote: false,
+            }),
+            password_file: None,
+            view_only,
+            quality: None,
+            compression: None,
+            resize_remote: false,
+        }
+    }
+
+    /// A dashboard whose only target has a VNC pane (and a second, plain
+    /// view), with terminal graphics ruled out: no session is ever started.
+    fn vnc_app(view_only: bool) -> App {
+        let mut a = app(1);
+        let vnc = ExtraCmd {
+            label: "vnc".into(),
+            command: "VNC".into(),
+            interactive: false,
+            vnc: Some(vnc_endpoint(view_only)),
+        };
+        set_extras(&mut a, vec![vnc, ExtraCmd::parse("other=echo hi")]);
+        a.focus = Focus::Extra;
+        a.vnc.checked = true;
+        a.vnc.problem = Some("no graphics in tests".into());
+        a
+    }
+
+    #[test]
+    fn a_vnc_pane_takes_the_keyboard_like_a_console() {
+        let mut a = vnc_app(false);
+        render(&mut a, 160, 40);
+        assert_eq!(a.vnc_cmd(), Some((0, 0)));
+        assert!(a.console_captured());
+        // The dashboard does not act on the keys meant for the desktop.
+        a.key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!a.quit);
+        // `C` remains the dashboard's fullscreen toggle while VNC owns keys.
+        a.key(KeyCode::Char('C'), KeyModifiers::NONE);
+        assert!(a.extra_full);
+        assert!(a.focus == Focus::Extra);
+        a.key(KeyCode::Char('C'), KeyModifiers::NONE);
+        assert!(!a.extra_full);
+        // Ctrl+] gives the keyboard back.
+        a.key(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        assert!(a.focus == Focus::List);
+        assert!(!a.console_captured());
+        // Shift+Up returns from fullscreen to the dashboard and changes focus.
+        a.focus = Focus::Extra;
+        a.key(KeyCode::Char('C'), KeyModifiers::NONE);
+        a.key(KeyCode::Up, KeyModifiers::SHIFT);
+        assert!(!a.extra_full);
+        assert!(a.focus == Focus::Activity);
+    }
+
+    #[test]
+    fn vnc_footer_only_advertises_f6_when_another_view_exists() {
+        let mut one_view = vnc_app(false);
+        one_view.targets[0].cmds.truncate(1);
+        one_view.targets[0].extra.truncate(1);
+        one_view.targets[0].extra[0].running = true;
+        let text = render(&mut one_view, 160, 40);
+        assert!(!text.contains("F6"), "{text}");
+
+        let mut multiple_views = vnc_app(false);
+        multiple_views.targets[0].extra[0].running = true;
+        let text = render(&mut multiple_views, 160, 40);
+        assert!(text.contains("F6 next view"), "{text}");
+    }
+
+    #[test]
+    fn a_view_only_desktop_leaves_the_keyboard_to_the_dashboard() {
+        let mut a = vnc_app(true);
+        render(&mut a, 160, 40);
+        assert!(a.vnc_view_only(0, 0));
+        assert!(!a.console_captured());
+        // Ctrl+T hands the keyboard to the desktop, and takes it back.
+        a.key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert!(!a.vnc_view_only(0, 0));
+        assert!(a.console_captured());
+        a.key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert!(a.vnc_view_only(0, 0));
+        assert!(!a.console_captured());
+        // The reserved keys work either way.
+        a.key(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        assert!(a.focus == Focus::List);
+    }
+
+    #[test]
+    fn shift_arrows_still_move_the_focus_out_of_a_vnc_pane() {
+        let mut a = vnc_app(false);
+        render(&mut a, 160, 40);
+        a.key(KeyCode::Up, KeyModifiers::SHIFT);
+        assert!(a.focus != Focus::Extra);
+    }
+
+    #[test]
+    fn f6_cycles_the_views_of_a_target() {
+        let mut a = vnc_app(false);
+        render(&mut a, 160, 40);
+        assert_eq!(a.console_cmd(), Some((0, 0)));
+        a.key(KeyCode::F(6), KeyModifiers::NONE);
+        assert_eq!(a.extra_c(0), 1);
+        // The second view is not a console: F6 is the dashboard's again.
+        a.key(KeyCode::F(6), KeyModifiers::NONE);
+        assert_eq!(a.extra_c(0), 0);
+        assert_eq!(a.vnc_cmd(), Some((0, 0)));
+    }
+
+    #[test]
+    fn restarting_a_vnc_pane_forgets_how_the_last_session_ended() {
+        for restart in [
+            (KeyCode::Char('r'), KeyModifiers::CONTROL),
+            (KeyCode::F(5), KeyModifiers::NONE),
+        ] {
+            let mut a = vnc_app(false);
+            render(&mut a, 160, 40);
+            a.fetch_vnc(0, 0);
+            // Graphics are ruled out: the pane says so and nothing connects.
+            assert!(a.vnc.run.is_none());
+            assert!(a.targets[0].extra[0].finished_at.is_some());
+            assert_eq!(a.targets[0].extra[0].vnc_note, "no graphics in tests");
+            assert!(!a.console_captured());
+            a.key(restart.0, restart.1);
+            assert!(a.targets[0].extra[0].finished_at.is_none());
+            assert!(a.targets[0].extra[0].vnc_note.is_empty());
+            // The terminal is asked again.
+            assert!(!a.vnc.checked);
+            assert!(a.console_captured());
+        }
+    }
+
+    #[test]
+    fn the_problem_is_shown_in_the_pane() {
+        let mut a = vnc_app(false);
+        a.fetch_vnc(0, 0);
+        let out = render(&mut a, 160, 40);
+        assert!(out.contains("no graphics in tests"), "{out}");
+        assert!(out.contains("Ctrl+R or F5"), "{out}");
+    }
+
+    #[test]
+    fn an_unencrypted_endpoint_is_labelled() {
+        let mut a = vnc_app(false);
+        let local = render(&mut a, 160, 40);
+        assert!(!local.contains("UNENCRYPTED"), "{local}");
+        for t in &mut a.targets {
+            let v = t.cmds[0].vnc.as_mut().unwrap();
+            v.source = crate::console::VncSource::Direct(crate::console::DirectVnc {
+                host: "192.0.2.10".into(),
+                port: 5900,
+                allow_remote: true,
+            });
+        }
+        let remote = render(&mut a, 160, 40);
+        assert!(remote.contains("UNENCRYPTED"), "{remote}");
+    }
+
+    #[test]
+    fn vnc_panes_render_at_any_size() {
+        for (w, h) in [(1, 1), (10, 5), (30, 8), (45, 40), (80, 24), (200, 10)] {
+            let mut a = vnc_app(false);
+            render(&mut a, w, h);
+            a.fetch_vnc(0, 0);
+            render(&mut a, w, h);
+            a.extra_full = true;
+            render(&mut a, w, h);
+            a.help = true;
+            render(&mut a, w, h);
+        }
+    }
+
+    #[test]
+    fn discover_reads_the_vnc_file_next_to_the_console_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("web.env"), "HOST=h.example\n").unwrap();
+        std::fs::write(
+            dir.path().join("web.vnc.json"),
+            r#"{"type":"vnc","parameters":{"port":5901,"viewOnly":true}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("db.env"), "HOST=d.example\n").unwrap();
+        let sources = discover(&[dir.path().to_path_buf()]).unwrap();
+        let web = sources.iter().find(|s| s.name == "web").unwrap();
+        let v = web.extras.iter().find_map(|c| c.vnc.as_ref()).unwrap();
+        let crate::console::VncSource::Direct(d) = &v.source else {
+            panic!("not a direct endpoint")
+        };
+        assert_eq!(
+            (d.host.as_str(), d.port, v.view_only),
+            ("127.0.0.1", 5901, true)
+        );
+        let db = sources.iter().find(|s| s.name == "db").unwrap();
+        assert!(db.extras.iter().all(|c| c.vnc.is_none()));
+        // A bad file is an error naming the file, not a silent skip.
+        std::fs::write(dir.path().join("web.vnc.json"), "{").unwrap();
+        let err = format!("{:#}", discover(&[dir.path().to_path_buf()]).err().unwrap());
+        assert!(err.contains("web.vnc.json"), "{err}");
     }
 
     #[test]

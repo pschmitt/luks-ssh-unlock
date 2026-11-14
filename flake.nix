@@ -66,6 +66,12 @@
                     {
                       services.luks-ssh-unlock = {
                         enable = true;
+                        helper = {
+                          enable = true;
+                          users = [ "alice" ];
+                          adminUsers = [ "bob" ];
+                          protectConfig = true;
+                        };
                         instances.smoke = {
                           hostname = "target.example.invalid";
                           key = "/run/secrets/ssh_key";
@@ -73,6 +79,11 @@
                           console = {
                             type = "oci";
                             parameters.identity = "/home/user/.ssh/id_rsa";
+                          };
+                          vnc = {
+                            port = 5901;
+                            passwordFile = "/run/secrets/vnc";
+                            viewOnly = true;
                           };
                           dhcpListener = {
                             enable = true;
@@ -94,7 +105,41 @@
                 start = builtins.unsafeDiscardStringContext services.luks-ssh-unlock-smoke.serviceConfig.ExecStart;
                 dhcp = builtins.unsafeDiscardStringContext services.luks-ssh-unlock-dhcp-listener-smoke.serviceConfig.ExecStart;
                 console = builtins.fromJSON nixos.config.environment.etc."luks-ssh-unlock/smoke.console.json".text;
+                vnc = builtins.fromJSON nixos.config.environment.etc."luks-ssh-unlock/smoke.vnc.json".text;
+                inherit (nixos.config.systemd) sockets;
+                basicHelper = services."luks-ssh-unlock-helper-basic@".serviceConfig;
+                adminHelper = services."luks-ssh-unlock-helper-admin@".serviceConfig;
+                users = nixos.config.users.users;
               in
+              # The helper's sockets decide what a connection may do: each is
+              # reachable by its own group only, never by everyone.
+              assert sockets.luks-ssh-unlock-helper-basic.socketConfig.SocketMode == "0660";
+              assert sockets.luks-ssh-unlock-helper-basic.socketConfig.SocketGroup == "luks-ssh-unlock";
+              assert sockets.luks-ssh-unlock-helper-admin.socketConfig.SocketMode == "0660";
+              assert sockets.luks-ssh-unlock-helper-admin.socketConfig.SocketGroup == "luks-ssh-unlock-admin";
+              assert sockets.luks-ssh-unlock-helper-basic.socketConfig.Accept;
+              assert nixpkgs.lib.hasInfix "helper serve --policy basic" (
+                builtins.unsafeDiscardStringContext basicHelper.ExecStart
+              );
+              assert nixpkgs.lib.hasInfix "--policy admin" (
+                builtins.unsafeDiscardStringContext adminHelper.ExecStart
+              );
+              assert basicHelper.CapabilityBoundingSet == [ "" ] && basicHelper.NoNewPrivileges;
+              assert basicHelper.StandardInput == "socket";
+              assert builtins.elem "luks-ssh-unlock" users.alice.extraGroups;
+              assert !(builtins.elem "luks-ssh-unlock-admin" users.alice.extraGroups);
+              assert builtins.elem "luks-ssh-unlock-admin" users.bob.extraGroups;
+              assert nixos.config.environment.etc."luks-ssh-unlock/smoke.env".mode == "0600";
+              assert vnc.type == "vnc";
+              assert
+                vnc.parameters == {
+                  host = "127.0.0.1";
+                  port = 5901;
+                  passwordFile = "/run/secrets/vnc";
+                  viewOnly = true;
+                  resizeRemote = false;
+                  allowRemote = false;
+                };
               assert console.type == "oci";
               assert console.parameters.identity == "/home/user/.ssh/id_rsa";
               assert start == builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock";
@@ -145,6 +190,7 @@
         key = "github:pschmitt/luks-ssh-unlock#nixosModules.default";
         imports = [
           ./nix/module.nix
+          ./nix/helper.nix
           (
             { lib, pkgs, ... }:
             {
