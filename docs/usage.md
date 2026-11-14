@@ -49,15 +49,15 @@ use that user's own keys and environment. It never re-runs itself under
 "Privileged helper" below); without the helper, such a target shows an error
 instead of a state.
 
-On a narrow or tall terminal (under 80 columns, or taller than about two
-thirds of its width, such as a phone) the panes are stacked instead: targets
-on top, then the activity. `Shift`+`Up`/`Down` moves the
-focus between them.
-
-The target list (as wide as its content needs) and the activity share the
-upper part of the screen, side by side; the extra command pane, if configured,
-takes the full width below them. Each target shows its state and, when it has
-a healthcheck, a green or red `●` next to it. The activity is the service's
+The top line names the selected target with its state, and how many targets
+are in each state (`●` unlocked, `○` unreachable, `✖` errors, `⚠` stopped
+services). There is no permanent target list: `Ctrl+P` or `/` (or a click on
+the top line) opens the host switcher, a popup with every target and its
+state; typing filters it by name or host, `Enter` (or a click) switches, `Esc`
+goes back to the target it was opened on. Below the top line, the console
+(extra command pane, if configured) and the activity take the full width, one
+above the other; `Shift`+`Up`/`Down` moves the focus from the top line to the
+console and the activity. The activity is the service's
 journal (`journalctl -u luks-ssh-unlock-<name>.service`, live) interleaved
 with what the dashboard itself does (check results, unlocks), marked `svc` and
 `tui`. `i` shows the selected target's details (route, LUKS method,
@@ -65,14 +65,14 @@ healthcheck, integrity checks, host keys, uptime) in a dialog.
 
 | Key | Action |
 | --- | --- |
-| `Up`/`Down`, `j`/`k` | Select a target (scroll, when the activity has the focus) |
-| `Shift`+arrows, `Tab`/`Shift`+`Tab` | Move the focus to another pane (highlighted border) |
+| `Ctrl+P`, `/` | Open the host switcher: type to filter, `Enter` switches, `Esc` cancels |
+| `Up`/`Down`, `j`/`k` | Next / previous target while the top line has the focus (scroll, when a pane has it) |
+| `Shift`+`Up`/`Down`, `Tab`/`Shift`+`Tab` | Move the focus: top line, console, activity |
 | `i` | Details of the selected target, in a dialog; any key closes it |
 | Arrows | Also move the focus when the focused pane has no use for them |
 | `l` | Show the activity full screen; `l` or `Esc` goes back |
 | `C` | Show the console (extra command pane) full screen; `C` or `Esc` goes back |
 | `?` | Show the keys; any key closes it |
-| `/` | Filter the targets by name or host while typing; `Enter` keeps the filter, `Esc` clears it |
 | `c` | Next extra command (see below) |
 | `r` / `R` | Check the selected target / every target now |
 | `u` | Unlock the selected target, after confirmation. All checks still apply. |
@@ -82,10 +82,10 @@ healthcheck, integrity checks, host keys, uptime) in a dialog.
 | `q`, `Esc` | Quit (`Esc` closes the full-screen activity first) |
 | `Ctrl+]`, `Ctrl+R`/`F5` | In an interactive console, which has the keyboard otherwise: back to the dashboard, restart the console (see [Interactive consoles](#interactive-consoles)) |
 
-With a mouse: click a target to select it, double-click to unlock it (the
-confirmation dialog has clickable **Yes** and **Cancel** buttons), click a
-pane to focus it, scroll the wheel over the target list or the activity, and
-drag the borders between the panes to resize them.
+With a mouse: click the top line to open the switcher and a target in it to
+switch, click a pane to focus it, scroll the wheel over the activity or the
+console, and drag the border between them to resize them. The confirmation
+dialog has clickable **Yes** and **Cancel** buttons.
 
 ### Extra command pane
 
@@ -134,7 +134,7 @@ keys stay with the dashboard:
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+]` | Give the keyboard back: the target list gets the focus, the console keeps running. Also leaves the full-screen console. |
+| `Ctrl+]` | Give the keyboard back: the top line gets the focus, the console keeps running. Also leaves the full-screen console. |
 | `Ctrl+R`, `F5` | Restart the console: the program is stopped (and may clean up first), then started again. Also works when it has ended. |
 | `Shift`+arrows | Move the focus to another pane, as everywhere. |
 | `Shift`+`PageUp`/`PageDown`, wheel | Scroll back through the console's history; typing goes back to the end. |

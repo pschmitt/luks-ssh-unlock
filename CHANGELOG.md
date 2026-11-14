@@ -116,9 +116,13 @@ options and the container interface are compatible.
   same loading screen (spinner, current step, elapsed time, a hint when it
   takes long) until the console is there. LSU's own console commands report
   their steps to it instead of printing them into the pane.
-- `tui`: panes are framed by their title line only (the target list keeps one
-  rule beside the activity), and the pane hints sit in that line, so consoles
-  and pictures get the space the boxes took.
+- `tui`: panes are framed by their title line only, and the pane hints sit in
+  that line, so consoles and pictures get the space the boxes took.
+- `tui`: no permanent target list. The top line names the selected target and
+  its state and counts the fleet's states; `Ctrl+P` or `/` (or a click on the
+  top line) opens a host switcher popup (type to filter, `Enter` switches,
+  `Esc` goes back). The console and the activity take the full width, the
+  console on top.
 - `tui`: the streamed OpenStack console log no longer shows the visible rest
   of escape sequences (`[0;32m`), which Nova keeps when it drops the ESC bytes.
 

@@ -45,7 +45,6 @@ const EXTRA_LINES: usize = 2000;
 const EXTRA_GRACE: Duration = Duration::from_secs(5);
 /// Minimum time between two checks triggered by new journal lines.
 const EVENT_PROBE_GAP: Duration = Duration::from_secs(2);
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const WHEEL_LINES: usize = 3;
 pub const DEFAULT_CONFIG_DIR: &str = "/etc/luks-ssh-unlock";
 
@@ -1107,9 +1106,7 @@ enum Dir {
 /// A pane border that can be dragged with the mouse.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Edge {
-    /// Between the target list and the activity.
-    List,
-    /// Between the activity and the extra pane.
+    /// Between the console (above) and the activity.
     Extra,
 }
 
@@ -1133,16 +1130,13 @@ struct App {
     /// The selected target's details are shown (`i`).
     info: bool,
     drag: Option<Edge>,
-    /// Pane sizes set by dragging the borders (otherwise sized to their
-    /// content): landscape list width, and portrait list height.
-    land_list_w: Option<u16>,
-    port_list_h: Option<u16>,
     /// Screen areas of the last frame, for mouse hit-testing.
     hit: Hit,
-    last_click: Option<(Instant, usize)>,
-    /// Target filter (`/`): typed text, and whether it is being edited.
+    /// The host switcher (`Ctrl+P`, `/`): its filter, whether it is open, and
+    /// the host that was selected when it opened (Esc goes back to it).
     filter: String,
     filtering: bool,
+    switch_from: Option<usize>,
     /// Optional extra commands, shown in a fourth pane; `c` switches.
     has_extras: bool,
     extra_idx: usize,
@@ -1167,13 +1161,16 @@ struct App {
 #[derive(Default)]
 struct Hit {
     body: Rect,
+    /// The host line on top (a click opens the switcher).
+    header: Rect,
+    /// The switcher popup, and its rows of hosts.
+    switcher: Rect,
     list: Rect,
     logs: Rect,
     extra: Rect,
     /// The activity and the extra pane together, and the border between them.
     split: Rect,
     edge_extra: Rect,
-    edge_list: Rect,
     yes: Rect,
     cancel: Rect,
     dialog: Rect,
@@ -1585,10 +1582,8 @@ pub fn run(
         help: false,
         info: false,
         drag: None,
-        land_list_w: None,
-        port_list_h: None,
         hit: Hit::default(),
-        last_click: None,
+        switch_from: None,
         filter,
         filtering: false,
         has_extras,
@@ -2233,12 +2228,11 @@ impl App {
             let n = self.visible().len();
             let pos = self.list.selected().unwrap_or(0);
             match code {
-                KeyCode::Esc => {
-                    self.filter.clear();
-                    self.filtering = false;
-                    self.set_filter();
+                KeyCode::Esc => self.close_switcher(None),
+                KeyCode::Enter => {
+                    let chosen = self.visible().get(pos).copied();
+                    self.close_switcher(chosen);
                 }
-                KeyCode::Enter => self.filtering = false,
                 KeyCode::Backspace => {
                     self.filter.pop();
                     self.set_filter();
@@ -2293,7 +2287,12 @@ impl App {
                 self.logs_full = false;
                 self.extra_full = false;
             }
-            KeyCode::Char('/') if !self.targets.is_empty() => self.filtering = true,
+            KeyCode::Char('/') if !self.targets.is_empty() => self.open_switcher(),
+            KeyCode::Char('p')
+                if mods.contains(KeyModifiers::CONTROL) && !self.targets.is_empty() =>
+            {
+                self.open_switcher()
+            }
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 self.set_filter();
@@ -2398,16 +2397,16 @@ impl App {
         if self.logs_full || self.extra_full {
             return;
         }
+        // Top to bottom: the host line, the console, the activity.
         let extra = self.has_extras;
-        self.focus = match (self.portrait, self.focus, dir) {
-            (false, Focus::List, Dir::Right) => Focus::Activity,
-            (false, Focus::Activity, Dir::Left) => Focus::List,
-            (false, Focus::List, Dir::Down) if extra => Focus::Extra,
-            (true, Focus::List, Dir::Down) => Focus::Activity,
-            (true, Focus::Activity, Dir::Up) => Focus::List,
-            (_, Focus::Activity, Dir::Down) if extra => Focus::Extra,
-            (_, Focus::Extra, Dir::Up) => Focus::Activity,
-            (_, f, _) => f,
+        self.focus = match (self.focus, dir) {
+            (Focus::List, Dir::Down) if extra => Focus::Extra,
+            (Focus::List, Dir::Down) => Focus::Activity,
+            (Focus::Extra, Dir::Up) => Focus::List,
+            (Focus::Extra, Dir::Down) => Focus::Activity,
+            (Focus::Activity, Dir::Up) if extra => Focus::Extra,
+            (Focus::Activity, Dir::Up) => Focus::List,
+            (f, _) => f,
         };
     }
 
@@ -2415,10 +2414,11 @@ impl App {
         if self.logs_full || self.extra_full {
             return;
         }
-        let mut order = vec![Focus::List, Focus::Activity];
+        let mut order = vec![Focus::List];
         if self.has_extras {
             order.push(Focus::Extra);
         }
+        order.push(Focus::Activity);
         let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         let len = order.len();
         self.focus = order[if forward {
@@ -2429,28 +2429,18 @@ impl App {
     }
 
     /// Move the dragged border to the pointer.
-    fn resize(&mut self, x: u16, y: u16) {
+    fn resize(&mut self, y: u16) {
         let body = self.hit.body;
         if body.width == 0 || body.height == 0 {
             return;
         }
-        match (self.portrait, self.drag) {
-            (false, Some(Edge::List)) => {
-                let w = x.saturating_sub(body.x) + 1;
-                self.land_list_w = Some(w.clamp(15, body.width.saturating_sub(20).max(15)));
+        if self.drag == Some(Edge::Extra) {
+            // The console is on top: its height is where the border is.
+            let area = self.hit.split;
+            if area.height > 0 {
+                let h = u32::from(y.saturating_sub(area.y) + 1);
+                self.extra_pct = (h * 100 / u32::from(area.height)).clamp(15, 85) as u16;
             }
-            (true, Some(Edge::List)) => {
-                let h = y.saturating_sub(body.y) + 1;
-                self.port_list_h = Some(h.clamp(4, body.height.saturating_sub(8).max(4)));
-            }
-            (_, Some(Edge::Extra)) => {
-                let area = self.hit.split;
-                if area.height > 0 {
-                    let h = u32::from(area.bottom().saturating_sub(y));
-                    self.extra_pct = (h * 100 / u32::from(area.height)).clamp(15, 85) as u16;
-                }
-            }
-            _ => {}
         }
     }
 
@@ -2498,18 +2488,19 @@ impl App {
         }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.drag = if contains(self.hit.edge_list, x, y) {
-                    Some(Edge::List)
-                } else if contains(self.hit.edge_extra, x, y) {
-                    Some(Edge::Extra)
-                } else {
-                    None
-                };
+                self.drag = contains(self.hit.edge_extra, x, y).then_some(Edge::Extra);
                 if self.drag.is_some() {
                     return;
                 }
-                if contains(self.hit.list, x, y) {
+                if self.filtering {
+                    if !contains(self.hit.switcher, x, y) {
+                        self.close_switcher(None);
+                    }
+                } else if contains(self.hit.header, x, y) && !self.targets.is_empty() {
+                    // The host's name is the way to the switcher.
                     self.focus = Focus::List;
+                    self.open_switcher();
+                    return;
                 } else if contains(self.hit.logs, x, y) {
                     self.focus = Focus::Activity;
                 } else if contains(self.hit.extra, x, y) {
@@ -2517,7 +2508,7 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.drag.is_some() => {
-                self.resize(x, y);
+                self.resize(y);
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag = None,
@@ -2547,21 +2538,11 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 let list = self.hit.list;
-                if contains(list, x, y) {
-                    // Two text rows per item, below the title line.
-                    if y > list.y && y < list.y + list.height {
-                        let idx = self.list.offset() + usize::from(y - list.y - 1) / 2;
-                        if idx < n {
-                            self.select(idx);
-                            let double = self
-                                .last_click
-                                .is_some_and(|(at, i)| i == idx && at.elapsed() < DOUBLE_CLICK);
-                            self.last_click = Some((Instant::now(), idx));
-                            if double && self.targets[vis[idx]].tx.is_some() {
-                                self.last_click = None;
-                                self.confirm = Some((vis[idx], false));
-                            }
-                        }
+                if self.filtering && contains(list, x, y) {
+                    // One row per host in the switcher; a click switches.
+                    let idx = self.list.offset() + usize::from(y - list.y);
+                    if idx < n {
+                        self.close_switcher(Some(vis[idx]));
                     }
                 }
             }
@@ -2577,7 +2558,6 @@ impl App {
         ])
         .areas(f.area());
         let area = f.area();
-        self.hit.edge_list = Rect::default();
         self.hit.extra = Rect::default();
         self.hit.edge_extra = Rect::default();
         // The remote desktop's image is only drawn where a frame puts it.
@@ -2586,111 +2566,28 @@ impl App {
         // Cells are about twice as tall as wide: below this the side-by-side
         // layout is cramped, so stack the panes instead.
         self.portrait = area.width < 80 || u32::from(area.width) * 2 < u32::from(area.height) * 3;
-        let (upper, wide_extra) = if !self.portrait && self.has_extras && !self.logs_full {
-            let [upper, extra] = Layout::vertical([
-                Constraint::Percentage(100 - self.extra_pct),
+        // No permanent target list: the console on top, the activity below,
+        // and the host switcher (Ctrl+P, /) when it is asked for.
+        // A target without a console gives the activity the whole body.
+        let own_console = !self.visible().is_empty()
+            && !self.targets.is_empty()
+            && !self.targets[self.selected()].cmds.is_empty();
+        let (logs, extra) = if self.has_extras && own_console && !self.logs_full {
+            let [extra, logs] = Layout::vertical([
                 Constraint::Percentage(self.extra_pct),
+                Constraint::Percentage(100 - self.extra_pct),
             ])
             .areas(body);
             self.hit.split = body;
-            self.hit.edge_extra =
-                Rect::new(upper.x, upper.bottom().saturating_sub(1), upper.width, 2);
-            (upper, Some(extra))
+            self.hit.edge_extra = Rect::new(logs.x, logs.y.saturating_sub(1), logs.width, 2);
+            (logs, Some(extra))
         } else {
             (body, None)
         };
-        let (left, logs) = if self.portrait {
-            // Two rows per target, but never more than a third of the screen
-            // unless dragged there.
-            let auto = (self.targets.len() as u16)
-                .saturating_mul(2)
-                .saturating_add(2)
-                .clamp(4, (body.height / 3).max(4));
-            let list_h = self
-                .port_list_h
-                .map_or(auto, |h| h.clamp(4, body.height.saturating_sub(8).max(4)));
-            let [l, g] =
-                Layout::vertical([Constraint::Length(list_h), Constraint::Min(4)]).areas(body);
-            self.hit.edge_list = Rect::new(body.x, l.bottom().saturating_sub(1), body.width, 2);
-            (l, g)
-        } else {
-            // The list is as wide as its content needs, alongside the activity.
-            let content_w = self
-                .targets
-                .iter()
-                .map(|t| {
-                    let warn = t.unit.as_ref().is_some_and(|u| u.warning().is_some());
-                    let title = 2 + t.name.chars().count() + if warn { 10 } else { 0 };
-                    title.max(3 + summary(t).1.chars().count())
-                })
-                .max()
-                .unwrap_or(0) as u16
-                + 4; // borders and the highlight symbol
-            let list_w = self
-                .land_list_w
-                .map_or(content_w.clamp(24, (body.width * 2 / 5).max(24)), |w| {
-                    w.clamp(15, body.width.saturating_sub(20).max(15))
-                });
-            let [left, right] =
-                Layout::horizontal([Constraint::Length(list_w), Constraint::Min(10)]).areas(upper);
-            self.hit.edge_list =
-                Rect::new(left.right().saturating_sub(1), upper.y, 2, upper.height);
-            (left, right)
-        };
-        let (logs, extra) = if !self.portrait || !self.has_extras || self.logs_full {
-            (logs, wide_extra)
-        } else {
-            let [a, b] = Layout::vertical([
-                Constraint::Percentage(100 - self.extra_pct),
-                Constraint::Percentage(self.extra_pct),
-            ])
-            .areas(logs);
-            self.hit.split = logs;
-            self.hit.edge_extra = Rect::new(a.x, a.bottom().saturating_sub(1), a.width, 2);
-            (a, Some(b))
-        };
         self.hit.body = body;
 
-        let inactive = self
-            .targets
-            .iter()
-            .filter(|t| t.unit.as_ref().is_some_and(|u| u.warning().is_some()))
-            .count();
-        f.render_widget(
-            Line::from(vec![
-                " luks-ssh-unlock ".bold().reversed(),
-                if self.portrait {
-                    format!(
-                        " {} · {}",
-                        self.targets.len(),
-                        chrono::Local::now().format("%H:%M:%S")
-                    )
-                } else {
-                    format!(
-                        "  {} target(s) · refresh every {}s · {}",
-                        self.targets.len(),
-                        self.refresh.as_secs(),
-                        chrono::Local::now().format("%H:%M:%S")
-                    )
-                }
-                .dim(),
-                if inactive > 0 {
-                    format!(
-                        "  ⚠ {inactive} {}",
-                        if self.portrait {
-                            "svc down"
-                        } else {
-                            "service(s) not running"
-                        }
-                    )
-                    .yellow()
-                    .bold()
-                } else {
-                    Span::raw("")
-                },
-            ]),
-            header,
-        );
+        self.hit.header = header;
+        f.render_widget(self.header_line(), header);
 
         if self.targets.is_empty() {
             f.render_widget(
@@ -2704,15 +2601,13 @@ impl App {
         } else {
             let sel = self.selected();
             let any = !self.visible().is_empty();
+            self.hit.list = Rect::default();
             if self.logs_full && any {
-                self.hit.list = Rect::default();
                 self.draw_logs(f, body, sel);
             } else if self.extra_full && any && self.has_extras {
-                self.hit.list = Rect::default();
                 self.hit.logs = Rect::default();
                 self.draw_extra(f, body, sel);
             } else {
-                self.draw_list(f, left);
                 if any {
                     self.draw_logs(f, logs, sel);
                     if let Some(extra) = extra {
@@ -2806,9 +2701,9 @@ impl App {
                 pick(
                     footer.width,
                     &[
-                        " filter: type to match name or host · ↑↓ select · ⏎ keep filter · Esc clear",
-                        " type to filter · ⏎ keep · Esc clear",
-                        " ⏎ keep · Esc clear",
+                        " switch host: type to match name or host · ↑↓ select · ⏎ switch · Esc cancel",
+                        " type to filter · ↑↓ · ⏎ switch · Esc cancel",
+                        " ⏎ switch · Esc cancel",
                     ],
                 )
                 .yellow(),
@@ -2830,10 +2725,10 @@ impl App {
                 pick(
                     footer.width,
                     &[
-                        " ↑↓/jk/click select · ⇧←↑↓→/Tab focus pane · drag borders resize · / filter · i details · r/R refresh · u/double-click unlock · F force · S service · l full-screen activity · C full-screen console · c next command · ? help · q quit",
-                        " ↑↓ select · / filter · i info · ⇧arrows/Tab focus · r/R refresh · u unlock · F force · S service · l log · C console · ? help · q quit",
-                        " ↑↓ select · r refresh · u unlock · q quit",
-                        " ↑↓ · r · u · q",
+                        " Ctrl+P / switch host · ↑↓ next/previous host · ⇧↑↓/Tab focus pane · drag the border to resize · i details · r/R refresh · u unlock · F force · S service · l full-screen activity · C full-screen console · c next view · ? help · q quit",
+                        " Ctrl+P switch host · ↑↓ host · ⇧↑↓/Tab focus · i info · r/R refresh · u unlock · F force · S service · l log · C console · ? help · q quit",
+                        " Ctrl+P switch · ↑↓ host · r refresh · u unlock · q quit",
+                        " ^P · ↑↓ · r · u · q",
                     ],
                 )
                 .dim(),
@@ -2841,6 +2736,9 @@ impl App {
         };
         f.render_widget(hints, footer);
 
+        if self.filtering {
+            self.draw_switcher(f);
+        }
         if let Some((idx, force)) = self.confirm {
             self.draw_confirm(f, idx, force);
         }
@@ -2859,7 +2757,10 @@ impl App {
                 "select a target (scroll in the focused log or console)",
             ),
             ("⇧+arrows  Tab", "move the focus to another pane"),
-            ("/", "filter targets by name or host (⏎ keeps, Esc clears)"),
+            (
+                "Ctrl+P  /",
+                "switch host: type to filter by name or host, ⏎ switches, Esc cancels",
+            ),
             ("r  R", "check the selected target / all targets now"),
             ("i", "details of the selected target (dialog)"),
             ("u", "unlock the selected target (asks first)"),
@@ -2912,48 +2813,113 @@ impl App {
         );
     }
 
-    fn draw_list(&mut self, f: &mut Frame, area: Rect) {
-        let vis = self.visible();
-        if self.list.selected().is_some_and(|p| p >= vis.len()) {
-            self.list.select(Some(vis.len().saturating_sub(1)));
+    /// The line on top: the selected host and its state, the fleet at a
+    /// glance, and the way to the switcher.
+    fn header_line(&self) -> Line<'static> {
+        let mut spans = Vec::new();
+        if self.visible().is_empty() || self.targets.is_empty() {
+            spans.push(" luks-ssh-unlock ".bold().reversed());
+        } else {
+            let t = &self.targets[self.selected()];
+            let (icon, label, color) = summary(t);
+            spans.push(Span::styled(format!(" {icon} "), Style::new().fg(color)));
+            let name = Span::styled(format!("{} ▾", t.name), Style::new().bold());
+            spans.push(if self.focus == Focus::List {
+                name.cyan()
+            } else {
+                name
+            });
+            spans.push(Span::styled(format!("  {label}"), Style::new().fg(color)));
+            if let Some(b) = t.busy {
+                spans.push(Span::styled(format!(" · {b}…"), Style::new().fg(color)));
+            }
         }
+        // The fleet: how many hosts are in each state.
+        let mut counts: Vec<(&'static str, Color, usize)> = Vec::new();
+        for t in &self.targets {
+            let (icon, _, color) = summary(t);
+            match counts.iter_mut().find(|(i, _, _)| *i == icon) {
+                Some(entry) => entry.2 += 1,
+                None => counts.push((icon, color, 1)),
+            }
+        }
+        spans.push(Span::raw("   "));
+        for (icon, color, n) in counts {
+            spans.push(Span::styled(
+                format!("{icon} {n}  "),
+                Style::new().fg(color),
+            ));
+        }
+        let inactive = self
+            .targets
+            .iter()
+            .filter(|t| t.unit.as_ref().is_some_and(|u| u.warning().is_some()))
+            .count();
+        if inactive > 0 {
+            spans.push(
+                format!("⚠ {inactive} service(s) not running  ")
+                    .yellow()
+                    .bold(),
+            );
+        }
+        spans.push(
+            format!(
+                "Ctrl+P switch · {}",
+                chrono::Local::now().format("%H:%M:%S")
+            )
+            .dim(),
+        );
+        Line::from(spans)
+    }
+
+    /// Open the host switcher on the selected host.
+    fn open_switcher(&mut self) {
+        let current = self.selected();
+        self.switch_from = Some(current);
+        self.filter.clear();
+        self.filtering = true;
+        self.list.select(Some(current));
+    }
+
+    /// Close the switcher on CHOSEN (a target index), or back on the host it
+    /// was opened on.
+    fn close_switcher(&mut self, chosen: Option<usize>) {
+        let back = self.switch_from.take();
+        let target = chosen.or(back).unwrap_or(0);
+        self.filtering = false;
+        self.filter.clear();
+        // Without a filter every host is visible, at its own index.
+        self.select(target.min(self.targets.len().saturating_sub(1)));
+    }
+
+    /// The host switcher: the hosts that match what is typed, one per line.
+    fn draw_switcher(&mut self, f: &mut Frame) {
+        let vis = self.visible();
         let items: Vec<ListItem> = vis
             .iter()
             .map(|&i| &self.targets[i])
             .map(|t| {
                 let (icon, label, color) = summary(t);
-                let mut title = vec![
+                let mut spans = vec![
                     Span::styled(format!("{icon} "), Style::new().fg(color)),
-                    Span::styled(t.name.clone(), Style::new().bold()),
+                    Span::styled(format!("{:<12}", t.name), Style::new().bold()),
+                    Span::styled(format!(" {label}"), Style::new().fg(color)),
                 ];
                 if t.unit.as_ref().is_some_and(|u| u.warning().is_some()) {
-                    title.push(Span::styled(" ⚠ service", Style::new().yellow().bold()));
+                    spans.push(Span::styled(" ⚠ service", Style::new().yellow().bold()));
                 }
-                let label = match t.busy {
-                    Some(b) => format!("{label} · {b}…"),
-                    None => label,
-                };
-                let sub = Span::styled(format!("   {label}"), Style::new().fg(color));
-                ListItem::new(vec![Line::from(title), Line::from(sub)])
+                ListItem::new(Line::from(spans))
             })
             .collect();
+        let screen = f.area();
+        let height = (items.len().max(1) as u16 + 2).min(screen.height.saturating_sub(2).max(3));
+        let area = centered(screen, 60, height);
+        let empty = items.is_empty();
         let list = List::new(items)
             .block(
-                pane()
-                    // Beside the activity, one rule keeps them apart.
-                    .borders(if self.portrait {
-                        Borders::TOP
-                    } else {
-                        Borders::TOP | Borders::RIGHT
-                    })
-                    .title(if self.filtering {
-                        format!(" Targets · /{}▏ ", self.filter)
-                    } else if self.filter.is_empty() {
-                        " Targets ".to_string()
-                    } else {
-                        format!(" Targets · /{} ", self.filter)
-                    })
-                    .border_style(self.border(Focus::List)),
+                Block::bordered()
+                    .title(format!(" switch host · {}▏ ", self.filter))
+                    .border_style(Style::new().cyan()),
             )
             .highlight_style(
                 Style::new()
@@ -2961,8 +2927,18 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▌");
-        self.hit.list = area;
+        self.hit.switcher = area;
+        self.hit.list = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        f.render_widget(Clear, area);
         f.render_stateful_widget(list, area, &mut self.list);
+        if empty {
+            f.render_widget(Line::from(" no host matches".dim()), self.hit.list);
+        }
     }
 
     /// The details of a target, for the dialog.
@@ -3515,10 +3491,8 @@ mod tests {
             help: false,
             info: false,
             drag: None,
-            land_list_w: None,
-            port_list_h: None,
             hit: Hit::default(),
-            last_click: None,
+            switch_from: None,
             filter: String::new(),
             filtering: false,
             has_extras: false,
@@ -3551,26 +3525,26 @@ mod tests {
     }
 
     #[test]
-    fn wide_terminal_is_side_by_side() {
+    fn panes_take_the_full_width_under_the_host_line() {
         let mut a = app(2);
-        render(&mut a, 120, 30);
-        assert!(!a.portrait);
-        // The list on the left, the activity next to it, both full height.
-        assert!(a.hit.logs.x > a.hit.list.x);
-        assert_eq!(a.hit.logs.right(), 120);
-        assert_eq!(a.hit.logs.height, a.hit.list.height);
-        // The list is as wide as its content, not a third of the screen.
-        assert!(a.hit.list.width < 40, "{}", a.hit.list.width);
+        let out = render(&mut a, 120, 30);
+        // No target list: the activity has the whole width, below the line
+        // that names the selected host.
+        assert_eq!((a.hit.logs.x, a.hit.logs.width), (0, 120));
+        assert_eq!(a.hit.header.y, 0);
+        assert!(a.hit.logs.y > a.hit.header.y);
+        assert_eq!(a.hit.list.width, 0);
+        assert!(out.lines().next().unwrap().contains("host0"));
+        assert!(out.contains("Ctrl+P"));
     }
 
     #[test]
-    fn phone_is_stacked() {
+    fn phone_shows_the_host_on_top() {
         let mut a = app(2);
         let out = render(&mut a, 45, 40);
         assert!(a.portrait);
-        assert_eq!(a.hit.list.x, a.hit.logs.x);
-        assert!(a.hit.logs.y > a.hit.list.y);
-        assert!(out.contains("host0"));
+        assert!(out.lines().next().unwrap().contains("host0"));
+        assert_eq!(a.hit.logs.width, 45);
     }
 
     #[test]
@@ -3624,33 +3598,27 @@ mod tests {
     }
 
     #[test]
-    fn shift_arrows_move_focus_by_layout() {
+    fn shift_arrows_move_focus_top_to_bottom() {
         let mut a = app(2);
         render(&mut a, 120, 30);
-        a.key(KeyCode::Right, KeyModifiers::SHIFT);
+        a.key(KeyCode::Down, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::Activity);
-        a.key(KeyCode::Left, KeyModifiers::SHIFT);
+        a.key(KeyCode::Up, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::List);
         a.key(KeyCode::Tab, KeyModifiers::NONE);
         assert!(a.focus == Focus::Activity);
         a.key(KeyCode::BackTab, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::List);
-
-        let mut p = app(2);
-        render(&mut p, 45, 40);
-        p.key(KeyCode::Down, KeyModifiers::SHIFT);
-        assert!(p.focus == Focus::Activity);
-        p.key(KeyCode::Up, KeyModifiers::SHIFT);
-        assert!(p.focus == Focus::List);
     }
 
     #[test]
     fn plain_arrows_act_in_the_focused_pane() {
         let mut a = app(3);
         render(&mut a, 120, 30);
+        // On the host line, the arrows switch hosts.
         a.key(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(a.selected(), 1);
-        a.key(KeyCode::Right, KeyModifiers::NONE);
+        a.key(KeyCode::Down, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::Activity);
         a.key(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(a.log_scroll, 1);
@@ -3658,25 +3626,30 @@ mod tests {
     }
 
     #[test]
-    fn dragging_borders_resizes_landscape() {
-        let mut a = app(2);
+    fn clicking_the_host_line_opens_the_switcher() {
+        let mut a = app(3);
         render(&mut a, 120, 30);
-        let before = a.hit.list.width;
-        let edge = a.hit.edge_list;
-        drag(&mut a, (edge.x, 10), (60, 10));
+        let h = a.hit.header;
+        a.mouse(mouse(MouseEventKind::Down(MouseButton::Left), h.x + 3, h.y));
+        assert!(a.filtering);
+        let out = render(&mut a, 120, 30);
+        assert!(out.contains("switch host"));
+        // A click on a host switches to it.
+        let rows = a.hit.list;
+        a.mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x + 3,
+            rows.y + 2,
+        ));
+        assert!(!a.filtering);
+        assert_eq!(a.selected(), 2);
+        // A click beside the popup closes it on the same host.
+        a.key(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(a.filtering);
         render(&mut a, 120, 30);
-        assert!(a.hit.list.width > before, "{} > {before}", a.hit.list.width);
-    }
-
-    #[test]
-    fn dragging_borders_resizes_portrait() {
-        let mut a = app(2);
-        render(&mut a, 45, 40);
-        let edge = a.hit.edge_list;
-        drag(&mut a, (10, edge.y), (10, 15));
-        render(&mut a, 45, 40);
-        // The border follows the pointer: rows 1 (below the header) to 15.
-        assert_eq!(a.hit.list.height, 15);
+        a.mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 20));
+        assert!(!a.filtering);
+        assert_eq!(a.selected(), 2);
     }
 
     #[test]
@@ -3711,30 +3684,35 @@ mod tests {
     }
 
     #[test]
-    fn slash_filters_targets() {
+    fn the_switcher_filters_switches_and_cancels() {
         let mut a = app(3);
         render(&mut a, 120, 30);
-        a.key(KeyCode::Char('/'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('p'), KeyModifiers::CONTROL);
         assert!(a.filtering);
         a.key(KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(a.visible(), vec![2]);
-        assert_eq!(a.selected(), 2);
         let out = render(&mut a, 120, 30);
         assert!(out.contains("host2") && !out.contains("host1"));
         a.key(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(!a.filtering && a.filter == "2");
-        // Esc clears the filter before it quits.
-        a.key(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(a.filter.is_empty() && !a.quit);
+        // Switched, and every host is there again.
+        assert!(!a.filtering && a.filter.is_empty());
+        assert_eq!(a.selected(), 2);
         assert_eq!(a.visible().len(), 3);
+        // Esc goes back to the host it was opened on.
+        a.key(KeyCode::Char('/'), KeyModifiers::NONE);
+        a.key(KeyCode::Char('0'), KeyModifiers::NONE);
+        assert_eq!(a.selected(), 0);
+        a.key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!a.filtering && !a.quit);
+        assert_eq!(a.selected(), 2);
         // No match renders without panicking.
         a.key(KeyCode::Char('/'), KeyModifiers::NONE);
         a.key(KeyCode::Char('z'), KeyModifiers::NONE);
         let out = render(&mut a, 120, 30);
-        assert!(out.contains("No target matches"));
-        a.key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert!(out.contains("no host matches"));
         a.key(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(a.visible().len(), 3);
+        assert_eq!(a.selected(), 2);
     }
 
     #[test]
@@ -3753,21 +3731,21 @@ mod tests {
         a.targets[0].extra[0].lines = vec![Line::from("boot ok")];
         let out = render(&mut a, 120, 30);
         assert!(out.contains("boot ok"));
-        assert!(a.hit.extra.y >= a.hit.logs.bottom());
-        assert_eq!(a.hit.extra.x, a.hit.list.x);
+        // The console on top, the activity below it, both full width.
+        assert!(a.hit.logs.y >= a.hit.extra.bottom());
+        assert_eq!(a.hit.extra.x, a.hit.logs.x);
         assert_eq!(a.hit.extra.right(), a.hit.logs.right());
-        assert_eq!(a.hit.list.bottom(), a.hit.logs.bottom());
-        assert_eq!(a.hit.extra.y, a.hit.list.bottom());
-        assert_eq!(a.hit.edge_list.bottom(), a.hit.list.bottom());
         a.focus = Focus::Activity;
-        a.key(KeyCode::Down, KeyModifiers::SHIFT);
+        a.key(KeyCode::Up, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::Extra);
         a.key(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(a.focus == Focus::Activity);
+        a.key(KeyCode::Tab, KeyModifiers::NONE);
         assert!(a.focus == Focus::List);
-        // Dragging the border between activity and extra pane resizes it.
+        // Dragging the border between console and activity resizes them.
         let before = a.hit.extra.height;
         let edge = a.hit.edge_extra;
-        drag(&mut a, (edge.x + 3, edge.y), (edge.x + 3, edge.y - 5));
+        drag(&mut a, (edge.x + 3, edge.y), (edge.x + 3, edge.y + 5));
         render(&mut a, 120, 30);
         assert!(
             a.hit.extra.height > before,
@@ -3775,7 +3753,7 @@ mod tests {
             a.hit.extra.height
         );
         render(&mut a, 45, 40);
-        assert!(a.hit.extra.y > a.hit.logs.y);
+        assert!(a.hit.extra.y < a.hit.logs.y);
     }
 
     #[test]
@@ -3803,7 +3781,8 @@ mod tests {
             ]
         );
 
-        // The pane tells when the selected target has no command.
+        // A target without a command has no console pane: the activity takes
+        // the whole body.
         let mut a = app(2);
         set_extras(&mut a, common);
         a.targets[1].cmds.clear();
@@ -3811,7 +3790,9 @@ mod tests {
         a.select(1);
         a.fetch_extra();
         assert!(a.extra_run.is_none());
-        assert!(render(&mut a, 120, 30).contains("no command configured"));
+        render(&mut a, 120, 30);
+        assert_eq!(a.hit.extra.height, 0);
+        assert_eq!(a.hit.logs.height, 28);
         a.key(KeyCode::Char('c'), KeyModifiers::NONE);
     }
 
@@ -3883,6 +3864,11 @@ mod tests {
         a.targets[2].report = Some(report(TargetState::Unlocked("up".into()), None));
         let out = render(&mut a, 120, 30);
         assert!(!out.contains("hc ●"), "{out}");
+        // The selected host's state on top, everyone's in the switcher.
+        assert!(out.lines().next().unwrap().contains("unlocked"));
+        a.key(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        let out = render(&mut a, 120, 30);
+        assert!(!out.contains("hc ●"), "{out}");
         assert!(out.contains("unlocked") && out.contains("unreachable"));
     }
 
@@ -3898,12 +3884,10 @@ mod tests {
         // Any key closes it, and is not acted on.
         a.key(KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(!a.info && !a.quit);
-        // With the filter matching nothing, `i` does nothing.
+        // In the switcher, `i` is typed into the filter.
         a.key(KeyCode::Char('/'), KeyModifiers::NONE);
-        a.key(KeyCode::Char('z'), KeyModifiers::NONE);
-        a.key(KeyCode::Enter, KeyModifiers::NONE);
         a.key(KeyCode::Char('i'), KeyModifiers::NONE);
-        assert!(!a.info);
+        assert!(!a.info && a.filter == "i");
     }
 
     #[test]
@@ -4409,12 +4393,13 @@ mod tests {
         a.key(KeyCode::Char(']'), KeyModifiers::CONTROL);
         assert!(a.focus == Focus::List);
         assert!(!a.console_captured());
-        // Shift+Up returns from fullscreen to the dashboard and changes focus.
+        // Shift+Up returns from fullscreen to the dashboard and changes focus
+        // (the console is on top: up is the host line).
         a.focus = Focus::Extra;
         a.key(KeyCode::Char('C'), KeyModifiers::NONE);
         a.key(KeyCode::Up, KeyModifiers::SHIFT);
         assert!(!a.extra_full);
-        assert!(a.focus == Focus::Activity);
+        assert!(a.focus == Focus::List);
     }
 
     #[test]

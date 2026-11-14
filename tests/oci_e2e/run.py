@@ -428,7 +428,7 @@ def scenario():
         fx.keys("S-Down")  # the console pane (the graphical view) takes the keyboard
         time.sleep(0.5)
         fx.keys("C")
-        check("I0 C expands the graphical console to fullscreen", fx.wait(lambda: "Targets" not in fx.capture() and "vnc" in fx.capture()))
+        check("I0 C expands the graphical console to fullscreen", fx.wait(lambda: "Activity" not in fx.capture() and "vnc" in fx.capture()))
         fx.keys("a", literal=True)
         check("O13 keys reach the instance in fullscreen (RFB key event logged)", fx.wait(lambda: "vnc key down=1 a" in fx.log("ssh.log")))
         check("O13b the server takes scancodes, so the key goes with its scancode", "vnc key down=1 a sc=0x1e" in fx.log("ssh.log"), " | ".join(l for l in fx.log("ssh.log").splitlines() if "key down=1 a" in l))
@@ -437,7 +437,7 @@ def scenario():
         # does not generate a real Kitty mouse event. Pointer input is covered by
         # the Kitty/Xvfb visual regression instead.
         fx.keys("S-Up")
-        check("I2 Shift+Up returns from fullscreen to the dashboard", fx.wait(lambda: "Targets" in fx.capture()))
+        check("I2 Shift+Up returns from fullscreen to the dashboard", fx.wait(lambda: "Activity" in fx.capture()))
         fx.keys("b", literal=True)
         time.sleep(0.4)
         check("I3 dashboard has the keyboard after leaving the console", "vnc key down=1 b" not in fx.log("ssh.log"))

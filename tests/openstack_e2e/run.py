@@ -383,7 +383,7 @@ def scenario():
         fx.keys("C-r")
         check("S6 Ctrl+R restarts the serial console with a fresh token", fx.wait(lambda: count(fx.log("server.log"), "serial connect") == 2 and count(fx.log("cli.log"), "--serial") == 2), f"cli calls={count(fx.log('cli.log'), '--serial')} proxy connects={count(fx.log('server.log'), 'serial connect')}")
         time.sleep(1.0)
-        fx.keys("S-Down")
+        # The console keeps the keyboard across the restart.
         fx.keys("again", literal=True)
         fx.keys("Enter")
         check("S7 serial still round-trips after the restart", fx.wait(lambda: "server-echo: again" in fx.capture()))
