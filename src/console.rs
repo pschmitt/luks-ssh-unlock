@@ -41,6 +41,9 @@ struct OciParameters {
     compartment_id: Option<String>,
     #[serde(default)]
     keep: bool,
+    /// Close the instance's other console connections when they stand in the
+    /// way (OCI allows one per instance). On unless set to false.
+    close_others: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +57,22 @@ struct OpenstackSerialParameters {
     #[serde(default)]
     allow_insecure: bool,
     openstack_bin: Option<String>,
+    /// `serial`, `log` (the polled console log) or `auto` (the serial console,
+    /// the log when it is not available; the default).
+    mode: Option<LogMode>,
+}
+
+/// What an OpenStack console view shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum LogMode {
+    /// The serial console, else the console log.
+    #[default]
+    Auto,
+    /// The serial console only.
+    Serial,
+    /// The console log only, polled.
+    Log,
 }
 
 /// A sidecar's optional top-level `"default": true` (show this view first),
@@ -108,6 +127,9 @@ pub fn read(path: &Path, target: &str) -> Result<Sidecar> {
             }
             if parameters.keep {
                 args.push("--keep".into());
+            }
+            if parameters.close_others == Some(false) {
+                args.push("--keep-others".into());
             }
             (
                 args.iter()
@@ -168,6 +190,11 @@ pub fn read(path: &Path, target: &str) -> Result<Sidecar> {
             }
             if console.allow_insecure {
                 args.push("--allow-insecure".into());
+            }
+            match parameters.mode.unwrap_or_default() {
+                LogMode::Auto => {}
+                LogMode::Serial => args.extend(["--mode".into(), "serial".into()]),
+                LogMode::Log => args.extend(["--mode".into(), "log".into()]),
             }
             (
                 args.iter()
@@ -337,6 +364,8 @@ pub struct OciConsole {
     pub compartment_id: Option<String>,
     /// Keep the console connection on exit instead of deleting it.
     pub keep: bool,
+    /// Leave the instance's other console connections alone.
+    pub keep_others: bool,
 }
 
 impl OciConsole {
@@ -385,6 +414,7 @@ impl OciConsole {
             profile: p.profile,
             compartment_id: p.compartment_id,
             keep: p.keep,
+            keep_others: p.keep_others,
         })
     }
 
@@ -399,6 +429,7 @@ impl OciConsole {
                 profile: self.profile.clone(),
                 compartment_id: self.compartment_id.clone(),
                 keep: self.keep,
+                keep_others: self.keep_others,
                 ..Default::default()
             },
             runtime_dir: None,
@@ -415,6 +446,7 @@ struct OciVncSettings {
     profile: Option<String>,
     compartment_id: Option<String>,
     keep: bool,
+    keep_others: bool,
 }
 
 impl VncEndpoint {
@@ -561,6 +593,7 @@ struct OciVncParameters {
     compartment_id: Option<String>,
     #[serde(default)]
     keep: bool,
+    close_others: Option<bool>,
     password_file: Option<String>,
     #[serde(default)]
     view_only: bool,
@@ -703,6 +736,7 @@ fn parse_vnc(data: &[u8], target: &str) -> Result<VncEndpoint> {
                 profile: p.profile,
                 compartment_id: p.compartment_id,
                 keep: p.keep,
+                keep_others: p.close_others == Some(false),
             })?;
             Ok(VncEndpoint {
                 source: VncSource::Oci(console),
@@ -798,6 +832,10 @@ pub struct OpenstackSerialArgs {
     /// The openstack client to run [default: openstack from PATH]
     #[arg(long)]
     pub openstack_bin: Option<PathBuf>,
+    /// The serial console, the polled console log, or the serial console and
+    /// the log when there is none
+    #[arg(long, value_enum, default_value_t = LogMode::Auto)]
+    pub mode: LogMode,
 }
 
 /// Ctrl+] ends the session (the dashboard takes it first, so this matters
@@ -839,6 +877,40 @@ impl Drop for RawMode {
 
 /// Run the serial console until it closes or the user detaches. Returns the
 /// exit status.
+/// Show the server's console log, and what is added to it, until killed.
+async fn stream_log(console: &OpenStackConsole) -> i32 {
+    use std::io::Write;
+    const LINES: u16 = 200;
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+    let opts = console.options();
+    let mut prev = String::new();
+    let mut failures = 0;
+    loop {
+        match crate::openstack::fetch_log(&opts, LINES).await {
+            Ok(text) => {
+                failures = 0;
+                let old: Vec<&str> = prev.lines().collect();
+                let new: Vec<&str> = text.lines().collect();
+                let mut out = std::io::stdout().lock();
+                for line in crate::openstack::new_log_lines(&old, &new) {
+                    // A raw terminal: lines need the carriage return too.
+                    let _ = write!(out, "{line}\r\n");
+                }
+                let _ = out.flush();
+                prev = text;
+            }
+            Err(e) => {
+                failures += 1;
+                let _ = writeln!(std::io::stderr(), "console log: {e}\r");
+                if failures >= 5 {
+                    return 1;
+                }
+            }
+        }
+        tokio::time::sleep(EVERY).await;
+    }
+}
+
 pub fn run_openstack_serial(args: &OpenstackSerialArgs) -> Result<i32> {
     use crate::openstack::{Kind, RelayEnd};
     use std::io::{Read, Write};
@@ -864,15 +936,30 @@ pub fn run_openstack_serial(args: &OpenstackSerialArgs) -> Result<i32> {
         .context("cannot start the runtime")?;
     let handle = runtime.handle().clone();
     let mut err = std::io::stderr();
-    let _ = writeln!(
-        err,
-        "Connecting to the serial console of {} (Ctrl+] detaches)...",
-        console.server
-    );
+    let _ = if args.mode == LogMode::Log {
+        writeln!(err, "Console log of {}:", console.server)
+    } else {
+        writeln!(
+            err,
+            "Connecting to the serial console of {} (Ctrl+] detaches)...",
+            console.server
+        )
+    };
     let code = runtime.block_on(async {
+        if args.mode == LogMode::Log {
+            return stream_log(&console).await;
+        }
         let opened = crate::openstack::open(&console.options(), Kind::Serial).await;
         let established = match opened {
             Ok(e) => e,
+            Err(crate::openstack::Error::Cancelled) => return 1,
+            Err(e) if args.mode == LogMode::Auto => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "No serial console ({e}); showing the console log instead."
+                );
+                return stream_log(&console).await;
+            }
             Err(e) => {
                 let _ = writeln!(std::io::stderr(), "{e}");
                 return 1;
@@ -1002,6 +1089,17 @@ mod tests {
         assert!(command.command.contains("'/path with spaces/key'"));
         assert!(command.command.contains("--profile"));
         assert!(command.command.contains("--keep"));
+        assert!(
+            !command.command.contains("--keep-others"),
+            "closing others is the default"
+        );
+        std::fs::write(
+            &path,
+            r#"{"type":"oci","parameters":{"closeOthers":false}}"#,
+        )
+        .unwrap();
+        let command = read(&path, "target").unwrap().unwrap().0;
+        assert!(command.command.contains("--keep-others"));
         std::fs::write(
             &path,
             r#"{"type":"oci","parameters":{"instance":"{name}","profile":"{host}"}}"#,

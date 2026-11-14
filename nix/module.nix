@@ -34,6 +34,7 @@ let
     "profile"
     "compartmentId"
     "keep"
+    "closeOthers"
   ];
   adHocUnlockers = mapAttrsToList (
     name: instance:
@@ -887,6 +888,14 @@ in
                                   type = types.bool;
                                   default = false;
                                 };
+                                closeOthers = mkOption {
+                                  type = types.bool;
+                                  default = true;
+                                  description = ''
+                                    Close the instance's other console connections when
+                                    they stand in the way: OCI allows one per instance.
+                                  '';
+                                };
                               };
                             }
                           else if config.type == "openstack" then
@@ -921,6 +930,22 @@ in
                                   type = types.nullOr types.str;
                                   default = null;
                                   description = "Absolute path of the openstack CLI.";
+                                };
+                                mode = mkOption {
+                                  type = types.nullOr (
+                                    types.enum [
+                                      "auto"
+                                      "serial"
+                                      "log"
+                                    ]
+                                  );
+                                  default = null;
+                                  description = ''
+                                    `serial` shows the serial console, `log` the console log
+                                    (polled, with what is added to it), `auto` (the default)
+                                    the serial console, or the console log when the server has
+                                    no serial console.
+                                  '';
                                 };
                               };
                             }
@@ -997,6 +1022,15 @@ in
                       type = types.bool;
                       default = false;
                       description = "Keep the console connection at the provider on exit (type oci).";
+                    };
+                    closeOthers = mkOption {
+                      type = types.nullOr types.bool;
+                      default = null;
+                      description = ''
+                        Close the instance's other console connections when they stand
+                        in the way, as OCI allows one per instance (type oci; on unless
+                        set to false). `Ctrl+R` always closes them.
+                      '';
                     };
                     server = mkOption {
                       type = types.nullOr types.str;

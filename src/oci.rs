@@ -81,6 +81,9 @@ pub struct Options {
     pub compartment_id: Option<String>,
     /// Do not delete the console connection on exit
     pub keep: bool,
+    /// Leave the instance's other console connections alone. By default they
+    /// are deleted when they stand in the way (OCI allows one per instance).
+    pub keep_others: bool,
     /// The `oci` binary (default: `oci` from the PATH)
     pub oci_bin: Option<PathBuf>,
     /// The `ssh` binary (default: `ssh` from the PATH)
@@ -609,14 +612,78 @@ find_ours() {
   fi
 }
 
-out=$($tc "$@" compute instance-console-connection create \
-  "--instance-id=$LSU_INSTANCE" "--ssh-public-key-file=$LSU_PUBKEY" \
-  "--freeform-tags=$tag" --query data.id --raw-output </dev/null)
-rc=$?
+# Console connections of the instance that are ACTIVE and not LSU's: someone
+# else's session, or a leftover. OCI allows one connection per instance.
+foreign() {
+  if [ -n "$LSU_COMPARTMENT" ]; then
+    set -- "$@" "--compartment-id=$LSU_COMPARTMENT"
+  fi
+  $to "$@" compute instance-console-connection list \
+    "--instance-id=$LSU_INSTANCE" --all \
+    --query "length(data[?\"lifecycle-state\"=='ACTIVE' && \"freeform-tags\".\"luks-ssh-unlock\"==null])" \
+    --raw-output </dev/null 2>/dev/null
+}
+
+# The instance's ACTIVE console connections, whoever made them (before this
+# helper's own exists): the ones to close when LSU_CLOSE_OTHERS is 1.
+others() {
+  if [ -n "$LSU_COMPARTMENT" ]; then
+    set -- "$@" "--compartment-id=$LSU_COMPARTMENT"
+  fi
+  $to "$@" compute instance-console-connection list \
+    "--instance-id=$LSU_INSTANCE" --all \
+    --query "data[?\"lifecycle-state\"=='ACTIVE'].id | join(' ', @)" \
+    --raw-output </dev/null 2>/dev/null
+}
+
+# A connection that is still there (another session's, a leftover, or LSU's
+# own closing after a view switch) makes OCI refuse a new one with 409. Close
+# the others (LSU_CLOSE_OTHERS) or wait for them to go.
+waited=0
+closed=
+while :; do
+  out=$($tc "$@" --no-retry compute instance-console-connection create \
+    "--instance-id=$LSU_INSTANCE" "--ssh-public-key-file=$LSU_PUBKEY" \
+    "--freeform-tags=$tag" --query data.id --raw-output </dev/null 2>&1)
+  rc=$?
+  case $out in
+    *"already exists or has not been terminated"*) ;;
+    *) break ;;
+  esac
+  if [ "$LSU_CLOSE_OTHERS" = 1 ]; then
+    if [ "$closed" != 1 ]; then
+      closed=1
+      printf 'closing\n' 2>/dev/null
+      for other in $(others "$@"); do
+        if valid_id "$other"; then
+          $to "$@" compute instance-console-connection delete \
+            "--instance-console-connection-id=$other" --force </dev/null >/dev/null 2>&1
+        fi
+      done
+    fi
+  else
+    n=$(foreign "$@")
+    if [ -n "$n" ] && [ "$n" != 0 ]; then
+      printf 'busy\n' 2>/dev/null
+      exit 1
+    fi
+  fi
+  if [ "$waited" -ge "${LSU_CONFLICT_WAIT:-60}" ]; then
+    printf 'busy\n' 2>/dev/null
+    exit 1
+  fi
+  if [ "$waited" -eq 0 ]; then
+    printf 'waiting\n' 2>/dev/null
+  fi
+  sleep 5
+  waited=$((waited + 5))
+done
 id=
 if [ "$rc" -eq 0 ] && valid_id "$out"; then
   id=$out
 else
+  # The CLI's error, for the caller's message (never shown verbatim).
+  printf '%s\n' "$out" >&2
   id=$(find_ours "$@")
 fi
 if [ -z "$id" ]; then
@@ -659,6 +726,12 @@ enum Event {
     Kept,
     Deleted,
     DeleteFailed(i32),
+    /// An earlier connection is still closing; the helper waits for it.
+    Waiting,
+    /// The instance has a connection that is not ours (OCI allows one).
+    Busy,
+    /// The instance's other connections are being closed to make room.
+    Closing,
 }
 
 fn is_connection_ocid(s: &str) -> bool {
@@ -674,6 +747,9 @@ fn parse_event(line: &str) -> Option<Event> {
         Some(("delete-failed", n)) => Some(Event::DeleteFailed(num(n))),
         None if line == "kept" => Some(Event::Kept),
         None if line == "deleted" => Some(Event::Deleted),
+        None if line == "waiting" => Some(Event::Waiting),
+        None if line == "busy" => Some(Event::Busy),
+        None if line == "closing" => Some(Event::Closing),
         _ => None,
     }
 }
@@ -695,7 +771,13 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    fn start(cli: &OciCli, target: &Target, pubkey: &Path, keep: bool) -> Result<Self> {
+    fn start(
+        cli: &OciCli,
+        target: &Target,
+        pubkey: &Path,
+        keep: bool,
+        keep_others: bool,
+    ) -> Result<Self> {
         let nonce = format!(
             "{}-{}",
             std::process::id(),
@@ -716,6 +798,7 @@ impl Supervisor {
                 target.compartment.as_deref().unwrap_or(""),
             )
             .env("LSU_KEEP", if keep { "1" } else { "0" })
+            .env("LSU_CLOSE_OTHERS", if keep_others { "0" } else { "1" })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -781,6 +864,31 @@ impl Supervisor {
                         "creating the console connection failed (exit {rc}): {}",
                         describe_failure(&self.failure_text())
                     );
+                }
+                Ok(Event::Busy) => {
+                    self.ended = true;
+                    bail!(
+                        "the instance already has a console connection, and OCI allows only one: \
+                         another session (another dashboard, the OCI web console) or a leftover. \
+                         Close it, or delete it with `oci compute instance-console-connection \
+                         delete`, and press Ctrl+R"
+                    );
+                }
+                Ok(Event::Closing) => {
+                    if !self.quiet {
+                        info(
+                            "the instance has another console connection (OCI allows one at a \
+                             time); closing it",
+                        );
+                    }
+                }
+                Ok(Event::Waiting) => {
+                    if !self.quiet {
+                        info(
+                            "an earlier console connection of the instance is still closing \
+                             (OCI allows one at a time); waiting for it",
+                        );
+                    }
                 }
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => {
@@ -865,7 +973,9 @@ impl Supervisor {
             }
             match self.events.recv_timeout(Duration::from_millis(50)) {
                 Ok(Event::Id(id)) => self.id = Some(id),
-                Ok(Event::Failed(_) | Event::Deleted) => break,
+                // The helper gave up on creating one: nothing to clean up.
+                Ok(Event::Failed(_) | Event::Deleted | Event::Busy) => break,
+                Ok(Event::Waiting | Event::Closing) => {}
                 Ok(Event::Kept) => {
                     self.say(&format!(
                         "keeping console connection {}",
@@ -1174,7 +1284,7 @@ fn session(opts: &Options) -> Result<i32> {
     info("requesting a new console connection");
     // From here on, whatever happens (also to us), the helper deletes the
     // connection that gets created.
-    let mut owner = Supervisor::start(&cli, &target, &pubkey, opts.keep)?;
+    let mut owner = Supervisor::start(&cli, &target, &pubkey, opts.keep, opts.keep_others)?;
     let result = serve(&cli, &mut owner, &target, &key, opts);
     let interrupted = matches!(&result, Err(e) if e.downcast_ref::<Interrupted>().is_some());
     owner.finish(interrupted);
@@ -1408,6 +1518,9 @@ mod tests {
         assert_eq!(parse_event("delete-failed 1"), Some(Event::DeleteFailed(1)));
         assert_eq!(parse_event("deleted"), Some(Event::Deleted));
         assert_eq!(parse_event("kept"), Some(Event::Kept));
+        assert_eq!(parse_event("waiting"), Some(Event::Waiting));
+        assert_eq!(parse_event("busy"), Some(Event::Busy));
+        assert_eq!(parse_event("closing"), Some(Event::Closing));
         assert_eq!(parse_event("whatever"), None);
     }
 
@@ -1502,10 +1615,17 @@ mod tests {
 echo "$*" >> '{d}/oci.log'
 case "$*" in
   *"instance-console-connection list"*)
+    case "$*" in *"join("*) cat '{d}/others' 2>/dev/null; exit 0 ;; esac
     case "$*" in *"--query"*"luks-ssh-unlock"*) ;; *) exit 97 ;; esac
+    case "$*" in *"length("*) cat '{d}/foreign' 2>/dev/null || echo 0; exit 0 ;; esac
     if [ -f '{d}/list_result' ]; then cat '{d}/list_result'; fi
     exit 0 ;;
   *"instance-console-connection create"*)
+    if [ -f '{d}/conflicts' ] && [ "$(cat '{d}/conflicts')" -gt 0 ]; then
+      echo $(($(cat '{d}/conflicts') - 1)) > '{d}/conflicts'
+      echo 'ServiceError: {{"code": "IncorrectState", "message": "Console connection for instance x already exists or has not been terminated.", "status": 409}}' >&2
+      exit 1
+    fi
     if [ -f '{d}/create_sleep' ]; then sleep "$(cat '{d}/create_sleep')"; fi
     touch '{d}/create_done'
     if [ -f '{d}/create_fail' ]; then cat '{d}/create_fail' >&2; exit 1; fi
@@ -1765,6 +1885,56 @@ esac
     }
 
     #[test]
+    fn a_connection_that_is_still_closing_is_waited_for() {
+        let fx = fixture(&good(), instances(), "exit 0");
+        // The first request finds the previous connection still there.
+        fx.write("conflicts", "1");
+        assert_eq!(run(&fx.opts).unwrap(), 0, "{:#?}", fx.log());
+        let creates = fx
+            .log()
+            .into_iter()
+            .filter(|l| l.contains("instance-console-connection create"))
+            .count();
+        assert_eq!(creates, 2);
+        assert!(
+            fx.log()
+                .iter()
+                .all(|l| !l.contains("create") || l.contains("--no-retry"))
+        );
+        assert_eq!(fx.deletes().len(), 1);
+    }
+
+    #[test]
+    fn someone_elses_connection_is_reported_at_once() {
+        let fx = fixture(&good(), instances(), "exit 0");
+        fx.write("conflicts", "99");
+        fx.write("foreign", "1");
+        let mut opts = fx.opts.clone();
+        opts.keep_others = true;
+        let start = Instant::now();
+        let err = format!("{:#}", run(&opts).unwrap_err());
+        assert!(err.contains("already has a console connection"), "{err}");
+        assert!(err.contains("OCI allows only one"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert!(fx.deletes().is_empty(), "never someone else's");
+    }
+
+    #[test]
+    fn other_connections_are_closed_to_make_room() {
+        let fx = fixture(&good(), instances(), "exit 0");
+        fx.write("conflicts", "1");
+        fx.write("foreign", "1");
+        let other = "ocid1.instanceconsoleconnection.oc1..other";
+        fx.write("others", &format!("{other} not-an-ocid$(touch PWNED)\n"));
+        assert_eq!(run(&fx.opts).unwrap(), 0, "{:#?}", fx.log());
+        let deletes = fx.deletes();
+        assert_eq!(deletes.len(), 2, "{deletes:#?}");
+        assert!(deletes[0].contains(other), "the other one first");
+        assert!(deletes[1].contains(CONN), "then ours, at the end");
+        assert!(!fx.path("PWNED").exists());
+    }
+
+    #[test]
     fn an_unusable_create_answer_is_not_acted_upon() {
         let fx = fixture(&good(), instances(), "exit 0");
         let bad = "ocid1.instanceconsoleconnection.x$(touch PWNED)";
@@ -1888,7 +2058,14 @@ esac
         };
         let mut opts = fx.opts.clone();
         opts.keep = keep;
-        Supervisor::start(&OciCli::new(&opts), &target, &fx.path("id_rsa.pub"), keep).unwrap()
+        Supervisor::start(
+            &OciCli::new(&opts),
+            &target,
+            &fx.path("id_rsa.pub"),
+            keep,
+            false,
+        )
+        .unwrap()
     }
 
     #[test]

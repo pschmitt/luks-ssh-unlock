@@ -1757,6 +1757,7 @@ mod tests {
             profile: None,
             compartment_id: None,
             keep: false,
+            keep_others: false,
         };
         let err = match rt.block_on(open_oci(&console)) {
             Ok(_) => panic!("opened a console without a key"),

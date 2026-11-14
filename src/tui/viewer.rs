@@ -7,7 +7,7 @@
 //! protocol, after the text of each frame.
 
 use std::io::{self, Write};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -101,6 +101,7 @@ impl App {
     /// looked for once more, and the connection is made anew.
     pub(super) fn restart_vnc(&mut self) {
         self.stop_vnc();
+        self.force_reload = true;
         self.vnc.checked = false;
         self.vnc.probing = None;
         // The user may have just set `allow-passthrough` or moved the tmux
@@ -166,11 +167,17 @@ impl App {
             slot.vnc_note = problem;
             return;
         }
-        let (Some(transport), Some(endpoint)) =
+        let (Some(transport), Some(mut endpoint)) =
             (self.vnc.transport, self.targets[t].cmds[c].vnc.clone())
         else {
             return;
         };
+        // A restart (Ctrl+R) makes room whatever the configuration says.
+        if std::mem::take(&mut self.force_reload)
+            && let crate::console::VncSource::Oci(oci) = &mut endpoint.source
+        {
+            oci.keep_others = false;
+        }
         self.extra_gen += 1;
         let slot = &mut self.targets[t].extra[c];
         slot.run_id = self.extra_gen;
@@ -187,6 +194,7 @@ impl App {
             c,
             keymap,
             scancodes: false,
+            started: Instant::now(),
             session: Session::start(endpoint),
             framed: false,
             layout: None,
@@ -411,8 +419,25 @@ impl App {
             } else {
                 &slot.vnc_note
             };
-            lines.push(Line::from(note.to_string()));
-            lines.push(Line::from("waiting for the first picture".dim()));
+            let elapsed = self
+                .vnc
+                .run
+                .as_ref()
+                .filter(|r| (r.t, r.c) == (idx, c))
+                .map_or(Duration::ZERO, |r| r.started.elapsed());
+            let oci = cmd
+                .vnc
+                .as_ref()
+                .is_some_and(|v| matches!(v.source, crate::console::VncSource::Oci(_)));
+            let loading = loading_screen(&self.targets[idx].name, note, elapsed, oci);
+            let top = inner.height.saturating_sub(loading.len() as u16) / 2;
+            let area = Rect {
+                y: inner.y + top,
+                height: inner.height - top,
+                ..inner
+            };
+            f.render_widget(Paragraph::new(loading).centered(), area);
+            return;
         } else if slot.finished_at.is_some() {
             lines.push(Line::from(slot.vnc_note.clone().red()));
             lines.push(Line::default());
@@ -612,5 +637,85 @@ mod tests {
         assert!(r.apply_bgra(rect(0, 0, 4, 4), &pixels[..8]).is_none());
         assert!(r.apply_rgb(rect(0, 0, 4, 4), &pixels[..8]).is_none());
         assert!(r.apply_rgb(rect(0, 0, 2, 2), &pixels[..12]).is_some());
+    }
+}
+
+/// What a VNC pane shows until the first picture is in: what is happening,
+/// for how long, and a spinner, so that a slow start does not look stuck.
+fn loading_screen(target: &str, step: &str, elapsed: Duration, oci: bool) -> Vec<Line<'static>> {
+    const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let frame = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
+    let secs = elapsed.as_secs();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(frame.to_string(), Style::new().cyan().bold()),
+            Span::raw("  Opening the console of "),
+            Span::styled(target.to_string(), Style::new().bold()),
+        ]),
+        Line::default(),
+        Line::from(step.to_string()),
+        Line::from(format!("{secs} s").dim()),
+    ];
+    if secs >= 10 {
+        lines.push(Line::default());
+        lines.push(Line::from(
+            if oci {
+                "OCI sets a console connection up first: this can take a minute"
+            } else {
+                "still waiting for the desktop's first picture"
+            }
+            .dim(),
+        ));
+        lines.push(Line::from("Ctrl+R starts over".dim()));
+    }
+    lines
+}
+
+#[cfg(test)]
+mod loading_tests {
+    use super::*;
+
+    fn text(lines: &[Line]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_loading_screen_says_what_is_going_on_and_for_how_long() {
+        let early = text(&loading_screen(
+            "oci-01",
+            "connecting to x",
+            Duration::from_secs(3),
+            true,
+        ));
+        assert!(early.contains("oci-01") && early.contains("connecting to x"));
+        assert!(early.contains("3 s"));
+        assert!(!early.contains("a minute"));
+        let late = text(&loading_screen(
+            "oci-01",
+            "connecting",
+            Duration::from_secs(25),
+            true,
+        ));
+        assert!(late.contains("can take a minute") && late.contains("Ctrl+R"));
+        let vnc = text(&loading_screen(
+            "web",
+            "connecting",
+            Duration::from_secs(25),
+            false,
+        ));
+        assert!(vnc.contains("first picture"));
+        // The spinner moves.
+        let a = text(&loading_screen("w", "s", Duration::from_millis(0), false));
+        let b = text(&loading_screen("w", "s", Duration::from_millis(100), false));
+        assert_ne!(a.lines().next(), b.lines().next());
     }
 }

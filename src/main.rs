@@ -153,6 +153,10 @@ enum ConsoleProvider {
         /// Keep the console connection after disconnecting
         #[arg(long)]
         keep: bool,
+        /// Leave the instance's other console connections alone (by default
+        /// they are closed when they stand in the way: OCI allows one)
+        #[arg(long)]
+        keep_others: bool,
     },
 }
 
@@ -262,8 +266,12 @@ fn real_main() -> Result<bool> {
                     profile,
                     compartment_id,
                     keep,
+                    keep_others,
                 },
         } => {
+            // A restart from the dashboard (Ctrl+R) always makes room.
+            let forced =
+                std::env::var_os("LUKS_SSH_UNLOCK_OCI_CLOSE_OTHERS").is_some_and(|v| v == "1");
             let code = oci::run(&oci::Options {
                 instance,
                 identity,
@@ -272,6 +280,7 @@ fn real_main() -> Result<bool> {
                 profile,
                 compartment_id,
                 keep,
+                keep_others: keep_others && !forced,
                 ..Default::default()
             })?;
             if code != 0 {

@@ -557,6 +557,56 @@ pub async fn fetch_url(opts: &Options, kind: Kind) -> Result<ConsoleUrl, Error> 
     Ok(ConsoleUrl::new(url))
 }
 
+/// The last LINES lines of the server's console log (`openstack [--os-cloud C]
+/// console log show --lines N SERVER`), as text. For servers without a serial
+/// console: what the kernel and the boot print, polled.
+pub async fn fetch_log(opts: &Options, lines: u16) -> Result<String, Error> {
+    opts.validate()?;
+    let mut cmd = Command::new(
+        opts.openstack_bin
+            .as_deref()
+            .unwrap_or(Path::new("openstack")),
+    );
+    if let Some(cloud) = &opts.cloud {
+        cmd.arg("--os-cloud").arg(cloud);
+    }
+    cmd.args(["console", "log", "show", "--lines"])
+        .arg(lines.to_string())
+        .arg(&opts.server);
+    if let Some(file) = &opts.clouds_file {
+        cmd.env("OS_CLIENT_CONFIG_FILE", file);
+    }
+    if let Some(run_as) = &opts.run_as {
+        drop_privileges(&mut cmd, run_as);
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _guard = CancelOnDrop(cancel.clone());
+    let timeout = opts.cli_timeout;
+    let out = tokio::task::spawn_blocking(move || run_cli(cmd, timeout, &cancel))
+        .await
+        .map_err(|_| Error::Cancelled)??;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// The lines of NEXT that come after what PREV already showed: the console log
+/// is fetched as a window of its last lines, so consecutive windows overlap.
+/// When they do not (much new output, or a restarted log), all of NEXT is new.
+pub fn new_log_lines<'a>(prev: &[&str], next: &'a [&'a str]) -> &'a [&'a str] {
+    if prev.is_empty() {
+        return next;
+    }
+    // The longest tail of PREV that is a prefix-aligned run inside NEXT.
+    for start in 0..prev.len() {
+        let tail = &prev[start..];
+        if let Some(at) = next.windows(tail.len()).position(|w| w == tail)
+            && (at == 0 || start == 0 || tail.len() >= 3)
+        {
+            return &next[at + tail.len()..];
+        }
+    }
+    next
+}
+
 struct CancelOnDrop(Arc<AtomicBool>);
 
 impl Drop for CancelOnDrop {
@@ -1402,6 +1452,17 @@ mod tests {
             assert!(Instant::now() < end, "the client is still running");
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    #[test]
+    fn only_new_console_log_lines_are_printed() {
+        let a = ["boot", "one", "two"];
+        assert_eq!(new_log_lines(&[], &a), &a);
+        let b = ["one", "two", "three"];
+        assert_eq!(new_log_lines(&a, &b), &["three"]);
+        assert!(new_log_lines(&b, &b).is_empty());
+        let c = ["x", "y"];
+        assert_eq!(new_log_lines(&b, &c), &c);
     }
 
     #[test]

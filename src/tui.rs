@@ -197,6 +197,8 @@ struct VncRun {
     /// (keys then go as the guest's layout types them).
     keymap: crate::vnc::keymap::Layout,
     scancodes: bool,
+    /// When the session was started, for the loading screen.
+    started: Instant,
 }
 
 /// Everything the VNC viewer keeps between frames.
@@ -494,6 +496,7 @@ fn spawn_console(
     target: (&str, &str),
     (rows, cols): (u16, u16),
     tx: Sender<Msg>,
+    force_reload: bool,
 ) -> std::io::Result<(i32, Arc<AtomicBool>, Pty)> {
     let (mut m, mut s) = (-1, -1);
     let ws = winsize(rows, cols);
@@ -511,6 +514,9 @@ fn spawn_console(
         libc::fcntl(master.as_raw_fd(), libc::F_SETFL, fl | libc::O_NONBLOCK);
     }
     let mut cmd = extra_shell(command, target);
+    if force_reload {
+        cmd.env("LUKS_SSH_UNLOCK_OCI_CLOSE_OTHERS", "1");
+    }
     cmd.env("TERM", "xterm-256color")
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
@@ -1141,6 +1147,9 @@ struct App {
     console_size: (u16, u16),
     /// A console was asked to restart: wait until the old one has ended.
     restart_wait: Option<Arc<AtomicBool>>,
+    /// The next console start is a restart (Ctrl+R): it closes the
+    /// instance's other OCI console connections whatever the configuration.
+    force_reload: bool,
     /// Height of the extra pane, in percent of the space it shares with the activity.
     extra_pct: u16,
     /// The built-in VNC viewer.
@@ -1582,6 +1591,7 @@ pub fn run(
         extra_gen: 0,
         console_size: (24, 80),
         restart_wait: None,
+        force_reload: false,
         extra_pct: 50,
         vnc: VncState::default(),
         msg_tx: tx,
@@ -1849,6 +1859,7 @@ impl App {
                 (&target.name, &target.host),
                 (rows, cols),
                 self.msg_tx.clone(),
+                std::mem::take(&mut self.force_reload),
             )
             .map(|(pgid, ended, pty)| {
                 slot.screen = Some(vt100::Parser::new(rows, cols, EXTRA_LINES));
@@ -1944,6 +1955,7 @@ impl App {
         let old = self.extra_run.as_ref().map(|r| r.ended.clone());
         self.stop_extra(false);
         self.restart_wait = old;
+        self.force_reload = true;
         if let Some((t, c)) = self.console_cmd() {
             let slot = &mut self.targets[t].extra[c];
             slot.finished_at = None;
@@ -3437,6 +3449,7 @@ mod tests {
             extra_gen: 0,
             console_size: (24, 80),
             restart_wait: None,
+            force_reload: false,
             extra_pct: 50,
             vnc: VncState::default(),
             msg_tx: mpsc::channel().0,

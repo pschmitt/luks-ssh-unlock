@@ -846,7 +846,7 @@ pub fn open(opts: &VncOptions, cancel: &Cancel) -> Result<VncSession> {
 
     // From here on, whatever happens (also to us), the helper deletes the
     // connection that gets created.
-    let mut owner = Supervisor::start(&cli, &target, &pubkey, opts.oci.keep)?;
+    let mut owner = Supervisor::start(&cli, &target, &pubkey, opts.oci.keep, opts.oci.keep_others)?;
     owner.quiet = true;
     let ctx = Establish {
         cli: &cli,

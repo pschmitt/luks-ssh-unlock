@@ -103,6 +103,17 @@ options and the container interface are compatible.
   event). A guest with a German console layout no longer gets `y` for `z` or
   wrong symbols. The layout is the VNC parameter `keymap` (`de` or `us`), by
   default the dashboard machine's console layout.
+- `tui`: OCI consoles make room for themselves. OCI allows one console
+  connection per instance, so a leftover or the other view's connection made a
+  new one hang on "requesting a new console connection". The other
+  connections are now deleted (setting `closeOthers`, on by default; `Ctrl+R`
+  always does it), and with `closeOthers = false` LSU says the instance is busy
+  at once instead of retrying for minutes.
+- `tui`: the OpenStack serial console falls back to the console log
+  (`openstack console log show`, polled, only new lines) when the server has no
+  serial console; per target `mode = "auto"` (default), `"serial"` or `"log"`.
+- `tui`: the VNC pane shows a loading screen (spinner, current step, elapsed
+  time, a hint when it takes long) until the first picture is in.
 
 ### Fixed
 

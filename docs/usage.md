@@ -172,9 +172,14 @@ console = {
 OCI supports serial consoles and requires the OCI CLI and OpenSSH in the
 console user's PATH, plus an RSA private key and its `.pub` file. Optional
 parameters are `instance`, `identity`, `configFile`, `cliRcFile`, `profile`,
-`compartmentId`, and `keep`. LSU creates a console connection and attempts to
-remove only that connection when the session ends; `keep = true` leaves it in
-place. A connection can also be started directly with
+`compartmentId`, `keep` and `closeOthers`. LSU creates a console connection and
+attempts to remove only that connection when the session ends; `keep = true`
+leaves it in place. OCI allows one console connection per instance, including
+one that is still being deleted: when another one is in the way (another
+session, a leftover, or the other view of the same target), LSU deletes it,
+waits until it is gone and tries again. `closeOthers = false` leaves other
+connections alone and says that the instance is busy instead; `Ctrl+R` closes
+them anyway. A connection can also be started directly with
 `luks-ssh-unlock console oci --instance example-instance`.
 
 For existing shell commands, use `type = "command"` with
@@ -198,7 +203,11 @@ console = {
 ```
 
 Optional parameters are `server`, `cloud`, `cloudsFile`, `caFile` (CA bundle
-for the proxy), `allowInsecure` and `openstackBin` (absolute path of the CLI);
+for the proxy), `allowInsecure`, `openstackBin` (absolute path of the CLI) and
+`mode`: `auto` (the default) shows the serial console and, when the server has
+none (serial consoles are often disabled), the console log
+(`openstack console log show`, polled every few seconds with only new lines
+printed); `serial` and `log` show only the one or the other;
 file paths must be absolute. A plain `ws://` proxy is only accepted on a
 loopback host unless `allowInsecure` is set, and the console then warns that it
 is unencrypted. The session can also be started directly with
@@ -348,9 +357,12 @@ above (paths absolute; `identity` may also start with `~/`), plus the shared
 `host`, `port` or `allowRemote`). The NixOS module takes the same fields in
 the instance's `vnc` option with `vnc.type = "oci"`. It needs the OCI CLI and
 OpenSSH in the PATH and an RSA key with its `.pub` file, as the serial console
-does, and outbound TCP port 443. OCI allows one console client at a time: a
-client that died can hold the slot for about five minutes, and the pane then
-says that the console is in use (`Ctrl+R` tries again). Failures of the tunnel
+does, and outbound TCP port 443. It also takes `closeOthers`, as the serial
+console (OCI allows one console connection per instance). OCI allows one
+console client at a time: a client that died can hold the slot for about five
+minutes, and the pane then says that the console is in use (`Ctrl+R` tries
+again). Until the first picture is in, the pane shows what it is doing and for
+how long. Failures of the tunnel
 are shown as one of a few fixed messages (host key rejected, key refused,
 console busy, instance without a VNC server, service unreachable); the output
 of `ssh` is never shown.
