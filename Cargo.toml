@@ -27,7 +27,7 @@ tokio-tungstenite = { version = "0.26", default-features = false, features = ["h
 tracing = "0.1"
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 url = "2"
-vt100 = "0.16"
+vt100 = "0.18"
 webpki-roots = "1"
 zeroize = "1"
 zune-jpeg = "0.5"
