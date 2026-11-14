@@ -134,6 +134,11 @@ options and the container interface are compatible.
 - `tui`: the console takes 80% of the space by default (the border can still
   be dragged), beside the activity on a wide terminal and above it on a
   narrow or tall one.
+- `tui`: `Alt`+`Shift`+`Q` quits at once, from anywhere (also while a
+  console has the keyboard), without waiting for consoles to end.
+- `tui`: in tmux, hiding the picture deletes every placement of the renderer's
+  image ring: an upload that completed while the pane was being hidden had
+  been dropped by tmux, so the older picture stayed over the other window.
 - `tui`: a console that only shows output (the OpenStack console log) is
   marked READ-ONLY and never takes the keyboard; nothing typed is echoed.
 - helper: the sockets accept 64 connections, 32 per user (were 16 and 8).

@@ -451,7 +451,7 @@ impl Renderer {
         };
         let mut bytes = Vec::new();
         kitty::delete_image(&mut bytes, pending.image_id);
-        transport::write_at_origin(out, &bytes, pending.pane, pending.origin)?;
+        transport::write_visible_or_former(out, &bytes, pending.pane, pending.origin)?;
         self.dirty = true;
         self.uploaded = self.active_image_id.is_some();
         Ok(())
@@ -497,6 +497,14 @@ impl Renderer {
         } else {
             (0, 0)
         };
+        // Hidden (another tmux window, a zoomed pane): nothing goes up, not
+        // even the rest of an upload, since tmux would drop it.
+        if !transport::pane_is_active() {
+            self.pane = Some(pane);
+            self.tmux_origin = Some(origin);
+            self.hide(out)?;
+            return Ok(false);
+        }
         let pane_changed = self.pane != Some(pane);
         let origin_changed = self.tmux_origin.is_some_and(|old| old != origin);
         if self.pending.as_ref().is_some_and(|pending| {
@@ -513,12 +521,6 @@ impl Renderer {
         {
             self.pane = Some(pane);
             self.tmux_origin = Some(origin);
-            return Ok(false);
-        }
-        if !transport::pane_is_active() {
-            self.pane = Some(pane);
-            self.tmux_origin = Some(origin);
-            self.hide(out)?;
             return Ok(false);
         }
         // The old placement stays until its replacement goes up in the same
@@ -617,13 +619,24 @@ impl Renderer {
     /// Remove visible placements but retain framebuffer contents for redraw.
     pub fn hide<W: Write>(&mut self, out: &mut W) -> io::Result<()> {
         self.discard_pending(out)?;
+        if transport::in_tmux() && !transport::pane_is_active() {
+            // What was sent while the pane was going away may never have
+            // arrived: back on screen, the picture goes up afresh.
+            self.dirty = true;
+            self.uploaded = false;
+        }
         let was_virtual = self.virtual_image.take().is_some();
         if self.displayed.take().is_some()
             && (!transport::in_tmux() || !was_virtual)
-            && let Some(image_id) = self.active_image_id
+            && self.active_image_id.is_some()
         {
+            // Every image of the ring, not just the one taken for shown: an
+            // upload that completed while the pane was being hidden was
+            // dropped by tmux, and the older image is the one on screen.
             let mut bytes = Vec::new();
-            kitty::delete_placement(&mut bytes, image_id);
+            for id in IMAGE_IDS {
+                kitty::delete_placement(&mut bytes, id);
+            }
             transport::write_visible_or_former(
                 out,
                 &bytes,
@@ -1284,6 +1297,23 @@ mod tests {
         assert!(renderer.draw(&mut out, pane).unwrap());
         assert!(out.is_empty());
         assert!(renderer.dirty);
+    }
+
+    #[test]
+    fn hiding_deletes_every_placement_of_the_ring() {
+        let mut renderer = test_renderer();
+        renderer.resize_framebuffer(64, 32);
+        renderer.apply_rgb(Rect::new(0, 0, 64, 32), &noise(64 * 32 * 3, 7));
+        let pane = PaneRect::new(0, 0, 16, 4);
+        let mut out = Vec::new();
+        while renderer.draw(&mut out, pane).unwrap() {}
+        out.clear();
+        renderer.hide(&mut out).unwrap();
+        // An upload may have completed unseen: every id goes, not just one.
+        let text = String::from_utf8_lossy(&out);
+        for id in IMAGE_IDS {
+            assert!(text.contains(&format!("a=d,d=i,i={id}")), "{id}: {text}");
+        }
     }
 
     #[test]

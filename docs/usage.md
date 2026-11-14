@@ -83,6 +83,7 @@ healthcheck, integrity checks, host keys, uptime) in a dialog.
 | `S` | Stop the selected target's systemd service, or start it when it is not running (needs the helper's admin group when the target is helper-backed; otherwise the unit must be controllable by the user). The dashboard warns about a stopped service. |
 | `PageUp`/`PageDown`, `Home`/`End` | Scroll the activity, oldest/newest |
 | `q`, `Esc` | Quit (`Esc` closes the full-screen activity first) |
+| `Alt`+`Shift`+`Q` | Quit at once, from anywhere (also while a console has the keyboard), without waiting for consoles to end |
 | `Ctrl+]`, `Ctrl+R`/`F5` | In an interactive console, which has the keyboard otherwise: back to the dashboard, restart the console (see [Interactive consoles](#interactive-consoles)) |
 
 With a mouse: click the top line to open the switcher and a target in it to

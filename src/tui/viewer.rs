@@ -501,7 +501,9 @@ impl App {
     /// Quit: the session ends and every image is deleted from the terminal.
     pub(super) fn shutdown_vnc(&mut self) {
         self.stop_vnc();
-        super::vnc::wait_oci_closed(std::time::Duration::from_secs(4));
+        if !self.rage_quit {
+            super::vnc::wait_oci_closed(std::time::Duration::from_secs(4));
+        }
         let mut out = io::stdout().lock();
         if let Some(mut old) = self.vnc.retired.take() {
             let _ = old.teardown(&mut out);

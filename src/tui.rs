@@ -608,6 +608,13 @@ fn is_console_escape(code: KeyCode, mods: KeyModifiers) -> bool {
 }
 
 /// `Ctrl+R` or `F5` restart the console.
+/// Alt+Shift+Q (terminals report it as `Q` with Alt, with or without Shift).
+fn is_rage_quit(code: KeyCode, mods: KeyModifiers) -> bool {
+    mods.contains(KeyModifiers::ALT)
+        && (code == KeyCode::Char('Q')
+            || (code == KeyCode::Char('q') && mods.contains(KeyModifiers::SHIFT)))
+}
+
 fn is_console_restart(code: KeyCode, mods: KeyModifiers) -> bool {
     (mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('r' | 'R')))
         || (code == KeyCode::F(5) && mods.is_empty())
@@ -1153,6 +1160,8 @@ struct App {
     /// The next console start is a restart (Ctrl+R): it closes the
     /// instance's other OCI console connections whatever the configuration.
     force_reload: bool,
+    /// Quit at once (Alt+Shift+Q), without waiting for anything to end.
+    rage_quit: bool,
     /// Height of the extra pane, in percent of the space it shares with the activity.
     extra_pct: u16,
     /// The built-in VNC viewer.
@@ -1596,6 +1605,7 @@ pub fn run(
         console_size: (24, 80),
         restart_wait: None,
         force_reload: false,
+        rage_quit: false,
         extra_pct: 80,
         vnc: VncState::default(),
         msg_tx: tx,
@@ -1626,7 +1636,9 @@ pub fn run(
     // Do not join: Crossterm's event source can be stuck reading EOF. The UI
     // exits promptly on the independent HUP check, and process exit reaps it.
     event_reader_stopped.store(true, Ordering::Relaxed);
-    app.stop_extra(true);
+    // A rage quit (Alt+Shift+Q) waits for nothing: the console helpers clean
+    // up on their own (an OCI connection is deleted by its own process).
+    app.stop_extra(!app.rage_quit);
     app.shutdown_vnc();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     // The terminal is no longer writable after a PTY hangup; restoring it
@@ -2198,6 +2210,12 @@ impl App {
     }
 
     fn key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        // Alt+Shift+Q: out, now, whatever has the keyboard or is going on.
+        if is_rage_quit(code, mods) {
+            self.quit = true;
+            self.rage_quit = true;
+            return;
+        }
         if std::env::var_os("LSU_VNC_TRACE").is_some()
             && (code == KeyCode::Char('C') || is_console_escape(code, mods))
         {
@@ -2808,9 +2826,10 @@ impl App {
             ("PgUp PgDn Home End", "scroll the focused log or console"),
             (
                 "mouse",
-                "click select · double-click unlock · wheel · drag borders",
+                "click the top line to switch hosts · click a pane to focus · wheel · drag the border",
             ),
             ("?", "this help"),
+            ("Alt+Shift+Q", "quit at once, whatever is going on"),
             ("q  Esc", "quit"),
         ];
         let mut lines: Vec<Line> = keys
@@ -3550,6 +3569,7 @@ mod tests {
             console_size: (24, 80),
             restart_wait: None,
             force_reload: false,
+            rage_quit: false,
             extra_pct: 80,
             vnc: VncState::default(),
             msg_tx: mpsc::channel().0,
@@ -3939,6 +3959,28 @@ mod tests {
         a.key(KeyCode::Char('/'), KeyModifiers::NONE);
         a.key(KeyCode::Char('i'), KeyModifiers::NONE);
         assert!(!a.info && a.filter == "i");
+    }
+
+    #[test]
+    fn alt_shift_q_quits_from_anywhere() {
+        // From a console that has the keyboard.
+        let mut a = vnc_app(false);
+        a.focus = Focus::Extra;
+        a.key(KeyCode::Char('Q'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert!(a.quit && a.rage_quit);
+        // From a dialog and from the switcher; `Q` alone is not it.
+        for setup in [
+            |a: &mut App| a.help = true,
+            |a: &mut App| a.confirm = Some((0, false)),
+            |a: &mut App| a.open_switcher(),
+        ] {
+            let mut a = app(2);
+            setup(&mut a);
+            a.key(KeyCode::Char('Q'), KeyModifiers::NONE);
+            assert!(!a.rage_quit);
+            a.key(KeyCode::Char('q'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+            assert!(a.quit && a.rage_quit);
+        }
     }
 
     #[test]
