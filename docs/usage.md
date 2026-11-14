@@ -54,10 +54,13 @@ are in each state (`●` unlocked, `○` unreachable, `✖` errors, `⚠` stoppe
 services). There is no permanent target list: `Ctrl+P` or `/` (or a click on
 the top line) opens the host switcher, a popup with every target and its
 state; typing filters it by name or host, `Enter` (or a click) switches, `Esc`
-goes back to the target it was opened on. Below the top line, the console
-(extra command pane, if configured) and the activity take the full width, one
-above the other; `Shift`+`Up`/`Down` moves the focus from the top line to the
-console and the activity. The activity is the service's
+goes back to the target it was opened on. Below the top line come the console
+(extra command pane, if configured; 80% by default, the border can be dragged)
+and the activity: side by side on a wide terminal, the activity below the
+console on a narrow or tall one (under 80 columns, or taller than about two
+thirds of its width, such as a phone or a tall tmux pane). `Shift`+arrows move
+the focus between the top line, the console and the activity. A target without
+a console gives the activity the whole space. The activity is the service's
 journal (`journalctl -u luks-ssh-unlock-<name>.service`, live) interleaved
 with what the dashboard itself does (check results, unlocks), marked `svc` and
 `tui`. `i` shows the selected target's details (route, LUKS method,

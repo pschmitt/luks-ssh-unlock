@@ -1433,8 +1433,21 @@ mod tests {
         {
             let _guard = script_lock();
             rt().block_on(async {
+                // Until the client runs (a loaded build machine can take a
+                // while to start it), then the fetch is dropped.
                 let fetching = fetch_url(&opts, Kind::Vnc);
-                let _ = tokio::time::timeout(Duration::from_millis(500), fetching).await;
+                tokio::pin!(fetching);
+                let end = Instant::now() + Duration::from_secs(10);
+                loop {
+                    tokio::select! {
+                        _ = &mut fetching => break,
+                        () = tokio::time::sleep(Duration::from_millis(50)) => {
+                            if pid_file.exists() || Instant::now() > end {
+                                break;
+                            }
+                        }
+                    }
+                }
             });
         }
         let pid: i32 = fs::read_to_string(pid_file)

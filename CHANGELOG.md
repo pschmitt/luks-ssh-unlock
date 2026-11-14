@@ -123,8 +123,28 @@ options and the container interface are compatible.
   top line) opens a host switcher popup (type to filter, `Enter` switches,
   `Esc` goes back). The console and the activity take the full width, the
   console on top.
-- `tui`: the streamed OpenStack console log no longer shows the visible rest
-  of escape sequences (`[0;32m`), which Nova keeps when it drops the ESC bytes.
+- `tui`: the streamed OpenStack console log keeps its colours: Nova drops the
+  ESC bytes of the guest's escape sequences, LSU puts them back for colours
+  and drops what is left of every other control sequence, redraws and lines
+  with nothing to show.
+- `tui`: in tmux, the VNC picture leaves with its window. Explicit Kitty
+  placements are the terminal's, and tmux drops graphics sent from a hidden
+  pane (`allow-passthrough on`), so the picture stayed over the other window;
+  the delete now goes straight to the terminals that showed the pane.
+- `tui`: the console takes 80% of the space by default (the border can still
+  be dragged), beside the activity on a wide terminal and above it on a
+  narrow or tall one.
+- `tui`: a console that only shows output (the OpenStack console log) is
+  marked READ-ONLY and never takes the keyboard; nothing typed is echoed.
+- helper: the sockets accept 64 connections, 32 per user (were 16 and 8).
+  Two dashboards checking every target at once went over the limit, systemd
+  dropped connections, and checks failed with "the helper gave an unexpected
+  answer". A connection closed unanswered is now reported as such, and the
+  read-only requests (list, check) are tried again a few times.
+- `tui`: the details dialog (`i`) of a target behind the privileged helper
+  shows the route, LUKS method, healthcheck, uptime and baseline dates. The
+  helper sends them as values (filtered names, numbers, times), never as text
+  that came from the target or a command.
 
 ### Fixed
 

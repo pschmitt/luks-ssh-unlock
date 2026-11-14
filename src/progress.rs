@@ -36,6 +36,16 @@ pub fn step(prefix: &str, text: &str) {
     let _ = err.flush();
 }
 
+/// The console only shows output (a log): the dashboard says so and keeps the
+/// keyboard to itself.
+pub fn read_only() {
+    if in_tui() {
+        let mut err = std::io::stderr().lock();
+        let _ = write!(err, "\x1b]777;lsu;readonly\x07");
+        let _ = err.flush();
+    }
+}
+
 /// The console is there: the dashboard stops showing the loading screen.
 pub fn ready() {
     if in_tui() {
@@ -53,6 +63,7 @@ pub struct Scan {
     /// The last step reported in the chunk.
     pub status: Option<String>,
     pub ready: bool,
+    pub read_only: bool,
 }
 
 /// Take the progress sequences out of DATA. A sequence cut at the end of the
@@ -76,6 +87,8 @@ pub fn scan(pending: &mut Vec<u8>, data: &[u8]) -> Scan {
                         let body = String::from_utf8_lossy(&rest[PREFIX.len()..end]);
                         if body == "ready" {
                             out.ready = true;
+                        } else if body == "readonly" {
+                            out.read_only = true;
                         } else if let Some(text) = body.strip_prefix("status;") {
                             out.status = Some(clean(text));
                         }
@@ -106,11 +119,11 @@ mod tests {
         let mut pending = Vec::new();
         let s = scan(
             &mut pending,
-            b"a\x1b]777;lsu;status;step one\x07b\x1b]777;lsu;ready\x07c",
+            b"a\x1b]777;lsu;status;step one\x07b\x1b]777;lsu;ready\x07c\x1b]777;lsu;readonly\x07",
         );
         assert_eq!(s.data, b"abc");
         assert_eq!(s.status.as_deref(), Some("step one"));
-        assert!(s.ready);
+        assert!(s.ready && s.read_only);
     }
 
     #[test]

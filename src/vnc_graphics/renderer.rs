@@ -624,7 +624,7 @@ impl Renderer {
         {
             let mut bytes = Vec::new();
             kitty::delete_placement(&mut bytes, image_id);
-            transport::write_at_origin(
+            transport::write_visible_or_former(
                 out,
                 &bytes,
                 self.pane.unwrap_or(PaneRect::new(0, 0, 0, 0)),
@@ -646,7 +646,7 @@ impl Renderer {
             kitty::delete_image(&mut bytes, image_id);
         }
         self.virtual_image = None;
-        transport::write_at_origin(
+        transport::write_visible_or_former(
             out,
             &bytes,
             self.pane.unwrap_or(PaneRect::new(0, 0, 0, 0)),

@@ -25,6 +25,9 @@ const MAX_CLIENTS: usize = 16;
 #[derive(Default)]
 struct ViewerState {
     viewers: Option<Vec<String>>,
+    /// The clients that showed the pane before it was hidden (another
+    /// window was selected, another pane zoomed, the client detached).
+    former: Vec<String>,
     changed: bool,
     pane_active: Option<bool>,
     pane_origin: Option<(u16, u16)>,
@@ -65,6 +68,60 @@ pub fn pane_is_active() -> bool {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .pane_active
         .unwrap_or(true)
+}
+
+/// Write Kitty commands where they take effect, also while the pane is hidden.
+///
+/// tmux passes graphics on (`allow-passthrough on`) only from a visible pane:
+/// once another window is selected, a delete sent through tmux is dropped and
+/// the picture stays on the terminal, over the other window. Explicit Kitty
+/// placements are the terminal's, not tmux's, so tmux cannot hide them either.
+/// While the pane is hidden, BYTES (raw Kitty commands, no cursor movement) go
+/// straight to the terminals of the clients that showed it last.
+pub fn write_visible_or_former(
+    out: &mut impl Write,
+    bytes: &[u8],
+    pane: PaneRect,
+    origin: (u16, u16),
+) -> io::Result<()> {
+    if in_tmux() && !pane_is_active() {
+        let former = viewer_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .former
+            .clone();
+        for tty in former {
+            let _ = write_to_client_terminal(&tty, bytes);
+        }
+        return Ok(());
+    }
+    write_at_origin(out, bytes, pane, origin)
+}
+
+/// A tmux client's terminal device: `/dev/pts/N` or `/dev/ttyN`.
+fn client_terminal_path(tty: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.len() <= 6 && s.bytes().all(|b| b.is_ascii_digit());
+    tty.strip_prefix("/dev/pts/").is_some_and(digits)
+        || tty.strip_prefix("/dev/tty").is_some_and(digits)
+}
+
+/// Write BYTES to a client terminal, if it is a terminal device of ours.
+/// Never blocks, and never makes it our controlling terminal.
+fn write_to_client_terminal(tty: &str, bytes: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+    if !client_terminal_path(tty) {
+        return Err(io::Error::other("not a terminal device path"));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(tty)?;
+    let meta = file.metadata()?;
+    // SAFETY: geteuid has no preconditions.
+    if !meta.file_type().is_char_device() || meta.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::other("not our terminal"));
+    }
+    file.write_all(bytes)
 }
 
 /// The tmux pane's zero-based origin in the outer terminal. It is populated
@@ -230,6 +287,11 @@ fn viewer_poll_worker(pane: String) {
             if let Some((viewers, pane_active, origin)) = viewers {
                 if state.viewers.as_ref() != Some(&viewers) {
                     state.changed = true;
+                    if let Some(old) = state.viewers.take()
+                        && !old.is_empty()
+                    {
+                        state.former = old;
+                    }
                     state.viewers = Some(viewers);
                 }
                 if state.pane_origin != Some(origin) {
@@ -849,6 +911,24 @@ mod tests {
             output,
             b"a\x1bPtmux;\x1b\x1b[?2026h\x1b\\frame\x1bPtmux;\x1b\x1b[?2026l\x1b\\"
         );
+    }
+
+    #[test]
+    fn only_terminal_device_paths_are_written_to() {
+        assert!(client_terminal_path("/dev/pts/3"));
+        assert!(client_terminal_path("/dev/tty2"));
+        for bad in [
+            "/dev/pts/",
+            "/dev/pts/3/../../etc/passwd",
+            "/tmp/x",
+            "/dev/ttyS0",
+            "/dev/pts/1 ",
+            "",
+        ] {
+            assert!(!client_terminal_path(bad), "{bad}");
+        }
+        // A path that is not a terminal of ours is refused, not written.
+        assert!(write_to_client_terminal("/dev/pts/999999", b"x").is_err());
     }
 
     #[test]

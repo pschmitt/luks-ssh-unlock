@@ -415,7 +415,7 @@ def scenario():
         T = last_images(fx)
         if T:
             w, h, raw = rgba(T[-1])
-            check("O8 payload is a complete cell-aligned RGBA image", len(raw) == w * h * 4 and w % 8 == 0 and h % 16 == 0, f"s={w} v={h}")
+            check("O8 payload is a complete RGBA image (Kitty fits it to the cells)", len(raw) == w * h * 4 and w > 0 and h > 0, f"s={w} v={h}")
             mid = pixels(T[-1], [h // 2])[2]
             check("O9 decoded pixels come from the fake framebuffer (gradient with b~90)", any(80 <= p[2] <= 100 for p in mid), f"sample={mid[len(mid)//2]}")
         time.sleep(2.0)

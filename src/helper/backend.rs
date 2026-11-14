@@ -36,7 +36,7 @@ use crate::process;
 use crate::settings::{GlobalOpts, Notifications, Settings};
 use crate::status::TargetState;
 
-use super::reply::{Checks, Failure, Integrity, Observed, Outcome};
+use super::reply::{Checks, Details, Failure, Health, Integrity, Luks, Observed, Outcome};
 use super::request::{ServiceAction, Target};
 use super::trust::{Environment, TrustError, TrustedConfig, Vetter};
 use super::{Backend, CHILD_PATH, apply_child_env, service_argv};
@@ -223,6 +223,7 @@ impl Backend for SystemBackend {
                 host_keys_pinned: report.host_keys_pinned,
                 signature_required: report.signature_required,
             },
+            details: Some(details(&ctx.s, &report)),
         })
     }
 
@@ -312,6 +313,37 @@ fn unlock_integrity(state: State, forced: bool, baseline: bool) -> Integrity {
         State::Booted | State::Unreachable | State::NotInitrd | State::InitrdSshFailed => {
             Integrity::NotApplicable
         }
+    }
+}
+
+/// The details of a probe, as values (see [`Details`]): what a name would not
+/// pass as an `ssh` argument is left out, and nothing is text from the target.
+fn details(s: &Settings, report: &crate::status::Report) -> Details {
+    use crate::settings::LuksType;
+    let host = |h: &str| plain(h, HOST_EXTRA).then(|| h.to_string());
+    Details {
+        user: plain(&s.username, USER_EXTRA).then(|| s.username.clone()),
+        host: host(&s.hostname),
+        port: Some(s.port),
+        jumphost: s.jumphost.as_ref().and_then(|j| host(&j.host)),
+        luks: Some(match s.luks_type {
+            LuksType::Raw => Luks::Raw,
+            LuksType::Systemd => Luks::Systemd,
+            LuksType::SystemdTool => Luks::SystemdTool,
+            LuksType::LuksMount => Luks::Mount,
+        }),
+        healthcheck: match (s.healthcheck.port, s.healthcheck.command.is_some()) {
+            (Some(port), true) => Some(Health::PortOrCommand { port }),
+            (Some(port), false) => Some(Health::Port { port }),
+            (None, true) => Some(Health::Command),
+            (None, false) => None,
+        },
+        uptime_secs: report
+            .uptime
+            .as_deref()
+            .and_then(crate::status::uptime_seconds),
+        baseline_refreshed: report.baseline_refreshed.map(|d| d.timestamp()),
+        remote_baseline: report.remote_baseline_at.map(|d| d.timestamp()),
     }
 }
 
@@ -805,12 +837,41 @@ exit 0
         })
     }
 
+    /// The probe answer without its details (checked on their own).
+    fn without_details(data: &Value) -> Value {
+        let mut data = data.clone();
+        if let Some(details) = data.as_object_mut().and_then(|o| o.remove("details")) {
+            assert_details_are_values(&details);
+        }
+        data
+    }
+
+    /// Details carry names, numbers and enums only: no text from anywhere else.
+    fn assert_details_are_values(details: &Value) {
+        let map = details.as_object().expect("details are an object");
+        for (key, value) in map {
+            match (key.as_str(), value) {
+                (_, Value::Null | Value::Number(_)) => {}
+                ("user" | "host" | "jumphost", Value::String(s)) => {
+                    assert!(plain(s, b":%[]@"), "{key}={s}");
+                }
+                ("luks", Value::String(s)) => {
+                    assert!(["raw", "systemd", "systemd-tool", "luks-mount"].contains(&s.as_str()));
+                }
+                ("healthcheck", Value::Object(h)) => {
+                    assert!(h.keys().all(|k| k == "by" || k == "port"), "{h:?}");
+                }
+                other => panic!("unexpected detail {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn a_probe_verifies_and_sends_nothing() {
         let scene = Scene::new();
         let run = scene.run(PROBE);
         assert_eq!(
-            run.first()["data"],
+            without_details(&run.first()["data"]),
             json!({
                 "kind": "probe",
                 "state": "initrd",
@@ -858,7 +919,7 @@ exit 0
         scene.mark("checksum-fails");
         let run = scene.run(PROBE);
         assert_eq!(
-            run.first()["data"],
+            without_details(&run.first()["data"]),
             json!({
                 "kind": "probe",
                 "state": "checksum-failed",

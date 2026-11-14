@@ -56,6 +56,45 @@ pub struct Checks {
     pub signature_required: bool,
 }
 
+/// How a target is set up and what a probe found out about it, for the
+/// dashboard's details. Values only, as everything here: names that pass the
+/// same filter as `ssh` arguments, enums, numbers and times. No healthcheck
+/// command, no text the target printed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Details {
+    pub user: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub jumphost: Option<String>,
+    pub luks: Option<Luks>,
+    pub healthcheck: Option<Health>,
+    /// How long the target has been up, in seconds.
+    pub uptime_secs: Option<u64>,
+    /// When the local checksum baseline was last written (Unix time).
+    pub baseline_refreshed: Option<i64>,
+    /// The date of the baseline on the target (Unix time).
+    pub remote_baseline: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Luks {
+    Raw,
+    Systemd,
+    SystemdTool,
+    #[serde(rename = "luks-mount")]
+    Mount,
+}
+
+/// How the booted system is recognised.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "kebab-case")]
+pub enum Health {
+    Port { port: u16 },
+    Command,
+    PortOrCommand { port: u16 },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outcome {
@@ -63,6 +102,9 @@ pub enum Outcome {
         state: Observed,
         unlockable: bool,
         checks: Checks,
+        /// Absent from an older helper.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<Details>,
     },
     Unlock {
         state: Observed,
@@ -147,6 +189,7 @@ mod tests {
             state: Observed::ChecksumFailed,
             unlockable: false,
             checks,
+            details: None,
         };
         assert_eq!(
             serde_json::to_value(probe).unwrap(),

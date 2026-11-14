@@ -85,8 +85,11 @@ let
       SocketMode = "0660";
       DirectoryMode = "0755";
       RemoveOnStop = true;
-      MaxConnections = 16;
-      MaxConnectionsPerSource = 8;
+      # Every dashboard of a user checks several targets at once, and a check
+      # holds its connection for seconds: systemd drops what is over the
+      # limit, which the dashboard then has to retry.
+      MaxConnections = 64;
+      MaxConnectionsPerSource = 32;
     };
   };
 

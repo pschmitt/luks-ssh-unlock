@@ -879,43 +879,128 @@ impl Drop for RawMode {
 
 /// Run the serial console until it closes or the user detaches. Returns the
 /// exit status.
-/// The console log comes with the ESC bytes of the guest's escape sequences
+/// One line of an OpenStack console log, made fit for a terminal.
+///
+/// Nova returns the log with the ESC bytes of the guest's escape sequences
 /// taken out, which leaves their visible rest (`[0;32m`, `[?7h`, `]104\`) in
-/// the text. Remove what is left of control sequences (`[` parameters and a
-/// final letter) and of OSC strings (`]` digits up to `\`); text such as
-/// `[  OK  ]` or `[   1.234]` stays.
-fn strip_escape_remnants(line: &str) -> String {
+/// the text. Colours (`[…m`) get their ESC back, so the log keeps them; every
+/// other control sequence (cursor movement, erasing, modes, OSC and DCS
+/// strings, the ESC 7/8 around a cursor probe) is dropped. `None` for a line
+/// with nothing left to show. Text such as `[  OK  ]`, `[   1.234]` or
+/// `[Install]` stays.
+fn clean_log_line(line: &str) -> Option<String> {
+    let mut line = line.strip_prefix("M[K").unwrap_or(line);
+    // ESC M (reverse index) in front of systemd's status marks.
+    if let Some(rest) = line.strip_prefix('M')
+        && (rest.starts_with("[  OK  ]") || rest.starts_with("[ *") || rest.starts_with("[**"))
+    {
+        line = rest;
+    }
     let b = line.as_bytes();
-    let mut out = String::with_capacity(line.len());
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut colour = false;
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'[' {
-            let mut j = i + 1;
-            while j < b.len() && (b[j].is_ascii_digit() || matches!(b[j], b';' | b'?' | b'!')) {
-                j += 1;
-            }
-            // At least one parameter: `[Install]` is text, `[0J` is not.
-            if j > i + 1 && j < b.len() && b[j].is_ascii_alphabetic() {
-                i = j + 1;
+        match b[i] {
+            0x1b => {
+                // An ESC that survived: what follows is parsed as if it had not.
+                i += 1;
+                if matches!(b.get(i), Some(b'7' | b'8')) {
+                    i += 1;
+                }
                 continue;
             }
-        }
-        if b[i] == b']'
-            && b.get(i + 1).is_some_and(u8::is_ascii_digit)
-            && let Some(end) = line[i..].find('\\')
-        {
-            let body = &line[i + 1..i + end];
-            let digits = body.bytes().take_while(u8::is_ascii_digit).count();
-            if body[digits..].is_empty() || body[digits..].starts_with(';') {
-                i += end + 1;
-                continue;
+            b'[' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len()
+                    && matches!(b[j], b'0'..=b'9' | b';' | b':' | b'?' | b'=' | b'>' | b'!')
+                {
+                    j += 1;
+                }
+                let params = &line[start..j];
+                while !params.is_empty() && j < b.len() && (b' '..=b'/').contains(&b[j]) {
+                    j += 1;
+                }
+                if let Some(&fin) = b.get(j) {
+                    let next_alpha = b.get(j + 1).is_some_and(u8::is_ascii_alphabetic);
+                    let sgr = fin == b'm'
+                        && params
+                            .bytes()
+                            .all(|c| c.is_ascii_digit() || c == b';' || c == b':')
+                        && (!params.is_empty() || !next_alpha);
+                    if sgr {
+                        out.push_str("\x1b[");
+                        out.push_str(params);
+                        out.push('m');
+                        colour = true;
+                        i = j + 1;
+                        continue;
+                    }
+                    let bare_erase = params.is_empty() && matches!(fin, b'K' | b'J') && !next_alpha;
+                    if (!params.is_empty()
+                        && (fin.is_ascii_alphabetic() || matches!(fin, b'@' | b'~')))
+                        || bare_erase
+                    {
+                        // The ESC 7 before a cursor-position probe, and the ESC 8
+                        // after it.
+                        if fin == b'H' && out.ends_with('7') {
+                            out.pop();
+                        }
+                        i = j + 1;
+                        if fin == b'n' && b.get(i) == Some(&b'8') {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                }
             }
+            b']' if b.get(i + 1).is_some_and(u8::is_ascii_digit) => {
+                if let Some(end) = line[i..].find(['\\', '\x07']) {
+                    let body = &line[i + 1..i + end];
+                    let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+                    if body[digits..].is_empty() || body[digits..].starts_with(';') {
+                        i += end + 1;
+                        continue;
+                    }
+                }
+            }
+            b'P' if line[i..].starts_with("P+q") => {
+                if let Some(end) = line[i..].find('\\')
+                    && line[i + 3..i + end].bytes().all(|c| c.is_ascii_hexdigit())
+                {
+                    // The ESC 7 / ESC 8 (save, restore cursor) around the query.
+                    while out.ends_with(['7', '8']) {
+                        out.pop();
+                    }
+                    i += end + 1;
+                    continue;
+                }
+            }
+            _ => {}
         }
         let ch = line[i..].chars().next().expect("in bounds");
-        out.push(ch);
+        if !ch.is_control() || ch == '\t' {
+            out.push(ch);
+        }
         i += ch.len_utf8();
     }
-    out
+    // Nothing but colours and blanks: nothing to show.
+    let mut visible = out.clone();
+    while let Some(at) = visible.find("\x1b[") {
+        let end = visible[at..]
+            .find('m')
+            .map_or(visible.len(), |e| at + e + 1);
+        visible.replace_range(at..end, "");
+    }
+    if visible.trim().is_empty() {
+        return None;
+    }
+    if colour {
+        // A colour must not run on into the next line.
+        out.push_str("\x1b[0m");
+    }
+    Some(out)
 }
 
 /// Show the server's console log, and what is added to it, until killed.
@@ -924,6 +1009,16 @@ async fn stream_log(console: &OpenStackConsole) -> i32 {
     const LINES: u16 = 200;
     const EVERY: std::time::Duration = std::time::Duration::from_secs(3);
     let opts = console.options();
+    // Output only: the dashboard keeps the keyboard, and nothing typed shows.
+    crate::progress::read_only();
+    // SAFETY: tcgetattr/tcsetattr on fd 0 with an owned termios.
+    unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::isatty(0) == 1 && libc::tcgetattr(0, &mut t) == 0 {
+            t.c_lflag &= !(libc::ECHO | libc::ICANON);
+            libc::tcsetattr(0, libc::TCSANOW, &t);
+        }
+    }
     let mut prev = String::new();
     let mut failures = 0;
     loop {
@@ -933,12 +1028,21 @@ async fn stream_log(console: &OpenStackConsole) -> i32 {
                     crate::progress::ready();
                 }
                 failures = 0;
+                // Redraws (carriage returns) count as lines; what is left of
+                // each line after cleaning is compared and shown.
+                let text = text
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n")
+                    .lines()
+                    .filter_map(clean_log_line)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let old: Vec<&str> = prev.lines().collect();
                 let new: Vec<&str> = text.lines().collect();
                 let mut out = std::io::stdout().lock();
                 for line in crate::openstack::new_log_lines(&old, &new) {
                     // A raw terminal: lines need the carriage return too.
-                    let _ = write!(out, "{}\r\n", strip_escape_remnants(line));
+                    let _ = write!(out, "{line}\r\n");
                 }
                 let _ = out.flush();
                 prev = text;
@@ -1405,13 +1509,27 @@ mod tests {
     }
 
     #[test]
-    fn escape_remnants_are_taken_out_of_the_console_log() {
+    fn console_log_lines_keep_their_colours_and_lose_other_controls() {
+        let c = |l: &str| clean_log_line(l);
         assert_eq!(
-            strip_escape_remnants("[[0;32m  OK  [0m] Started [0;1;39mfoo[0m."),
-            "[  OK  ] Started foo."
+            c("[[0;32m  OK  [0m] Started [0;1;39mfoo[0m.").as_deref(),
+            Some("[\x1b[0;32m  OK  \x1b[0m] Started \x1b[0;1;39mfoo\x1b[0m.\x1b[0m")
         );
-        assert_eq!(strip_escape_remnants("x[!p]104\\[0m[?7h[1G[0Jy"), "xy");
-        assert_eq!(strip_escape_remnants("a]3008;start=bf06\\b"), "ab");
+        assert_eq!(c("x[!p]104\\[?7h[1G[0Jy").as_deref(), Some("xy"));
+        assert_eq!(c("a]3008;start=bf06\\b").as_deref(), Some("ab"));
+        assert_eq!(c("P+q544e\\text").as_deref(), Some("text"));
+        assert_eq!(c("7878P+q6E616D65\\"), None);
+        // A cursor probe (ESC 7, position, query, ESC 8) and colour-only lines vanish.
+        assert_eq!(c("7[32766;32766H[6n8"), None);
+        assert_eq!(c("[0m  [0;1m"), None);
+        assert_eq!(c("   "), None);
+        assert_eq!(c("M[K[  OK  ] up").as_deref(), Some("[  OK  ] up"));
+        assert_eq!(c("M[  OK  ] up").as_deref(), Some("[  OK  ] up"));
+        // An ESC that is still there is handled the same way.
+        assert_eq!(
+            c("\x1b[31mred\x1b[0m").as_deref(),
+            Some("\x1b[31mred\x1b[0m\x1b[0m")
+        );
         // Text that only looks a bit like it stays.
         for keep in [
             "[   1.234] kernel",
@@ -1420,8 +1538,10 @@ mod tests {
             "ä [Ü] ö",
             "a]b",
             "[Install]",
+            "[Kernel] [Journal]",
+            "Mail",
         ] {
-            assert_eq!(strip_escape_remnants(keep), keep);
+            assert_eq!(c(keep).as_deref(), Some(keep));
         }
     }
 

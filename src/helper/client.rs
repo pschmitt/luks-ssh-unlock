@@ -56,6 +56,9 @@ pub enum ClientError {
     Timeout,
     /// The helper failed, or its answer was not what was asked for.
     Protocol,
+    /// The connection was closed without an answer: systemd drops what is
+    /// over the socket's connection limit before the helper sees it.
+    Dropped,
 }
 
 impl ClientError {
@@ -71,6 +74,9 @@ impl ClientError {
             Self::Failed => "the helper reports that the operation failed",
             Self::Timeout => "the helper timed out",
             Self::Protocol => "the helper gave an unexpected answer",
+            Self::Dropped => {
+                "the helper closed the connection without an answer (too many requests at once?)"
+            }
         }
     }
 }
@@ -124,10 +130,22 @@ struct ListEntry {
 }
 
 /// Which sockets a verb may be sent to, in the order they are tried.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Needs {
     Basic,
     Admin,
+    /// A basic request that only reads: it is sent again when the
+    /// connection is dropped unanswered.
+    BasicRead,
+}
+
+impl Needs {
+    fn retried(self) -> Self {
+        match self {
+            Self::Basic => Self::BasicRead,
+            other => other,
+        }
+    }
 }
 
 pub struct Client {
@@ -159,7 +177,7 @@ impl Client {
     pub fn list(&self) -> Result<Vec<Listed>, ClientError> {
         let data = self.call(
             json!({"verb": "list"}),
-            Needs::Basic,
+            Needs::Basic.retried(),
             Duration::from_secs(20),
         )?;
         let data: ListData = serde_json::from_value(data).map_err(|_| ClientError::Protocol)?;
@@ -182,7 +200,7 @@ impl Client {
         let name = target(name)?;
         let data = self.call(
             json!({"verb": "probe", "name": name.as_str()}),
-            Needs::Basic,
+            Needs::Basic.retried(),
             Duration::from_secs(150),
         )?;
         outcome(data, |o| matches!(o, Outcome::Probe { .. }))
@@ -229,13 +247,38 @@ impl Client {
     }
 
     fn call(&self, request: Value, needs: Needs, timeout: Duration) -> Result<Value, ClientError> {
+        // Only a request that reads may be sent again: a dropped connection
+        // was never served, but an unlock or a service action is not risked.
+        let (needs, attempts) = match needs {
+            Needs::BasicRead => (Needs::Basic, 4),
+            other => (other, 1),
+        };
+        let mut wait = Duration::from_millis(250);
+        for attempt in 1..=attempts {
+            match self.call_once(&request, needs, timeout) {
+                Err(ClientError::Dropped) if attempt < attempts => {
+                    std::thread::sleep(wait);
+                    wait *= 2;
+                }
+                other => return other,
+            }
+        }
+        Err(ClientError::Dropped)
+    }
+
+    fn call_once(
+        &self,
+        request: &Value,
+        needs: Needs,
+        timeout: Duration,
+    ) -> Result<Value, ClientError> {
         let _slot = Slot::take();
         let candidates: &[&Path] = match needs {
-            Needs::Basic => &[&self.basic, &self.admin],
+            Needs::Basic | Needs::BasicRead => &[&self.basic, &self.admin],
             Needs::Admin => &[&self.admin],
         };
         for path in candidates {
-            match self.exchange(path, &request, timeout) {
+            match self.exchange(path, request, timeout) {
                 // A user may be in only one of the two groups.
                 Err(ClientError::Unavailable) => {}
                 // A socket that is not the helper's is a reason to stop, not
@@ -274,7 +317,7 @@ impl Client {
         let mut reader = BufReader::new(&stream);
         let reply = match read_frame(&mut reader, MAX_RESPONSE) {
             Ok(Frame::Line(line)) => line,
-            Ok(Frame::Eof) => return Err(ClientError::Protocol),
+            Ok(Frame::Eof) => return Err(ClientError::Dropped),
             Err(super::request::FrameError::Io(e)) => return Err(io_error(&e)),
             Err(_) => return Err(ClientError::Protocol),
         };
@@ -302,6 +345,7 @@ fn outcome(data: Value, expected: impl Fn(&Outcome) -> bool) -> Result<Outcome, 
 fn io_error(e: &io::Error) -> ClientError {
     match e.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => ClientError::Timeout,
+        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe => ClientError::Dropped,
         _ => ClientError::Protocol,
     }
 }
@@ -382,6 +426,7 @@ mod tests {
                 state: Observed::Initrd,
                 unlockable: true,
                 checks: checks(),
+                details: None,
             })
         }
         fn unlock(&mut self, _: &TrustedConfig, force: bool) -> Result<Outcome, Failure> {

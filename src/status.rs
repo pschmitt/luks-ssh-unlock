@@ -54,6 +54,8 @@ pub struct Report {
     pub baseline_refreshed: Option<DateTime<Local>>,
     pub uptime: Option<String>,
     pub remote_baseline_date: Option<String>,
+    /// The same date as a time, when it could be read.
+    pub remote_baseline_at: Option<DateTime<Local>>,
     pub state: TargetState,
     /// The initrd would be unlocked by `run` right now.
     pub unlockable: bool,
@@ -68,14 +70,63 @@ impl Report {
     }
 }
 
-fn format_date(text: &str) -> String {
+fn parse_date(text: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f %z")
-        .map(|d| {
-            d.with_timezone(&Local)
-                .format("%d %b %Y, %H:%M:%S %Z")
-                .to_string()
-        })
-        .unwrap_or_else(|_| text.to_string())
+        .ok()
+        .map(|d| d.with_timezone(&Local))
+}
+
+fn format_date(text: &str) -> String {
+    parse_date(text).map_or_else(|| text.to_string(), |d| format_time(&d))
+}
+
+/// A time as the details show it.
+pub fn format_time(d: &DateTime<Local>) -> String {
+    d.format("%d %b %Y, %H:%M:%S %Z").to_string()
+}
+
+const UPTIME_UNITS: [(&str, u64); 6] = [
+    ("year", 365 * 86400),
+    ("week", 7 * 86400),
+    ("day", 86400),
+    ("hour", 3600),
+    ("minute", 60),
+    ("second", 1),
+];
+
+/// The seconds in what `uptime -p` prints (`up 2 weeks, 3 days, 4 minutes`).
+pub fn uptime_seconds(text: &str) -> Option<u64> {
+    let rest = text.trim().strip_prefix("up")?.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let mut total = 0u64;
+    for part in rest.split(',') {
+        let mut words = part.split_whitespace();
+        let n: u64 = words.next()?.parse().ok()?;
+        let unit = words.next()?.trim_end_matches('s');
+        let (_, secs) = UPTIME_UNITS.iter().find(|(name, _)| *name == unit)?;
+        total = total.checked_add(n.checked_mul(*secs)?)?;
+    }
+    Some(total)
+}
+
+/// Seconds the way `uptime -p` says them (minutes are its finest unit).
+pub fn format_uptime(secs: u64) -> String {
+    let mut left = secs;
+    let mut parts = Vec::new();
+    for (name, unit) in &UPTIME_UNITS[..5] {
+        let n = left / unit;
+        left %= unit;
+        if n > 0 {
+            parts.push(format!("{n} {name}{}", if n == 1 { "" } else { "s" }));
+        }
+    }
+    if parts.is_empty() {
+        "up 0 minutes".into()
+    } else {
+        format!("up {}", parts.join(", "))
+    }
 }
 
 impl Ctx {
@@ -114,6 +165,7 @@ impl Ctx {
             baseline_refreshed,
             uptime: None,
             remote_baseline_date: None,
+            remote_baseline_at: None,
             state: TargetState::Unreachable,
             unlockable: false,
             notes: Vec::new(),
@@ -190,6 +242,7 @@ impl Ctx {
                 }
             };
         }
+        report.remote_baseline_at = report.remote_baseline_date.as_deref().and_then(parse_date);
         report.remote_baseline_date = report.remote_baseline_date.as_deref().map(format_date);
         report.notes = notes;
         report.duration_ms = started.elapsed().as_millis();
@@ -327,4 +380,27 @@ pub fn print_text(r: &Report) {
         r.duration_ms as f64 / 1000.0,
         c.reset
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uptime_goes_to_seconds_and_back() {
+        let secs = uptime_seconds("up 2 weeks, 3 days, 4 hours, 1 minute").unwrap();
+        assert_eq!(secs, ((14 + 3) * 24 + 4) * 3600 + 60);
+        assert_eq!(format_uptime(secs), "up 2 weeks, 3 days, 4 hours, 1 minute");
+        assert_eq!(format_uptime(30), "up 0 minutes");
+        for bad in ["", "up", "3 days", "up x days", "up 3 fortnights", "up 3"] {
+            assert_eq!(uptime_seconds(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn remote_baseline_dates_are_read() {
+        let d = parse_date("2026-11-13 08:00:01.123456789 +0100").unwrap();
+        assert_eq!(d.timestamp(), 1_794_553_201);
+        assert!(parse_date("yesterday").is_none());
+    }
 }

@@ -17,7 +17,7 @@ use chrono::Local;
 use super::{Cmd, Msg, UnitInfo};
 use crate::daemon::State;
 use crate::helper::client::{Client, ClientError};
-use crate::helper::reply::{Checks, Integrity, Observed, Outcome};
+use crate::helper::reply::{Checks, Details, Health, Integrity, Luks, Observed, Outcome};
 use crate::log::Logger;
 use crate::status::{Note, Report, Severity, TargetState};
 
@@ -204,15 +204,27 @@ fn report(host: &str, outcome: &Outcome, took: Duration) -> Option<Report> {
         state,
         unlockable,
         checks,
+        details,
     } = outcome
     else {
         return None;
     };
-    let mut notes = vec![Note {
-        severity: Severity::Warn,
-        text: "reported by the privileged helper: no uptime, route or baseline dates".into(),
-    }];
+    let mut notes = Vec::new();
+    if details.is_none() {
+        notes.push(Note {
+            severity: Severity::Warn,
+            text: "reported by an older privileged helper: no uptime, route or baseline dates"
+                .into(),
+        });
+    }
     notes.extend(check_notes(checks));
+    let d = details.clone().unwrap_or_default();
+    if details.is_some() && d.healthcheck.is_none() {
+        notes.push(Note {
+            severity: Severity::Warn,
+            text: "no healthcheck configured: a booted host cannot be told apart".into(),
+        });
+    }
     let target_state = match state {
         Observed::Booted | Observed::Unlocked => TargetState::Unlocked("healthcheck passed".into()),
         Observed::Unreachable => TargetState::Unreachable,
@@ -229,21 +241,58 @@ fn report(host: &str, outcome: &Outcome, took: Duration) -> Option<Report> {
     };
     Some(Report {
         hostname: host.to_string(),
-        route: "via privileged helper".into(),
-        luks_type: "-",
-        healthcheck: None,
+        route: route(&d),
+        luks_type: match d.luks {
+            Some(Luks::Raw) => "raw",
+            Some(Luks::Systemd) => "systemd",
+            Some(Luks::SystemdTool) => "systemd-tool",
+            Some(Luks::Mount) => "luks-mount",
+            None => "-",
+        },
+        healthcheck: d.healthcheck.map(|h| match h {
+            Health::Port { port } => format!("port {port}"),
+            Health::Command => "a command".into(),
+            Health::PortOrCommand { port } => format!("port {port} or a command"),
+        }),
         checksum_file: checks.baseline.then(|| "(configured)".to_string()),
         signature_required: checks.signature_required,
         host_keys_pinned: checks.host_keys_pinned,
-        baseline_refreshed: None,
-        uptime: None,
-        remote_baseline_date: None,
+        baseline_refreshed: d.baseline_refreshed.and_then(local_time),
+        uptime: d.uptime_secs.map(crate::status::format_uptime),
+        remote_baseline_date: d
+            .remote_baseline
+            .and_then(local_time)
+            .map(|t| crate::status::format_time(&t)),
+        remote_baseline_at: d.remote_baseline.and_then(local_time),
         state: target_state,
         unlockable: *unlockable,
         notes,
         checked_at: Local::now(),
         duration_ms: took.as_millis(),
     })
+}
+
+/// `user@host:port via jumphost`, through the helper; it says where the
+/// connection goes, without the helper in the way of the reader.
+fn route(d: &Details) -> String {
+    let Some(host) = &d.host else {
+        return "via privileged helper".into();
+    };
+    let mut route = format!(
+        "{}@{host}:{}",
+        d.user.as_deref().unwrap_or("?"),
+        d.port.map_or_else(|| "?".into(), |p| p.to_string())
+    );
+    if let Some(jump) = &d.jumphost {
+        route.push_str(" via ");
+        route.push_str(jump);
+    }
+    route.push_str(" (privileged helper)");
+    route
+}
+
+fn local_time(unix: i64) -> Option<chrono::DateTime<Local>> {
+    chrono::DateTime::from_timestamp(unix, 0).map(|t| t.with_timezone(&Local))
 }
 
 fn check_notes(checks: &Checks) -> Vec<Note> {
@@ -281,6 +330,7 @@ mod tests {
             state,
             unlockable,
             checks,
+            details: None,
         }
     }
 
@@ -360,6 +410,59 @@ mod tests {
                 .is_some()
             );
         }
+    }
+
+    #[test]
+    fn details_from_the_helper_fill_the_report() {
+        let outcome = Outcome::Probe {
+            state: Observed::Booted,
+            unlockable: false,
+            checks: checks(true, Integrity::NotApplicable, true),
+            details: Some(Details {
+                user: Some("root".into()),
+                host: Some("t.example".into()),
+                port: Some(22),
+                jumphost: Some("jump.example".into()),
+                luks: Some(Luks::Systemd),
+                healthcheck: Some(Health::Command),
+                uptime_secs: Some(3 * 86400 + 3600),
+                baseline_refreshed: Some(1_794_553_201),
+                remote_baseline: Some(1_794_553_201),
+            }),
+        };
+        let r = report("t.example", &outcome, Duration::ZERO).unwrap();
+        assert_eq!(
+            r.route,
+            "root@t.example:22 via jump.example (privileged helper)"
+        );
+        assert_eq!(r.luks_type, "systemd");
+        assert_eq!(r.healthcheck.as_deref(), Some("a command"));
+        assert_eq!(r.uptime.as_deref(), Some("up 3 days, 1 hour"));
+        assert!(r.baseline_refreshed.is_some() && r.remote_baseline_date.is_some());
+        assert!(r.notes.iter().all(|n| !n.text.contains("older")));
+        // An older helper sends no details: say so instead of making them up.
+        let Outcome::Probe {
+            state,
+            unlockable,
+            checks,
+            ..
+        } = outcome
+        else {
+            unreachable!()
+        };
+        let old = Outcome::Probe {
+            state,
+            unlockable,
+            checks,
+            details: None,
+        };
+        let r = report("t.example", &old, Duration::ZERO).unwrap();
+        assert_eq!(r.route, "via privileged helper");
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.text.contains("older privileged helper"))
+        );
     }
 
     #[test]

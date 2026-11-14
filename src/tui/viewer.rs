@@ -375,6 +375,7 @@ impl App {
             spans.push(Span::styled("UNENCRYPTED", Style::new().red().bold()));
         }
         spans.push(Span::raw(" "));
+        let title_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let mut block = super::pane()
             .title(Line::from(spans))
             .border_style(if captured {
@@ -382,18 +383,22 @@ impl App {
             } else {
                 self.border(Focus::Extra)
             });
-        if captured {
-            let footer = if self.targets[idx].cmds.len() > 1 {
+        let hint = if captured {
+            Some(if self.targets[idx].cmds.len() > 1 {
                 " Ctrl+] back to dashboard · Ctrl+T view-only · Ctrl+R/F5 restart · F6 next view "
             } else {
                 " Ctrl+] back to dashboard · Ctrl+T view-only · Ctrl+R/F5 restart "
-            };
-            block = block.title(Line::from(footer).right_aligned());
+            })
         } else if running && view_only {
-            block = block
-                .title(Line::from(" Ctrl+T sends the keyboard to the desktop ").right_aligned());
+            Some(" Ctrl+T sends the keyboard to the desktop ")
         } else if running {
-            block = block.title(Line::from(" click or ⇧↓ to control ").right_aligned());
+            Some(" click or ⇧↓ to control ")
+        } else {
+            None
+        };
+        // Never over the title (it may carry a warning such as UNENCRYPTED).
+        if let Some(hint) = hint.filter(|h| super::hint_fits(area.width, title_width, h)) {
+            block = block.title(Line::from(hint).right_aligned());
         }
         let inner = block.inner(area);
         f.render_widget(block, area);

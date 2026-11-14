@@ -292,6 +292,7 @@ mod tests {
                 host_keys_pinned: true,
                 signature_required: false,
             },
+            details: None,
         }
     }
 

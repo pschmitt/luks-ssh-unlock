@@ -148,6 +148,8 @@ struct ExtraOut {
     query_tail: Vec<u8>,
     /// Until the console is there: its current step, and since when.
     loading: Option<(String, Instant)>,
+    /// The console only shows output (it said so): it never gets the keyboard.
+    read_only: bool,
     /// The start of a progress sequence cut at the end of a chunk.
     progress_tail: Vec<u8>,
     /// VNC panes: what the session last said (progress, or why it ended).
@@ -1594,7 +1596,7 @@ pub fn run(
         console_size: (24, 80),
         restart_wait: None,
         force_reload: false,
-        extra_pct: 50,
+        extra_pct: 80,
         vnc: VncState::default(),
         msg_tx: tx,
     };
@@ -1854,6 +1856,7 @@ impl App {
         slot.screen = None;
         slot.query_tail.clear();
         slot.loading = Some(("starting…".into(), Instant::now()));
+        slot.read_only = false;
         slot.progress_tail.clear();
         let started = if interactive {
             let (rows, cols) = self.console_size;
@@ -1931,7 +1934,9 @@ impl App {
         {
             return None;
         }
+        // A read-only console (a log) never takes the keyboard.
         self.console_cmd()
+            .filter(|&(t, c)| !self.targets[t].extra.get(c).is_some_and(|s| s.read_only))
     }
 
     /// The keyboard goes to the console: its pane has the focus and the
@@ -2119,6 +2124,7 @@ impl App {
                 {
                     *current = step;
                 }
+                slot.read_only |= scan.read_only;
                 // The console is there once it says so, or prints something.
                 if scan.ready || scan.data.iter().any(|b| b.is_ascii_graphic()) {
                     slot.loading = None;
@@ -2404,8 +2410,11 @@ impl App {
             (Focus::List, Dir::Down) => Focus::Activity,
             (Focus::Extra, Dir::Up) => Focus::List,
             (Focus::Extra, Dir::Down) => Focus::Activity,
-            (Focus::Activity, Dir::Up) if extra => Focus::Extra,
+            (Focus::Activity, Dir::Up) if extra && self.portrait => Focus::Extra,
             (Focus::Activity, Dir::Up) => Focus::List,
+            // Side by side: the console on the left, the activity on the right.
+            (Focus::Extra, Dir::Right) if !self.portrait => Focus::Activity,
+            (Focus::Activity, Dir::Left) if extra && !self.portrait => Focus::Extra,
             (f, _) => f,
         };
     }
@@ -2429,17 +2438,23 @@ impl App {
     }
 
     /// Move the dragged border to the pointer.
-    fn resize(&mut self, y: u16) {
+    fn resize(&mut self, x: u16, y: u16) {
         let body = self.hit.body;
         if body.width == 0 || body.height == 0 {
             return;
         }
         if self.drag == Some(Edge::Extra) {
-            // The console is on top: its height is where the border is.
+            // The console comes first (on top, or on the left): its size is
+            // where the border is.
             let area = self.hit.split;
-            if area.height > 0 {
-                let h = u32::from(y.saturating_sub(area.y) + 1);
-                self.extra_pct = (h * 100 / u32::from(area.height)).clamp(15, 85) as u16;
+            let (at, start, len) = if self.portrait {
+                (y, area.y, area.height)
+            } else {
+                (x, area.x, area.width)
+            };
+            if len > 0 {
+                let size = u32::from(at.saturating_sub(start) + 1);
+                self.extra_pct = (size * 100 / u32::from(len)).clamp(15, 90) as u16;
             }
         }
     }
@@ -2508,7 +2523,7 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.drag.is_some() => {
-                self.resize(y);
+                self.resize(x, y);
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag = None,
@@ -2572,15 +2587,23 @@ impl App {
         let own_console = !self.visible().is_empty()
             && !self.targets.is_empty()
             && !self.targets[self.selected()].cmds.is_empty();
+        // Wide: the console beside the activity; tall (a phone, a tall tmux
+        // pane): the activity below the console.
         let (logs, extra) = if self.has_extras && own_console && !self.logs_full {
-            let [extra, logs] = Layout::vertical([
+            let parts = [
                 Constraint::Percentage(self.extra_pct),
                 Constraint::Percentage(100 - self.extra_pct),
-            ])
-            .areas(body);
+            ];
             self.hit.split = body;
-            self.hit.edge_extra = Rect::new(logs.x, logs.y.saturating_sub(1), logs.width, 2);
-            (logs, Some(extra))
+            if self.portrait {
+                let [extra, logs] = Layout::vertical(parts).areas(body);
+                self.hit.edge_extra = Rect::new(logs.x, logs.y.saturating_sub(1), logs.width, 2);
+                (logs, Some(extra))
+            } else {
+                let [extra, logs] = Layout::horizontal(parts).areas(body);
+                self.hit.edge_extra = Rect::new(logs.x.saturating_sub(1), logs.y, 2, logs.height);
+                (logs, Some(extra))
+            }
         } else {
             (body, None)
         };
@@ -3100,6 +3123,8 @@ impl App {
 
     fn draw_logs(&mut self, f: &mut Frame, area: Rect, idx: usize) {
         self.hit.logs = area;
+        // Right of the console (wide layout) rather than below it.
+        let beside = area.x > self.hit.body.x;
         let t = &self.targets[idx];
         let height = area.height.saturating_sub(1) as usize;
         let title = if self.logs_full {
@@ -3144,6 +3169,12 @@ impl App {
         f.render_widget(
             Paragraph::new(window).wrap(Wrap { trim: false }).block(
                 pane()
+                    // Beside the console, a rule keeps the two apart.
+                    .borders(if beside {
+                        Borders::TOP | Borders::LEFT
+                    } else {
+                        Borders::TOP
+                    })
                     .title(title)
                     .border_style(self.border(Focus::Activity)),
             ),
@@ -3170,6 +3201,9 @@ impl App {
         let mut title = format!(" {} · {}", cmd.label, t.name);
         if t.cmds.len() > 1 {
             title.push_str(&format!(" · c next {}/{}", c + 1, t.cmds.len()));
+        }
+        if slot.read_only {
+            title.push_str(" · READ-ONLY");
         }
         if slot.running {
             title.push_str(" · live");
@@ -3223,17 +3257,24 @@ impl App {
     /// it has the keyboard, and the window size the child is told about.
     fn draw_console(&mut self, f: &mut Frame, area: Rect, (idx, c): (usize, usize), title: String) {
         let captured = self.console_captured();
+        let title_width = title.chars().count();
         let mut block = pane().title(title).border_style(if captured {
             Style::new().yellow().bold()
         } else {
             self.border(Focus::Extra)
         });
-        if captured {
-            block = block.title(
-                Line::from(" Ctrl+] back to dashboard · Ctrl+R/F5 restart ").right_aligned(),
-            );
+        let read_only = self.targets[idx].extra[c].read_only;
+        let hint = if read_only {
+            Some(" read-only: nothing is sent to it ")
+        } else if captured {
+            Some(" Ctrl+] back to dashboard · Ctrl+R/F5 restart ")
         } else if self.console_live() {
-            block = block.title(Line::from(" click or ⇧↓ to type ").right_aligned());
+            Some(" click or ⇧↓ to type ")
+        } else {
+            None
+        };
+        if let Some(hint) = hint.filter(|h| hint_fits(area.width, title_width, h)) {
+            block = block.title(Line::from(hint).right_aligned());
         }
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -3394,6 +3435,12 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
+/// A right-aligned hint goes on a pane's title line only when it fits beside
+/// the title, which must stay readable.
+fn hint_fits(width: u16, title: usize, hint: &str) -> bool {
+    title + hint.chars().count() + 4 <= usize::from(width)
+}
+
 /// The frame of a dashboard pane: a title line on top and nothing else, so
 /// that the content gets the width and height. Dialogs keep a full border.
 fn pane<'a>() -> Block<'a> {
@@ -3503,7 +3550,7 @@ mod tests {
             console_size: (24, 80),
             restart_wait: None,
             force_reload: false,
-            extra_pct: 50,
+            extra_pct: 80,
             vnc: VncState::default(),
             msg_tx: mpsc::channel().0,
         }
@@ -3731,29 +3778,32 @@ mod tests {
         a.targets[0].extra[0].lines = vec![Line::from("boot ok")];
         let out = render(&mut a, 120, 30);
         assert!(out.contains("boot ok"));
-        // The console on top, the activity below it, both full width.
-        assert!(a.hit.logs.y >= a.hit.extra.bottom());
-        assert_eq!(a.hit.extra.x, a.hit.logs.x);
-        assert_eq!(a.hit.extra.right(), a.hit.logs.right());
+        // Wide: the console on the left, most of the width, the activity
+        // beside it.
+        assert!(a.hit.logs.x >= a.hit.extra.right());
+        assert_eq!(a.hit.extra.y, a.hit.logs.y);
+        assert!(a.hit.extra.width > 3 * a.hit.logs.width);
         a.focus = Focus::Activity;
-        a.key(KeyCode::Up, KeyModifiers::SHIFT);
+        a.key(KeyCode::Left, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::Extra);
-        a.key(KeyCode::Tab, KeyModifiers::NONE);
+        a.key(KeyCode::Right, KeyModifiers::SHIFT);
         assert!(a.focus == Focus::Activity);
         a.key(KeyCode::Tab, KeyModifiers::NONE);
         assert!(a.focus == Focus::List);
         // Dragging the border between console and activity resizes them.
-        let before = a.hit.extra.height;
+        let before = a.hit.extra.width;
         let edge = a.hit.edge_extra;
-        drag(&mut a, (edge.x + 3, edge.y), (edge.x + 3, edge.y + 5));
+        drag(&mut a, (edge.x, edge.y + 3), (edge.x - 20, edge.y + 3));
         render(&mut a, 120, 30);
         assert!(
-            a.hit.extra.height > before,
-            "{} > {before}",
-            a.hit.extra.height
+            a.hit.extra.width < before,
+            "{} < {before}",
+            a.hit.extra.width
         );
+        // Tall: the activity below the console.
         render(&mut a, 45, 40);
         assert!(a.hit.extra.y < a.hit.logs.y);
+        assert_eq!(a.hit.extra.x, a.hit.logs.x);
     }
 
     #[test]
@@ -3848,6 +3898,7 @@ mod tests {
             baseline_refreshed: None,
             uptime: None,
             remote_baseline_date: None,
+            remote_baseline_at: None,
             state,
             unlockable: false,
             notes: Vec::new(),
