@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use super::vnc::{Event, Session, graphics_context_problem};
 use super::{
@@ -184,7 +184,7 @@ impl App {
         slot.running = true;
         slot.restart = false;
         slot.finished_at = None;
-        slot.vnc_note = format!("connecting to {}", endpoint.address());
+        slot.vnc_note = endpoint.first_step();
         self.vnc.renderer = Some(Renderer::new(transport));
         let keymap = endpoint
             .keymap
@@ -375,7 +375,7 @@ impl App {
             spans.push(Span::styled("UNENCRYPTED", Style::new().red().bold()));
         }
         spans.push(Span::raw(" "));
-        let mut block = Block::bordered()
+        let mut block = super::pane()
             .title(Line::from(spans))
             .border_style(if captured {
                 Style::new().yellow().bold()
@@ -388,13 +388,12 @@ impl App {
             } else {
                 " Ctrl+] back to dashboard · Ctrl+T view-only · Ctrl+R/F5 restart "
             };
-            block = block.title_bottom(Line::from(footer).right_aligned());
+            block = block.title(Line::from(footer).right_aligned());
         } else if running && view_only {
-            block = block.title_bottom(
-                Line::from(" Ctrl+T sends the keyboard to the desktop ").right_aligned(),
-            );
+            block = block
+                .title(Line::from(" Ctrl+T sends the keyboard to the desktop ").right_aligned());
         } else if running {
-            block = block.title_bottom(Line::from(" click or ⇧↓ to control ").right_aligned());
+            block = block.title(Line::from(" click or ⇧↓ to control ").right_aligned());
         }
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -429,14 +428,13 @@ impl App {
                 .vnc
                 .as_ref()
                 .is_some_and(|v| matches!(v.source, crate::console::VncSource::Oci(_)));
-            let loading = loading_screen(&self.targets[idx].name, note, elapsed, oci);
-            let top = inner.height.saturating_sub(loading.len() as u16) / 2;
-            let area = Rect {
-                y: inner.y + top,
-                height: inner.height - top,
-                ..inner
+            let hint = if oci {
+                "OCI sets a console connection up first: this can take a minute"
+            } else {
+                "still waiting for the desktop's first picture"
             };
-            f.render_widget(Paragraph::new(loading).centered(), area);
+            let loading = loading_screen("Opening the graphical console", note, elapsed, hint);
+            super::render_loading(f, inner, loading);
             return;
         } else if slot.finished_at.is_some() {
             lines.push(Line::from(slot.vnc_note.clone().red()));
@@ -640,17 +638,23 @@ mod tests {
     }
 }
 
-/// What a VNC pane shows until the first picture is in: what is happening,
+/// What a console pane shows until its console is there: what is happening,
 /// for how long, and a spinner, so that a slow start does not look stuck.
-fn loading_screen(target: &str, step: &str, elapsed: Duration, oci: bool) -> Vec<Line<'static>> {
+/// HINT is added once it takes long.
+pub(super) fn loading_screen(
+    header: &str,
+    step: &str,
+    elapsed: Duration,
+    hint: &str,
+) -> Vec<Line<'static>> {
     const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let frame = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
     let secs = elapsed.as_secs();
     let mut lines = vec![
         Line::from(vec![
             Span::styled(frame.to_string(), Style::new().cyan().bold()),
-            Span::raw("  Opening the console of "),
-            Span::styled(target.to_string(), Style::new().bold()),
+            Span::raw("  "),
+            Span::styled(header.to_string(), Style::new().bold()),
         ]),
         Line::default(),
         Line::from(step.to_string()),
@@ -658,14 +662,7 @@ fn loading_screen(target: &str, step: &str, elapsed: Duration, oci: bool) -> Vec
     ];
     if secs >= 10 {
         lines.push(Line::default());
-        lines.push(Line::from(
-            if oci {
-                "OCI sets a console connection up first: this can take a minute"
-            } else {
-                "still waiting for the desktop's first picture"
-            }
-            .dim(),
-        ));
+        lines.push(Line::from(hint.to_string().dim()));
         lines.push(Line::from("Ctrl+R starts over".dim()));
     }
     lines
@@ -691,31 +688,24 @@ mod loading_tests {
     #[test]
     fn the_loading_screen_says_what_is_going_on_and_for_how_long() {
         let early = text(&loading_screen(
-            "oci-01",
-            "connecting to x",
+            "Opening",
+            "step x",
             Duration::from_secs(3),
-            true,
+            "hint",
         ));
-        assert!(early.contains("oci-01") && early.contains("connecting to x"));
+        assert!(early.contains("Opening") && early.contains("step x"));
         assert!(early.contains("3 s"));
-        assert!(!early.contains("a minute"));
+        assert!(!early.contains("hint"));
         let late = text(&loading_screen(
-            "oci-01",
-            "connecting",
+            "Opening",
+            "step",
             Duration::from_secs(25),
-            true,
+            "hint",
         ));
-        assert!(late.contains("can take a minute") && late.contains("Ctrl+R"));
-        let vnc = text(&loading_screen(
-            "web",
-            "connecting",
-            Duration::from_secs(25),
-            false,
-        ));
-        assert!(vnc.contains("first picture"));
+        assert!(late.contains("hint") && late.contains("Ctrl+R"));
         // The spinner moves.
-        let a = text(&loading_screen("w", "s", Duration::from_millis(0), false));
-        let b = text(&loading_screen("w", "s", Duration::from_millis(100), false));
+        let a = text(&loading_screen("w", "s", Duration::from_millis(0), "h"));
+        let b = text(&loading_screen("w", "s", Duration::from_millis(100), "h"));
         assert_ne!(a.lines().next(), b.lines().next());
     }
 }

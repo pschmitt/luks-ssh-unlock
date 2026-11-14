@@ -14,6 +14,7 @@ mod oci;
 mod openstack;
 mod probe;
 mod process;
+mod progress;
 mod settings;
 mod status;
 mod tui;

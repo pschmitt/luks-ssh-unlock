@@ -463,12 +463,14 @@ impl VncEndpoint {
         }
     }
 
-    /// What the pane says it is connecting to. Never a URL or a token.
-    pub fn address(&self) -> String {
+    /// What the pane says while it starts. Never a URL or a token.
+    pub fn first_step(&self) -> String {
         match &self.source {
-            VncSource::Direct(d) => d.address(),
-            VncSource::OpenStack(o) => format!("OpenStack console of {}", o.server),
-            VncSource::Oci(o) => format!("OCI console of {}", o.instance),
+            VncSource::Direct(d) => format!("connecting to {}", d.address()),
+            VncSource::OpenStack(_) => "asking OpenStack for a console URL".into(),
+            VncSource::Oci(_) => {
+                "requesting an OCI console connection (this can take a minute)".into()
+            }
         }
     }
 }
@@ -877,6 +879,45 @@ impl Drop for RawMode {
 
 /// Run the serial console until it closes or the user detaches. Returns the
 /// exit status.
+/// The console log comes with the ESC bytes of the guest's escape sequences
+/// taken out, which leaves their visible rest (`[0;32m`, `[?7h`, `]104\`) in
+/// the text. Remove what is left of control sequences (`[` parameters and a
+/// final letter) and of OSC strings (`]` digits up to `\`); text such as
+/// `[  OK  ]` or `[   1.234]` stays.
+fn strip_escape_remnants(line: &str) -> String {
+    let b = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'[' {
+            let mut j = i + 1;
+            while j < b.len() && (b[j].is_ascii_digit() || matches!(b[j], b';' | b'?' | b'!')) {
+                j += 1;
+            }
+            // At least one parameter: `[Install]` is text, `[0J` is not.
+            if j > i + 1 && j < b.len() && b[j].is_ascii_alphabetic() {
+                i = j + 1;
+                continue;
+            }
+        }
+        if b[i] == b']'
+            && b.get(i + 1).is_some_and(u8::is_ascii_digit)
+            && let Some(end) = line[i..].find('\\')
+        {
+            let body = &line[i + 1..i + end];
+            let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+            if body[digits..].is_empty() || body[digits..].starts_with(';') {
+                i += end + 1;
+                continue;
+            }
+        }
+        let ch = line[i..].chars().next().expect("in bounds");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// Show the server's console log, and what is added to it, until killed.
 async fn stream_log(console: &OpenStackConsole) -> i32 {
     use std::io::Write;
@@ -888,13 +929,16 @@ async fn stream_log(console: &OpenStackConsole) -> i32 {
     loop {
         match crate::openstack::fetch_log(&opts, LINES).await {
             Ok(text) => {
+                if failures == 0 && prev.is_empty() {
+                    crate::progress::ready();
+                }
                 failures = 0;
                 let old: Vec<&str> = prev.lines().collect();
                 let new: Vec<&str> = text.lines().collect();
                 let mut out = std::io::stdout().lock();
                 for line in crate::openstack::new_log_lines(&old, &new) {
                     // A raw terminal: lines need the carriage return too.
-                    let _ = write!(out, "{line}\r\n");
+                    let _ = write!(out, "{}\r\n", strip_escape_remnants(line));
                 }
                 let _ = out.flush();
                 prev = text;
@@ -935,16 +979,17 @@ pub fn run_openstack_serial(args: &OpenstackSerialArgs) -> Result<i32> {
         .build()
         .context("cannot start the runtime")?;
     let handle = runtime.handle().clone();
-    let mut err = std::io::stderr();
-    let _ = if args.mode == LogMode::Log {
-        writeln!(err, "Console log of {}:", console.server)
+    if args.mode == LogMode::Log {
+        crate::progress::step("", &format!("Console log of {}:", console.server));
     } else {
-        writeln!(
-            err,
-            "Connecting to the serial console of {} (Ctrl+] detaches)...",
-            console.server
-        )
-    };
+        crate::progress::step(
+            "",
+            &format!(
+                "Connecting to the serial console of {} (Ctrl+] detaches)...",
+                console.server
+            ),
+        );
+    }
     let code = runtime.block_on(async {
         if args.mode == LogMode::Log {
             return stream_log(&console).await;
@@ -954,9 +999,9 @@ pub fn run_openstack_serial(args: &OpenstackSerialArgs) -> Result<i32> {
             Ok(e) => e,
             Err(crate::openstack::Error::Cancelled) => return 1,
             Err(e) if args.mode == LogMode::Auto => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "No serial console ({e}); showing the console log instead."
+                crate::progress::step(
+                    "",
+                    &format!("No serial console ({e}); showing the console log instead."),
                 );
                 return stream_log(&console).await;
             }
@@ -971,6 +1016,7 @@ pub fn run_openstack_serial(args: &OpenstackSerialArgs) -> Result<i32> {
                 "warning: the console connection is not encrypted"
             );
         }
+        crate::progress::ready();
         let _ = writeln!(std::io::stderr(), "Connected. Press Enter to get a prompt.");
         // Terminal input and output go through threads: tokio's stdio needs
         // a feature that is not enabled, and a blocked read must not hold up
@@ -1133,9 +1179,9 @@ mod tests {
                 && !direct(&e).allow_remote
                 && !e.unencrypted_remote()
         );
-        assert_eq!(e.address(), "127.0.0.1:5900");
+        assert_eq!(e.first_step(), "connecting to 127.0.0.1:5900");
         let e = vnc(r#"{"type":"vnc","parameters":{"host":"::1","port":5901}}"#).unwrap();
-        assert_eq!(e.address(), "[::1]:5901");
+        assert_eq!(e.first_step(), "connecting to [::1]:5901");
     }
 
     #[test]
@@ -1197,7 +1243,7 @@ mod tests {
     fn openstack_vnc_names_the_server_after_the_target_by_default() {
         let e = vnc(r#"{"type":"openstack","parameters":{}}"#).unwrap();
         assert_eq!(os_console(&e).server, "target");
-        assert_eq!(e.address(), "OpenStack console of target");
+        assert_eq!(e.first_step(), "asking OpenStack for a console URL");
         assert!(!e.unencrypted_remote());
         let e = vnc(
             r#"{"type":"openstack","parameters":{"server":"web-1","cloud":"prod","cloudsFile":"/etc/clouds.yaml","caFile":"/etc/ca.pem","viewOnly":true,"quality":5}}"#,
@@ -1248,7 +1294,10 @@ mod tests {
     fn oci_vnc_names_the_instance_after_the_target_by_default() {
         let e = vnc(r#"{"type":"oci","parameters":{}}"#).unwrap();
         assert_eq!(oci_console(&e).instance, "target");
-        assert_eq!(e.address(), "OCI console of target");
+        assert!(
+            e.first_step()
+                .starts_with("requesting an OCI console connection")
+        );
         // A private socket behind an SSH tunnel: nothing unencrypted leaves.
         assert!(!e.unencrypted_remote());
         let e = vnc(
@@ -1353,6 +1402,27 @@ mod tests {
         assert!(cmd.vnc.as_ref().unwrap().view_only);
         std::fs::write(&path, "{").unwrap();
         assert!(read_vnc(&path, "target").is_err());
+    }
+
+    #[test]
+    fn escape_remnants_are_taken_out_of_the_console_log() {
+        assert_eq!(
+            strip_escape_remnants("[[0;32m  OK  [0m] Started [0;1;39mfoo[0m."),
+            "[  OK  ] Started foo."
+        );
+        assert_eq!(strip_escape_remnants("x[!p]104\\[0m[?7h[1G[0Jy"), "xy");
+        assert_eq!(strip_escape_remnants("a]3008;start=bf06\\b"), "ab");
+        // Text that only looks a bit like it stays.
+        for keep in [
+            "[   1.234] kernel",
+            "[  OK  ]",
+            "array[3] = x",
+            "ä [Ü] ö",
+            "a]b",
+            "[Install]",
+        ] {
+            assert_eq!(strip_escape_remnants(keep), keep);
+        }
     }
 
     #[test]

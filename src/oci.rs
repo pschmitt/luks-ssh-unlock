@@ -113,7 +113,7 @@ static RUN_LOCK: Mutex<()> = Mutex::new(());
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 fn info(msg: &str) {
-    eprintln!("oci: {msg}");
+    crate::progress::step("oci: ", msg);
 }
 
 // ---------------------------------------------------------------- signals
@@ -1281,7 +1281,7 @@ fn session(opts: &Options) -> Result<i32> {
         key.display()
     ));
 
-    info("requesting a new console connection");
+    info("requesting an OCI console connection (this can take a minute)");
     // From here on, whatever happens (also to us), the helper deletes the
     // connection that gets created.
     let mut owner = Supervisor::start(&cli, &target, &pubkey, opts.keep, opts.keep_others)?;
@@ -1302,6 +1302,7 @@ fn serve(
     let id = owner.wait_created().context("no console connection")?;
     check_signal()?;
 
+    info("waiting for the console connection to become active");
     let connstr = cli.wait_active(&id)?;
     check_signal()?;
     let console = parse_connection_string(&connstr, &id, &target.id)?;
@@ -1309,7 +1310,8 @@ fn serve(
 
     let ssh_bin = opts.ssh_bin.clone().unwrap_or_else(|| PathBuf::from("ssh"));
     let args = ssh_args(&console, &ssh_bin.to_string_lossy(), key);
-    info("serial console: press Enter for a prompt, disconnect with ~.");
+    crate::progress::ready();
+    eprintln!("oci: serial console: press Enter for a prompt, disconnect with ~.");
     run_ssh(&ssh_bin, &args)
 }
 

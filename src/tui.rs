@@ -24,7 +24,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::ctx::{Ctx, Mode};
@@ -147,6 +147,10 @@ struct ExtraOut {
     screen: Option<vt100::Parser>,
     /// The end of the last output, in case a terminal query is split in two.
     query_tail: Vec<u8>,
+    /// Until the console is there: its current step, and since when.
+    loading: Option<(String, Instant)>,
+    /// The start of a progress sequence cut at the end of a chunk.
+    progress_tail: Vec<u8>,
     /// VNC panes: what the session last said (progress, or why it ended).
     vnc_note: String,
     /// VNC panes: the keyboard toggle (`Ctrl+T`); the configured value until set.
@@ -340,7 +344,7 @@ fn ansi_line(text: &str) -> Line<'static> {
 /// replaced by the quoted values and also exported as
 /// `LUKS_SSH_UNLOCK_HOST` and `LUKS_SSH_UNLOCK_NAME`. Standard streams and
 /// the process group are up to the caller.
-fn extra_shell(command: &str, (name, host): (&str, &str)) -> Command {
+fn extra_shell(command: &str, (name, host): (&str, &str), console: bool) -> Command {
     let script = command
         .replace("{host}", &shell_quote(host))
         .replace("{name}", &shell_quote(name));
@@ -355,16 +359,19 @@ fn extra_shell(command: &str, (name, host): (&str, &str)) -> Command {
         "-c",
         r#"exec 2>&1
 if [ -n "$2" ]; then
-  exec sudo -n -H -u "$2" -- env "LUKS_SSH_UNLOCK_NAME=$3" "LUKS_SSH_UNLOCK_HOST=$4" sh -c "$1"
+  exec sudo -n -H -u "$2" -- env "LUKS_SSH_UNLOCK_NAME=$3" "LUKS_SSH_UNLOCK_HOST=$4" "LUKS_SSH_UNLOCK_TUI=$5" sh -c "$1"
 fi
-LUKS_SSH_UNLOCK_NAME=$3 LUKS_SSH_UNLOCK_HOST=$4
-export LUKS_SSH_UNLOCK_NAME LUKS_SSH_UNLOCK_HOST
+LUKS_SSH_UNLOCK_NAME=$3 LUKS_SSH_UNLOCK_HOST=$4 LUKS_SSH_UNLOCK_TUI=$5
+export LUKS_SSH_UNLOCK_NAME LUKS_SSH_UNLOCK_HOST LUKS_SSH_UNLOCK_TUI
 exec sh -c "$1""#,
         "sh",
         &script,
         &user,
         name,
         host,
+        // Our own console commands report their progress to the dashboard
+        // (crate::progress) when they run on its terminal.
+        if console { "1" } else { "" },
     ]);
     cmd
 }
@@ -384,7 +391,7 @@ fn spawn_extra(
     target: (&str, &str),
     tx: Sender<Msg>,
 ) -> std::io::Result<(i32, Arc<AtomicBool>)> {
-    let mut cmd = extra_shell(command, target);
+    let mut cmd = extra_shell(command, target, false);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -513,7 +520,7 @@ fn spawn_console(
         let fl = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
         libc::fcntl(master.as_raw_fd(), libc::F_SETFL, fl | libc::O_NONBLOCK);
     }
-    let mut cmd = extra_shell(command, target);
+    let mut cmd = extra_shell(command, target, true);
     if force_reload {
         cmd.env("LUKS_SSH_UNLOCK_OCI_CLOSE_OTHERS", "1");
     }
@@ -1851,6 +1858,8 @@ impl App {
         slot.finished_at = None;
         slot.screen = None;
         slot.query_tail.clear();
+        slot.loading = Some(("starting…".into(), Instant::now()));
+        slot.progress_tail.clear();
         let started = if interactive {
             let (rows, cols) = self.console_size;
             spawn_console(
@@ -2090,6 +2099,7 @@ impl App {
                 if slot.run_id != run_id {
                     return;
                 }
+                slot.loading = None;
                 if std::mem::take(&mut slot.restart) {
                     slot.lines.clear();
                 }
@@ -2105,7 +2115,21 @@ impl App {
             Msg::ConsoleData(i, c, run_id, data) => {
                 let shown = self.selected() == i && self.extra_c(i) == c;
                 let slot = &mut self.targets[i].extra[c];
-                let Some(parser) = slot.screen.as_mut().filter(|_| slot.run_id == run_id) else {
+                if slot.run_id != run_id {
+                    return;
+                }
+                let scan = crate::progress::scan(&mut slot.progress_tail, &data);
+                if let Some(step) = scan.status
+                    && let Some((current, _)) = slot.loading.as_mut()
+                {
+                    *current = step;
+                }
+                // The console is there once it says so, or prints something.
+                if scan.ready || scan.data.iter().any(|b| b.is_ascii_graphic()) {
+                    slot.loading = None;
+                }
+                let data = scan.data;
+                let Some(parser) = slot.screen.as_mut() else {
                     return;
                 };
                 parser.process(&data);
@@ -2132,6 +2156,7 @@ impl App {
                 if slot.run_id != run_id {
                     return;
                 }
+                slot.loading = None;
                 if std::mem::take(&mut slot.restart) {
                     slot.lines.clear();
                 }
@@ -2523,8 +2548,8 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 let list = self.hit.list;
                 if contains(list, x, y) {
-                    // Two text rows per item, inside the border.
-                    if y > list.y && y + 1 < list.y + list.height {
+                    // Two text rows per item, below the title line.
+                    if y > list.y && y < list.y + list.height {
                         let idx = self.list.offset() + usize::from(y - list.y - 1) / 2;
                         if idx < n {
                             self.select(idx);
@@ -2673,7 +2698,7 @@ impl App {
                     "No targets. Pass environment files, or configure services.luks-ssh-unlock instances ({DEFAULT_CONFIG_DIR}/*.env)."
                 ))
                 .wrap(Wrap { trim: true })
-                .block(Block::bordered()),
+                .block(pane()),
                 body,
             );
         } else {
@@ -2697,7 +2722,7 @@ impl App {
                     self.hit.logs = Rect::default();
                     f.render_widget(
                         Paragraph::new(format!("No target matches “{}”.", self.filter))
-                            .block(Block::bordered()),
+                            .block(pane()),
                         logs,
                     );
                 }
@@ -2914,7 +2939,13 @@ impl App {
             .collect();
         let list = List::new(items)
             .block(
-                Block::bordered()
+                pane()
+                    // Beside the activity, one rule keeps them apart.
+                    .borders(if self.portrait {
+                        Borders::TOP
+                    } else {
+                        Borders::TOP | Borders::RIGHT
+                    })
                     .title(if self.filtering {
                         format!(" Targets · /{}▏ ", self.filter)
                     } else if self.filter.is_empty() {
@@ -3094,7 +3125,7 @@ impl App {
     fn draw_logs(&mut self, f: &mut Frame, area: Rect, idx: usize) {
         self.hit.logs = area;
         let t = &self.targets[idx];
-        let height = area.height.saturating_sub(2) as usize;
+        let height = area.height.saturating_sub(1) as usize;
         let title = if self.logs_full {
             format!(" Activity · {} · l or Esc closes ", t.name)
         } else {
@@ -3136,7 +3167,7 @@ impl App {
         };
         f.render_widget(
             Paragraph::new(window).wrap(Wrap { trim: false }).block(
-                Block::bordered()
+                pane()
                     .title(title)
                     .border_style(self.border(Focus::Activity)),
             ),
@@ -3150,7 +3181,7 @@ impl App {
         if t.cmds.is_empty() {
             f.render_widget(
                 Paragraph::new(Line::from("no command configured for this target".dim())).block(
-                    Block::bordered()
+                    pane()
                         .title(format!(" {} ", t.name))
                         .border_style(self.border(Focus::Extra)),
                 ),
@@ -3179,21 +3210,35 @@ impl App {
             self.draw_vnc_pane(f, area, (idx, c), title);
             return;
         }
+        if slot.running
+            && !(cmd.interactive && slot.screen.is_some())
+            && let Some((step, since)) = &slot.loading
+        {
+            let block = pane().title(title).border_style(self.border(Focus::Extra));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let lines = viewer::loading_screen(
+                "Opening the console",
+                step,
+                since.elapsed(),
+                "still waiting for the console",
+            );
+            render_loading(f, inner, lines);
+            return;
+        }
         if cmd.interactive && slot.screen.is_some() {
             self.draw_console(f, area, (idx, c), title);
             return;
         }
-        let height = area.height.saturating_sub(2) as usize;
+        let height = area.height.saturating_sub(1) as usize;
         let total = slot.lines.len();
         self.extra_scroll = self.extra_scroll.min(total.saturating_sub(height));
         let end = total - self.extra_scroll;
         let window: Vec<Line> = slot.lines[end.saturating_sub(height)..end].to_vec();
         f.render_widget(
-            Paragraph::new(window).wrap(Wrap { trim: false }).block(
-                Block::bordered()
-                    .title(title)
-                    .border_style(self.border(Focus::Extra)),
-            ),
+            Paragraph::new(window)
+                .wrap(Wrap { trim: false })
+                .block(pane().title(title).border_style(self.border(Focus::Extra))),
             area,
         );
     }
@@ -3202,17 +3247,17 @@ impl App {
     /// it has the keyboard, and the window size the child is told about.
     fn draw_console(&mut self, f: &mut Frame, area: Rect, (idx, c): (usize, usize), title: String) {
         let captured = self.console_captured();
-        let mut block = Block::bordered().title(title).border_style(if captured {
+        let mut block = pane().title(title).border_style(if captured {
             Style::new().yellow().bold()
         } else {
             self.border(Focus::Extra)
         });
         if captured {
-            block = block.title_bottom(
+            block = block.title(
                 Line::from(" Ctrl+] back to dashboard · Ctrl+R/F5 restart ").right_aligned(),
             );
         } else if self.console_live() {
-            block = block.title_bottom(Line::from(" click or ⇧↓ to type ").right_aligned());
+            block = block.title(Line::from(" click or ⇧↓ to type ").right_aligned());
         }
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -3242,6 +3287,20 @@ impl App {
             .and_then(|r| r.pty.as_mut())
         {
             pty.resize(inner.height, inner.width);
+        }
+        let slot = &self.targets[idx].extra[c];
+        if slot.running
+            && let Some((step, since)) = &slot.loading
+        {
+            // Over the (still empty) screen, which already has the pane's size.
+            f.render_widget(Clear, inner);
+            let lines = viewer::loading_screen(
+                "Opening the console",
+                step,
+                since.elapsed(),
+                "still waiting for the console",
+            );
+            render_loading(f, inner, lines);
         }
     }
 
@@ -3357,6 +3416,26 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         w,
         h,
     )
+}
+
+/// The frame of a dashboard pane: a title line on top and nothing else, so
+/// that the content gets the width and height. Dialogs keep a full border.
+fn pane<'a>() -> Block<'a> {
+    Block::new().borders(Borders::TOP)
+}
+
+/// Draw a loading screen in the middle of AREA.
+fn render_loading(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+    let top = area.height.saturating_sub(lines.len() as u16) / 2;
+    let area = Rect {
+        y: area.y + top,
+        height: area.height - top,
+        ..area
+    };
+    f.render_widget(
+        Paragraph::new(lines).centered().wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 #[cfg(test)]

@@ -392,9 +392,7 @@ async fn run(endpoint: VncEndpoint, shared: &Shared, mut rx: mpsc::Receiver<Inpu
     // the tunnel and deletes the console connection) after the backend closed.
     let mut oci_session = OciHold::default();
     let connect = async {
-        shared
-            .push(shared.status(format!("connecting to {}", endpoint.address())))
-            .await;
+        shared.push(shared.status(endpoint.first_step())).await;
         match &endpoint.source {
             VncSource::Direct(direct) => {
                 let addr = direct.resolve().await.map_err(|e| format!("{e:#}"))?;

@@ -112,8 +112,15 @@ options and the container interface are compatible.
 - `tui`: the OpenStack serial console falls back to the console log
   (`openstack console log show`, polled, only new lines) when the server has no
   serial console; per target `mode = "auto"` (default), `"serial"` or `"log"`.
-- `tui`: the VNC pane shows a loading screen (spinner, current step, elapsed
-  time, a hint when it takes long) until the first picture is in.
+- `tui`: every console view (VNC, serial, console log, commands) shows the
+  same loading screen (spinner, current step, elapsed time, a hint when it
+  takes long) until the console is there. LSU's own console commands report
+  their steps to it instead of printing them into the pane.
+- `tui`: panes are framed by their title line only (the target list keeps one
+  rule beside the activity), and the pane hints sit in that line, so consoles
+  and pictures get the space the boxes took.
+- `tui`: the streamed OpenStack console log no longer shows the visible rest
+  of escape sequences (`[0;32m`), which Nova keeps when it drops the ESC bytes.
 
 ### Fixed
 
