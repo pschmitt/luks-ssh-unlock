@@ -138,6 +138,9 @@ impl Vnc {
             // And to tell us its lock-key state, so a caps lock that disagrees with the
             // local keyboard can be corrected instead of shouting.
             .add_encoding(VncEncoding::QemuLedStatePseudo)
+            // Keys as scancodes, so that the guest gets the key that types a
+            // character in its own layout, not the one QEMU's keymap guesses.
+            .add_encoding(VncEncoding::QemuExtendedKeyEventPseudo)
             // Asking for the cursor shape stops the server drawing the pointer into the
             // framebuffer, which is what lets it move at local speed instead of waiting for
             // a round trip. Not asked for in a view-only session: there is no local pointer
@@ -208,6 +211,8 @@ struct State {
     announced: Option<String>,
     /// Whether the session asked for clipboards to be exchanged at all.
     clipboard_wanted: bool,
+    /// The server takes scancodes; without it they are left out of key events.
+    scancodes: bool,
 }
 
 /// A live RFB session.
@@ -320,6 +325,10 @@ impl State {
             }
             VncEvent::Bell => Some(Update::Bell),
             VncEvent::LedState { num, caps, .. } => Some(Update::LockKeys { num, caps }),
+            VncEvent::ExtendedKeys => {
+                self.scancodes = true;
+                Some(Update::Scancodes)
+            }
             VncEvent::SetPixelFormat(pf) => {
                 // Nothing above acts on this: the connector pinned the format.
                 tracing::debug!("server pixel format: {pf:?}");
@@ -463,7 +472,12 @@ impl Backend for VncBackend {
         let event = match input {
             Input::Refresh { incremental: true } => X11Event::Refresh,
             Input::Refresh { incremental: false } => X11Event::FullRefresh,
-            Input::Key(key) => X11Event::KeyEvent(key),
+            Input::Key(mut key) => {
+                if !self.state.lock().unwrap().scancodes {
+                    key.scancode = None;
+                }
+                X11Event::KeyEvent(key)
+            }
             Input::Pointer(pointer) => X11Event::PointerEvent(pointer),
             Input::Clipboard(text) => self.state.lock().unwrap().paste(text),
             // No block flags: the server can answer immediately, which is the point.

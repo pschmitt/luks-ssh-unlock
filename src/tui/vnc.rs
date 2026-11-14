@@ -31,6 +31,7 @@ use tokio::time::Instant;
 use crate::console::{OciConsole, VncEndpoint, VncSource};
 use crate::oci::vnc::{Cancel as OciCancel, VncSession as OciSession};
 use crate::openstack::Kind as OsKind;
+use crate::vnc::keymap::{self, Layout};
 use crate::vnc::{Backend, ConnectError, Input, Key, Options, Rect, ScreenLayout, Update, Vnc};
 
 /// Pending pixel data above which the session thread waits for the dashboard.
@@ -71,6 +72,8 @@ pub enum Event {
         from: (u16, u16),
     },
     Layout(ScreenLayout),
+    /// The server takes keys by scancode.
+    Scancodes,
     /// Progress, for the status line.
     Status(String),
     /// The session is over, with the reason when it was a failure.
@@ -634,6 +637,7 @@ async fn pump(
                     }
                     Ok(Update::Copy { dst, from }) => shared.push(Event::Copy { dst, from }).await,
                     Ok(Update::Layout(layout)) => shared.push(Event::Layout(layout)).await,
+                    Ok(Update::Scancodes) => shared.push(Event::Scancodes).await,
                     Ok(Update::FrameEnd) => refresh_at = Some(Instant::now() + REFRESH_GAP),
                     Ok(Update::Pushing(p)) => pushing = p,
                     // Clipboard, cursor shape, lock keys, bell and latency
@@ -806,9 +810,111 @@ fn named_keysym(code: KeyCode) -> u32 {
     }
 }
 
+const ISO_LEVEL3_SHIFT: u32 = 0xfe03;
+const SPACE: u32 = 0x20;
+
+/// XT scancodes (QEMU numbering) of the modifiers and the space bar.
+const SC_CONTROL_L: u16 = 0x1d;
+const SC_SHIFT_L: u16 = 0x2a;
+const SC_ALT_L: u16 = 0x38;
+const SC_ALTGR: u16 = 0xb8;
+const SC_SPACE: u16 = 0x39;
+
+/// The scancode of a key that types no character.
+fn named_scancode(code: KeyCode) -> Option<u16> {
+    Some(match code {
+        KeyCode::Enter => 0x1c,
+        KeyCode::Tab | KeyCode::BackTab => 0x0f,
+        KeyCode::Backspace => 0x0e,
+        KeyCode::Esc => 0x01,
+        KeyCode::Up => 0xc8,
+        KeyCode::Down => 0xd0,
+        KeyCode::Left => 0xcb,
+        KeyCode::Right => 0xcd,
+        KeyCode::Home => 0xc7,
+        KeyCode::End => 0xcf,
+        KeyCode::PageUp => 0xc9,
+        KeyCode::PageDown => 0xd1,
+        KeyCode::Insert => 0xd2,
+        KeyCode::Delete => 0xd3,
+        KeyCode::F(n @ 1..=10) => 0x3a + u16::from(n),
+        KeyCode::F(11) => 0x57,
+        KeyCode::F(12) => 0x58,
+        _ => return None,
+    })
+}
+
 /// The key events for one key press: modifiers down, the key down and up,
 /// modifiers up. Empty for a key that has no keysym.
-pub fn key_events(code: KeyCode, mods: KeyModifiers) -> Vec<Key> {
+///
+/// With a guest `layout` (the server takes scancodes), the events carry the
+/// scancodes of the keys that type the character in that layout, with Shift
+/// or AltGr as it needs them, so the guest gets the right character whatever
+/// keyboard layout the server assumes. A key the layout does not have goes by
+/// keysym alone, as without a layout.
+pub fn key_events(code: KeyCode, mods: KeyModifiers, layout: Option<Layout>) -> Vec<Key> {
+    layout
+        .and_then(|layout| scancode_events(code, mods, layout))
+        .unwrap_or_else(|| keysym_events(code, mods))
+}
+
+fn scancode_events(code: KeyCode, mods: KeyModifiers, layout: Layout) -> Option<Vec<Key>> {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let alt = mods.contains(KeyModifiers::ALT);
+    let (keysym, stroke) = match code {
+        KeyCode::Char(c) => {
+            // Ctrl+letter is the letter's key; a shift that came with it is
+            // the user's own (Ctrl+Shift+C).
+            let c = if ctrl && c.is_ascii_alphabetic() {
+                c.to_ascii_lowercase()
+            } else {
+                c
+            };
+            let mut stroke = keymap::stroke(layout, c)?;
+            stroke.shift |= ctrl && mods.contains(KeyModifiers::SHIFT);
+            (char_keysym(c), stroke)
+        }
+        other => (
+            named_keysym(other),
+            keymap::Stroke {
+                scancode: named_scancode(other)?,
+                shift: mods.contains(KeyModifiers::SHIFT) || other == KeyCode::BackTab,
+                altgr: false,
+                dead: false,
+            },
+        ),
+    };
+    if keysym == 0 {
+        return None;
+    }
+    let key = |keysym, scancode, down| Key {
+        keysym,
+        down,
+        scancode: Some(scancode),
+    };
+    let held: Vec<(u32, u16)> = [
+        (ctrl, CONTROL_L, SC_CONTROL_L),
+        (alt, ALT_L, SC_ALT_L),
+        (stroke.shift, SHIFT_L, SC_SHIFT_L),
+        (stroke.altgr, ISO_LEVEL3_SHIFT, SC_ALTGR),
+    ]
+    .into_iter()
+    .filter(|(on, ..)| *on)
+    .map(|(_, sym, sc)| (sym, sc))
+    .collect();
+    let mut out: Vec<Key> = held.iter().map(|&(sym, sc)| key(sym, sc, true)).collect();
+    out.push(key(keysym, stroke.scancode, true));
+    out.push(key(keysym, stroke.scancode, false));
+    out.extend(held.iter().rev().map(|&(sym, sc)| key(sym, sc, false)));
+    if stroke.dead {
+        // The guest waits for the next key; a space gives the character.
+        out.push(key(SPACE, SC_SPACE, true));
+        out.push(key(SPACE, SC_SPACE, false));
+    }
+    Some(out)
+}
+
+fn keysym_events(code: KeyCode, mods: KeyModifiers) -> Vec<Key> {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let alt = mods.contains(KeyModifiers::ALT);
     let mut shift = mods.contains(KeyModifiers::SHIFT) || code == KeyCode::BackTab;
@@ -842,16 +948,26 @@ pub fn key_events(code: KeyCode, mods: KeyModifiers) -> Vec<Key> {
     }
     let mut out: Vec<Key> = held
         .iter()
-        .map(|&keysym| Key { keysym, down: true })
+        .map(|&keysym| Key {
+            keysym,
+            down: true,
+            scancode: None,
+        })
         .collect();
-    out.push(Key { keysym, down: true });
+    out.push(Key {
+        keysym,
+        down: true,
+        scancode: None,
+    });
     out.push(Key {
         keysym,
         down: false,
+        scancode: None,
     });
     out.extend(held.iter().rev().map(|&keysym| Key {
         keysym,
         down: false,
+        scancode: None,
     }));
     out
 }
@@ -913,48 +1029,107 @@ mod tests {
         e.pixels()
     }
 
+    fn scancodes(keys: &[Key]) -> Vec<(u16, bool)> {
+        keys.iter()
+            .map(|k| (k.scancode.expect("scancode"), k.down))
+            .collect()
+    }
+
+    #[test]
+    fn with_a_guest_layout_keys_go_by_scancode() {
+        let de = Some(Layout::De);
+        // QWERTZ: z is the key that is y on a US keyboard.
+        let z = key_events(KeyCode::Char('z'), KeyModifiers::NONE, de);
+        assert_eq!(scancodes(&z), [(0x15, true), (0x15, false)]);
+        assert_eq!(z[0].keysym, 0x7a);
+        // An upper-case letter holds Shift around the key.
+        let y = key_events(KeyCode::Char('Y'), KeyModifiers::SHIFT, de);
+        assert_eq!(
+            scancodes(&y),
+            [(0x2a, true), (0x2c, true), (0x2c, false), (0x2a, false)]
+        );
+        // @ is AltGr+Q on a German keyboard.
+        let at = key_events(KeyCode::Char('@'), KeyModifiers::NONE, de);
+        assert_eq!(
+            scancodes(&at),
+            [(0xb8, true), (0x10, true), (0x10, false), (0xb8, false)]
+        );
+        // Ctrl+C is Ctrl and the C key.
+        let c = key_events(KeyCode::Char('c'), KeyModifiers::CONTROL, de);
+        assert_eq!(
+            scancodes(&c),
+            [(0x1d, true), (0x2e, true), (0x2e, false), (0x1d, false)]
+        );
+        // A dead key is followed by a space, which gives the character.
+        let caret = key_events(KeyCode::Char('^'), KeyModifiers::NONE, de);
+        assert_eq!(
+            scancodes(&caret),
+            [(0x29, true), (0x29, false), (0x39, true), (0x39, false)]
+        );
+        // Named keys have their own scancodes.
+        let up = key_events(KeyCode::Up, KeyModifiers::NONE, de);
+        assert_eq!(scancodes(&up), [(0xc8, true), (0xc8, false)]);
+        let us = key_events(KeyCode::Char('z'), KeyModifiers::NONE, Some(Layout::Us));
+        assert_eq!(scancodes(&us), [(0x2c, true), (0x2c, false)]);
+    }
+
+    #[test]
+    fn keys_a_layout_lacks_and_servers_without_scancodes_use_keysyms() {
+        let e = key_events(KeyCode::Char('é'), KeyModifiers::NONE, Some(Layout::De));
+        assert!(e.iter().all(|k| k.scancode.is_none()));
+        assert_eq!(e[0].keysym, 0xe9);
+        let z = key_events(KeyCode::Char('z'), KeyModifiers::NONE, None);
+        assert!(z.iter().all(|k| k.scancode.is_none()));
+    }
+
     #[test]
     fn typed_characters_are_sent_as_their_keysym() {
-        let keys = key_events(KeyCode::Char('a'), KeyModifiers::NONE);
+        let keys = key_events(KeyCode::Char('a'), KeyModifiers::NONE, None);
         assert_eq!(
             keys,
             vec![
                 Key {
                     keysym: 0x61,
-                    down: true
+                    down: true,
+                    scancode: None
                 },
                 Key {
                     keysym: 0x61,
-                    down: false
+                    down: false,
+                    scancode: None
                 }
             ]
         );
         // The shift of a typed character is already in the character.
-        let keys = key_events(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        let keys = key_events(KeyCode::Char('A'), KeyModifiers::SHIFT, None);
         assert_eq!(
             keys.iter().map(|k| k.keysym).collect::<Vec<_>>(),
             [0x41, 0x41]
         );
         // Latin-1 as it is, anything else as a Unicode keysym.
         assert_eq!(
-            key_events(KeyCode::Char('é'), KeyModifiers::NONE)[0].keysym,
+            key_events(KeyCode::Char('é'), KeyModifiers::NONE, None)[0].keysym,
             0xe9
         );
         assert_eq!(
-            key_events(KeyCode::Char('€'), KeyModifiers::NONE)[0].keysym,
+            key_events(KeyCode::Char('€'), KeyModifiers::NONE, None)[0].keysym,
             0x0100_20ac
         );
     }
 
     #[test]
     fn modifiers_wrap_the_key() {
-        let keys = key_events(KeyCode::Char('C'), KeyModifiers::CONTROL);
+        let keys = key_events(KeyCode::Char('C'), KeyModifiers::CONTROL, None);
         let seq: Vec<(u32, bool)> = keys.iter().map(|k| (k.keysym, k.down)).collect();
         assert_eq!(
             seq,
             [(0xffe3, true), (0x63, true), (0x63, false), (0xffe3, false)]
         );
-        let keys = key_events(KeyCode::Delete, KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let keys = key_events(
+            KeyCode::Delete,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            None,
+        );
         let seq: Vec<(u32, bool)> = keys.iter().map(|k| (k.keysym, k.down)).collect();
         assert_eq!(
             seq,
@@ -968,12 +1143,13 @@ mod tests {
             ]
         );
         // Shift is sent for keys that are not characters, and with Ctrl.
-        let keys = key_events(KeyCode::BackTab, KeyModifiers::SHIFT);
+        let keys = key_events(KeyCode::BackTab, KeyModifiers::SHIFT, None);
         assert_eq!(keys.first().map(|k| k.keysym), Some(0xffe1));
         assert_eq!(keys[1].keysym, 0xff09);
         let keys = key_events(
             KeyCode::Char('T'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            None,
         );
         assert_eq!(keys.iter().filter(|k| k.keysym == 0xffe1).count(), 2);
         assert!(keys.iter().any(|k| k.keysym == 0x74));
@@ -991,14 +1167,14 @@ mod tests {
             (KeyCode::F(12), 0xffc9),
         ] {
             assert_eq!(
-                key_events(code, KeyModifiers::NONE)[0].keysym,
+                key_events(code, KeyModifiers::NONE, None)[0].keysym,
                 sym,
                 "{code:?}"
             );
         }
-        assert!(key_events(KeyCode::Null, KeyModifiers::NONE).is_empty());
-        assert!(key_events(KeyCode::F(99), KeyModifiers::NONE).is_empty());
-        assert!(key_events(KeyCode::Char('\u{1}'), KeyModifiers::NONE).is_empty());
+        assert!(key_events(KeyCode::Null, KeyModifiers::NONE, None).is_empty());
+        assert!(key_events(KeyCode::F(99), KeyModifiers::NONE, None).is_empty());
+        assert!(key_events(KeyCode::Char('\u{1}'), KeyModifiers::NONE, None).is_empty());
     }
 
     #[test]
@@ -1167,6 +1343,7 @@ mod tests {
             quality: None,
             compression: None,
             resize_remote: false,
+            keymap: None,
         }
     }
 
@@ -1190,10 +1367,15 @@ mod tests {
     #[test]
     fn releases_are_never_dropped_when_the_input_queue_is_full() {
         let (session, mut rx) = stalled_session(2);
-        let down = |keysym| Key { keysym, down: true };
+        let down = |keysym| Key {
+            keysym,
+            down: true,
+            scancode: None,
+        };
         let up = |keysym| Key {
             keysym,
             down: false,
+            scancode: None,
         };
         assert!(session.send(Input::Key(down(1))));
         assert!(session.send(Input::Key(down(2))));
@@ -1209,14 +1391,16 @@ mod tests {
             rx.try_recv().unwrap(),
             Input::Key(Key {
                 keysym: 1,
-                down: true
+                down: true,
+                scancode: None
             })
         ));
         assert!(matches!(
             rx.try_recv().unwrap(),
             Input::Key(Key {
                 keysym: 2,
-                down: true
+                down: true,
+                scancode: None
             })
         ));
         assert!(session.send(Input::Key(down(5))));
@@ -1224,14 +1408,16 @@ mod tests {
             rx.try_recv().unwrap(),
             Input::Key(Key {
                 keysym: 1,
-                down: false
+                down: false,
+                scancode: None
             })
         ));
         assert!(matches!(
             rx.try_recv().unwrap(),
             Input::Key(Key {
                 keysym: 5,
-                down: true
+                down: true,
+                scancode: None
             })
         ));
         assert!(session.pending_lock().is_empty());
@@ -1242,12 +1428,14 @@ mod tests {
         let (session, _rx) = stalled_session(1);
         assert!(session.send(Input::Key(Key {
             keysym: 1,
-            down: true
+            down: true,
+            scancode: None
         })));
         for i in 0..=PENDING_RELEASES {
             session.release(Input::Key(Key {
                 keysym: 100 + i as u32,
                 down: false,
+                scancode: None,
             }));
         }
         assert!(session.stop.flag.load(Ordering::SeqCst));
@@ -1260,7 +1448,8 @@ mod tests {
         let (session, _rx) = stalled_session(1);
         assert!(session.send(Input::Key(Key {
             keysym: 1,
-            down: true
+            down: true,
+            scancode: None
         })));
         for x in 0..10 {
             session.release(Input::Pointer(crate::vnc::Pointer {
@@ -1383,7 +1572,7 @@ mod tests {
         assert_eq!(len, 8 * 4 * 4);
         assert!(size.is_none() || size == Some((8, 4)));
         // A key press reaches the server as a press and a release.
-        session.send_keys(&key_events(KeyCode::Char('a'), KeyModifiers::NONE));
+        session.send_keys(&key_events(KeyCode::Char('a'), KeyModifiers::NONE, None));
         assert_eq!(keys.recv_timeout(Duration::from_secs(10)), Ok((true, 0x61)));
         assert_eq!(
             keys.recv_timeout(Duration::from_secs(10)),
@@ -1494,6 +1683,7 @@ mod tests {
             quality: None,
             compression: None,
             resize_remote: false,
+            keymap: None,
         };
         let session = Session::start(endpoint);
         let end = std::time::Instant::now() + Duration::from_secs(10);
@@ -1528,6 +1718,7 @@ mod tests {
             quality: None,
             compression: None,
             resize_remote: false,
+            keymap: None,
         };
         let session = Session::start(endpoint);
         std::thread::sleep(Duration::from_millis(100));

@@ -232,6 +232,7 @@ fn real_main() -> Result<bool> {
                     env: None,
                     extras: Vec::new(),
                     privileged: tui::Privileged::Never,
+                    default_view: None,
                 });
             }
             let extras = if extra_commands.is_empty() {

@@ -193,6 +193,10 @@ struct VncRun {
     /// size that was asked for.
     resize: Option<((u16, u16), Instant)>,
     resized: Option<(u16, u16)>,
+    /// The guest's keyboard layout, and whether the server takes scancodes
+    /// (keys then go as the guest's layout types them).
+    keymap: crate::vnc::keymap::Layout,
+    scancodes: bool,
 }
 
 /// Everything the VNC viewer keeps between frames.
@@ -766,6 +770,17 @@ pub struct Source {
     pub extras: Vec<ExtraCmd>,
     pub env: Option<std::collections::HashMap<String, String>>,
     pub privileged: Privileged,
+    /// The label of the view to show first (a sidecar's `"default": true`).
+    pub default_view: Option<String>,
+}
+
+/// Put the default view first, so that it is what the target opens with.
+fn default_first(mut cmds: Vec<ExtraCmd>, default: Option<&str>) -> Vec<ExtraCmd> {
+    if let Some(i) = default.and_then(|label| cmds.iter().position(|c| c.label == label)) {
+        let cmd = cmds.remove(i);
+        cmds.insert(0, cmd);
+    }
+    cmds
 }
 
 fn permission_denied(e: &anyhow::Error) -> bool {
@@ -884,9 +899,15 @@ pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
             let mut extras = read_extras(&p.with_extension("tui-commands"));
             let console = crate::console::read(&p.with_extension("console.json"), &name);
             let vnc = crate::console::read_vnc(&p.with_extension("vnc.json"), &name);
+            let mut default_view = None;
             for sidecar in [console, vnc] {
                 match sidecar {
-                    Ok(Some(extra)) => extras = merge_extras(&extras, vec![extra]),
+                    Ok(Some((extra, default))) => {
+                        if default {
+                            default_view = Some(extra.label.clone());
+                        }
+                        extras = merge_extras(&extras, vec![extra]);
+                    }
                     Ok(None) => {}
                     Err(e) if lenient && permission_denied(&e) => {}
                     Err(e) => return Err(e),
@@ -897,6 +918,7 @@ pub fn discover(files: &[PathBuf]) -> Result<Vec<Source>> {
                 name,
                 env: Some(env),
                 privileged,
+                default_view,
             })
         })
         .collect()
@@ -1450,7 +1472,10 @@ pub fn run(
                 .unwrap_or_default()
         });
         let spec_host = host.clone();
-        let cmds = merge_extras(&extras, src.extras.clone());
+        let cmds = default_first(
+            merge_extras(&extras, src.extras.clone()),
+            src.default_view.as_deref(),
+        );
         let mut target = Target {
             name: src.name.clone(),
             host,
@@ -4252,6 +4277,7 @@ mod tests {
             quality: None,
             compression: None,
             resize_remote: false,
+            keymap: None,
         }
     }
 
@@ -4414,6 +4440,30 @@ mod tests {
             a.help = true;
             render(&mut a, w, h);
         }
+    }
+
+    #[test]
+    fn the_default_view_comes_first() {
+        let cmd = |label: &str| ExtraCmd {
+            label: label.into(),
+            command: "x".into(),
+            interactive: false,
+            vnc: None,
+        };
+        let labels = |v: Vec<ExtraCmd>| v.into_iter().map(|c| c.label).collect::<Vec<_>>();
+        let cmds = vec![cmd("console"), cmd("log"), cmd("vnc")];
+        assert_eq!(
+            labels(default_first(cmds.clone(), Some("vnc"))),
+            ["vnc", "console", "log"]
+        );
+        assert_eq!(
+            labels(default_first(cmds.clone(), None)),
+            ["console", "log", "vnc"]
+        );
+        assert_eq!(
+            labels(default_first(cmds, Some("missing"))),
+            ["console", "log", "vnc"]
+        );
     }
 
     #[test]

@@ -95,6 +95,15 @@ options and the container interface are compatible.
 - Container: static musl binary, native amd64/arm64 builds, provenance
   attestations and SBOM.
 
+- `tui`: a target can open with its graphical console: `"default": true` in
+  its `vnc.json` or `console.json`, from the NixOS module's per-instance
+  `defaultView` or the global `tui.defaultView`.
+- `tui`: keys reach QEMU-based VNC consoles (OpenStack, OCI) as the scancodes
+  that type each character in the guest's keyboard layout (QEMU's extended key
+  event). A guest with a German console layout no longer gets `y` for `z` or
+  wrong symbols. The layout is the VNC parameter `keymap` (`de` or `us`), by
+  default the dashboard machine's console layout.
+
 ### Fixed
 
 - `tui`: VNC uses explicit Kitty placements in tmux, including normal panes,

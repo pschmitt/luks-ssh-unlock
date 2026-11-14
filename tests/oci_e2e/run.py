@@ -431,6 +431,7 @@ def scenario():
         check("I0 C expands the graphical console to fullscreen", fx.wait(lambda: "Targets" not in fx.capture() and "vnc" in fx.capture()))
         fx.keys("a", literal=True)
         check("O13 keys reach the instance in fullscreen (RFB key event logged)", fx.wait(lambda: "vnc key down=1 a" in fx.log("ssh.log")))
+        check("O13b the server takes scancodes, so the key goes with its scancode", "vnc key down=1 a sc=0x1e" in fx.log("ssh.log"), " | ".join(l for l in fx.log("ssh.log").splitlines() if "key down=1 a" in l))
         check("O14 and the new frame shows the reaction (stripe colour changed)", fx.wait(lambda: any(near(p, (4, 130, 70), 30) for p in stripe(last_images(fx)[-1]))), "stripe now ~(4,130,70)")
         # This fixture drives tmux through a PTY; writing SGR bytes to that PTY
         # does not generate a real Kitty mouse event. Pointer input is covered by

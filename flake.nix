@@ -74,6 +74,7 @@
                         };
                         instances.smoke = {
                           hostname = "target.example.invalid";
+                          defaultView = "vnc";
                           key = "/run/secrets/ssh_key";
                           passphraseFile = "/run/secrets/luks";
                           console = {
@@ -131,6 +132,8 @@
               assert builtins.elem "luks-ssh-unlock-admin" users.bob.extraGroups;
               assert nixos.config.environment.etc."luks-ssh-unlock/smoke.env".mode == "0600";
               assert vnc.type == "vnc";
+              # The view the dashboard shows first.
+              assert vnc.default && !(console ? default);
               assert
                 vnc.parameters == {
                   host = "127.0.0.1";

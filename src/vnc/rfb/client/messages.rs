@@ -9,6 +9,12 @@ pub(super) enum ClientMsg {
 
     FramebufferUpdateRequest(Rect, u8),
     KeyEvent(u32, bool),
+    /// QEMU's extended key event: the keysym and the key's XT scancode.
+    QemuKeyEvent {
+        keysym: u32,
+        scancode: u32,
+        down: bool,
+    },
     PointerEvent(u16, u16, u8),
     ClientCutText(String),
     /// A `ClientCutText` in the extended form: the body from [`clipboard`], sent
@@ -137,6 +143,26 @@ impl ClientMsg {
                 // +--------------+--------------+--------------+
                 let mut payload = vec![4, down as u8, 0, 0];
                 payload.write_u32(keycode).await?;
+                writer.write_all(&payload).await?;
+                Ok(())
+            }
+            ClientMsg::QemuKeyEvent {
+                keysym,
+                scancode,
+                down,
+            } => {
+                // +--------------+--------------+--------------+
+                // | No. of bytes | Type [Value] | Description  |
+                // +--------------+--------------+--------------+
+                // | 1            | U8 [255]     | message-type |
+                // | 1            | U8 [0]       | submessage   |
+                // | 2            | U16          | down-flag    |
+                // | 4            | U32          | keysym       |
+                // | 4            | U32          | keycode      |
+                // +--------------+--------------+--------------+
+                let mut payload = vec![255, 0, 0, down as u8];
+                payload.extend_from_slice(&keysym.to_be_bytes());
+                payload.extend_from_slice(&scancode.to_be_bytes());
                 writer.write_all(&payload).await?;
                 Ok(())
             }
@@ -427,6 +453,13 @@ mod client_msg_tests {
         assert_eq!(key, vec![4, 1, 0, 0, 0x00, 0x00, 0xff, 0xe1]);
         let up = encode(ClientMsg::KeyEvent(0x61, false)).await;
         assert_eq!(up, vec![4, 0, 0, 0, 0x00, 0x00, 0x00, 0x61]);
+        let scan = encode(ClientMsg::QemuKeyEvent {
+            keysym: 0x7a,
+            scancode: 0xc8,
+            down: true,
+        })
+        .await;
+        assert_eq!(scan, vec![255, 0, 0, 1, 0, 0, 0, 0x7a, 0, 0, 0, 0xc8]);
         let pointer = encode(ClientMsg::PointerEvent(1599, 832, 0b101)).await;
         assert_eq!(pointer, vec![5, 0b101, 0x06, 0x3f, 0x03, 0x40]);
     }

@@ -56,12 +56,32 @@ struct OpenstackSerialParameters {
     openstack_bin: Option<String>,
 }
 
-pub fn read(path: &Path, target: &str) -> Result<Option<ExtraCmd>> {
+/// A sidecar's optional top-level `"default": true` (show this view first),
+/// taken out so that the strict typed parsing below never sees it.
+fn take_default(data: &[u8]) -> Result<(Vec<u8>, bool)> {
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_slice(data) else {
+        // Not an object: let the typed parser say what is wrong.
+        return Ok((data.to_vec(), false));
+    };
+    let default = match map.remove("default") {
+        None => false,
+        Some(serde_json::Value::Bool(b)) => b,
+        Some(_) => bail!("\"default\" must be true or false"),
+    };
+    Ok((serde_json::to_vec(&map)?, default))
+}
+
+/// A view read from a sidecar, and whether it is the target's default view.
+pub type Sidecar = Option<(ExtraCmd, bool)>;
+
+pub fn read(path: &Path, target: &str) -> Result<Sidecar> {
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     };
+    let (data, default) = take_default(&data)
+        .with_context(|| format!("invalid console configuration in {}", path.display()))?;
     let config: Console = serde_json::from_slice(&data)
         .with_context(|| format!("invalid console configuration in {}", path.display()))?;
     let (command, interactive) = match config {
@@ -165,12 +185,15 @@ pub fn read(path: &Path, target: &str) -> Result<Option<ExtraCmd>> {
     if command.trim().is_empty() {
         bail!("console command cannot be empty");
     }
-    Ok(Some(ExtraCmd {
-        label: "console".into(),
-        command,
-        interactive,
-        vnc: None,
-    }))
+    Ok(Some((
+        ExtraCmd {
+            label: "console".into(),
+            command,
+            interactive,
+            vnc: None,
+        },
+        default,
+    )))
 }
 
 /// Label of the VNC pane in the dashboard.
@@ -199,6 +222,8 @@ pub struct VncEndpoint {
     pub compression: Option<u8>,
     /// Ask the remote desktop to take the size of the pane.
     pub resize_remote: bool,
+    /// The guest's keyboard layout; the local console's when not set.
+    pub keymap: Option<crate::vnc::keymap::Layout>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -498,6 +523,7 @@ struct VncParameters {
     compression: Option<u8>,
     #[serde(default)]
     resize_remote: bool,
+    keymap: Option<String>,
     #[serde(default)]
     allow_remote: bool,
 }
@@ -520,6 +546,7 @@ struct OpenstackVncParameters {
     compression: Option<u8>,
     #[serde(default)]
     resize_remote: bool,
+    keymap: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -541,6 +568,7 @@ struct OciVncParameters {
     compression: Option<u8>,
     #[serde(default)]
     resize_remote: bool,
+    keymap: Option<String>,
 }
 
 /// The target's graphical console, from `<name>.vnc.json`:
@@ -552,20 +580,25 @@ struct OciVncParameters {
 /// (likewise named like the target unless `instance` says otherwise). `None` when there is no such file.
 /// It lives next to, and independent of, the `console.json` (serial console),
 /// so a target can offer both.
-pub fn read_vnc(path: &Path, target: &str) -> Result<Option<ExtraCmd>> {
+pub fn read_vnc(path: &Path, target: &str) -> Result<Sidecar> {
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     };
+    let (data, default) = take_default(&data)
+        .with_context(|| format!("invalid VNC configuration in {}", path.display()))?;
     let endpoint = parse_vnc(&data, target)
         .with_context(|| format!("invalid VNC configuration in {}", path.display()))?;
-    Ok(Some(ExtraCmd {
-        label: VNC_LABEL.into(),
-        command: VNC_COMMAND.into(),
-        interactive: false,
-        vnc: Some(endpoint),
-    }))
+    Ok(Some((
+        ExtraCmd {
+            label: VNC_LABEL.into(),
+            command: VNC_COMMAND.into(),
+            interactive: false,
+            vnc: Some(endpoint),
+        },
+        default,
+    )))
 }
 
 fn check_vnc_numbers(quality: Option<u8>, compression: Option<u8>) -> Result<()> {
@@ -575,6 +608,13 @@ fn check_vnc_numbers(quality: Option<u8>, compression: Option<u8>) -> Result<()>
         }
     }
     Ok(())
+}
+
+fn check_keymap(name: Option<String>) -> Result<Option<crate::vnc::keymap::Layout>> {
+    let Some(name) = name else { return Ok(None) };
+    crate::vnc::keymap::Layout::parse(&name)
+        .map(Some)
+        .with_context(|| format!("unsupported keymap \"{name}\": use \"de\" or \"us\""))
 }
 
 fn check_password_file(file: Option<String>) -> Result<Option<PathBuf>> {
@@ -630,6 +670,7 @@ fn parse_vnc(data: &[u8], target: &str) -> Result<VncEndpoint> {
                 quality: p.quality,
                 compression: p.compression,
                 resize_remote: p.resize_remote,
+                keymap: check_keymap(p.keymap)?,
             })
         }
         VncConfig::Openstack { parameters: p } => {
@@ -649,6 +690,7 @@ fn parse_vnc(data: &[u8], target: &str) -> Result<VncEndpoint> {
                 quality: p.quality,
                 compression: p.compression,
                 resize_remote: p.resize_remote,
+                keymap: check_keymap(p.keymap)?,
             })
         }
         VncConfig::Oci { parameters: p } => {
@@ -669,6 +711,7 @@ fn parse_vnc(data: &[u8], target: &str) -> Result<VncEndpoint> {
                 quality: p.quality,
                 compression: p.compression,
                 resize_remote: p.resize_remote,
+                keymap: check_keymap(p.keymap)?,
             })
         }
     }
@@ -933,7 +976,7 @@ mod tests {
             r#"{"type":"command","parameters":{"command":"printf hello","interactive":true}}"#,
         )
         .unwrap();
-        let command = read(&path, "target").unwrap().unwrap();
+        let command = read(&path, "target").unwrap().unwrap().0;
         assert_eq!(command.label, "console");
         assert_eq!(command.command, "printf hello");
         assert!(command.interactive);
@@ -952,7 +995,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("target.console.json");
         std::fs::write(&path, r#"{"type":"oci","parameters":{"identity":"/path with spaces/key","profile":"profile","keep":true}}"#).unwrap();
-        let command = read(&path, "target").unwrap().unwrap();
+        let command = read(&path, "target").unwrap().unwrap().0;
         assert!(command.interactive);
         assert!(command.command.contains("--instance"));
         assert!(command.command.contains("target"));
@@ -964,7 +1007,7 @@ mod tests {
             r#"{"type":"oci","parameters":{"instance":"{name}","profile":"{host}"}}"#,
         )
         .unwrap();
-        let command = read(&path, "target").unwrap().unwrap();
+        let command = read(&path, "target").unwrap().unwrap().0;
         assert!(!command.command.contains("{name}"));
         assert!(!command.command.contains("{host}"));
     }
@@ -1161,7 +1204,7 @@ mod tests {
             r#"{"type":"openstack","parameters":{"cloud":"prod","caFile":"/path with spaces/ca.pem","allowInsecure":true}}"#,
         )
         .unwrap();
-        let c = read(&path, "web").unwrap().unwrap();
+        let c = read(&path, "web").unwrap().unwrap().0;
         assert!(c.interactive && c.vnc.is_none());
         for needle in [
             "console openstack",
@@ -1178,7 +1221,7 @@ mod tests {
             r#"{"type":"openstack","parameters":{"server":"{name}","cloud":"{host}"}}"#,
         )
         .unwrap();
-        let c = read(&path, "web").unwrap().unwrap();
+        let c = read(&path, "web").unwrap().unwrap().0;
         assert!(!c.command.contains("{name}") && !c.command.contains("{host}"));
         std::fs::write(
             &path,
@@ -1206,12 +1249,35 @@ mod tests {
         let path = dir.path().join("target.vnc.json");
         assert!(read_vnc(&path, "target").unwrap().is_none());
         std::fs::write(&path, r#"{"type":"vnc","parameters":{"viewOnly":true}}"#).unwrap();
-        let cmd = read_vnc(&path, "target").unwrap().unwrap();
+        let cmd = read_vnc(&path, "target").unwrap().unwrap().0;
         assert_eq!(cmd.label, VNC_LABEL);
         assert!(!cmd.interactive);
         assert!(cmd.vnc.as_ref().unwrap().view_only);
         std::fs::write(&path, "{").unwrap();
         assert!(read_vnc(&path, "target").is_err());
+    }
+
+    #[test]
+    fn a_sidecar_can_mark_its_view_as_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let vnc = dir.path().join("t.vnc.json");
+        std::fs::write(&vnc, r#"{"type":"vnc","parameters":{}}"#).unwrap();
+        assert!(!read_vnc(&vnc, "t").unwrap().unwrap().1);
+        std::fs::write(&vnc, r#"{"default":true,"type":"vnc","parameters":{}}"#).unwrap();
+        let (cmd, default) = read_vnc(&vnc, "t").unwrap().unwrap();
+        assert!(default && cmd.vnc.is_some());
+        std::fs::write(&vnc, r#"{"default":"yes","type":"vnc","parameters":{}}"#).unwrap();
+        assert!(read_vnc(&vnc, "t").is_err());
+        let console = dir.path().join("t.console.json");
+        std::fs::write(
+            &console,
+            r#"{"type":"command","default":true,"parameters":{"command":"echo"}}"#,
+        )
+        .unwrap();
+        assert!(read(&console, "t").unwrap().unwrap().1);
+        // Anything else unknown is still refused.
+        std::fs::write(&vnc, r#"{"type":"vnc","dflt":true,"parameters":{}}"#).unwrap();
+        assert!(read_vnc(&vnc, "t").is_err());
     }
 
     #[test]

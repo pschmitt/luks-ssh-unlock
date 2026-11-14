@@ -179,9 +179,14 @@ impl App {
         slot.finished_at = None;
         slot.vnc_note = format!("connecting to {}", endpoint.address());
         self.vnc.renderer = Some(Renderer::new(transport));
+        let keymap = endpoint
+            .keymap
+            .unwrap_or_else(crate::vnc::keymap::Layout::detect);
         self.vnc.run = Some(VncRun {
             t,
             c,
+            keymap,
+            scancodes: false,
             session: Session::start(endpoint),
             framed: false,
             layout: None,
@@ -231,6 +236,12 @@ impl App {
                     }
                 }
                 Event::Layout(layout) => run.layout = Some(layout),
+                Event::Scancodes => {
+                    if std::env::var_os("LSU_VNC_TRACE").is_some() {
+                        eprintln!("[LSU_VNC_TRACE] the server takes scancodes");
+                    }
+                    run.scancodes = true;
+                }
                 Event::Status(s) => note = Some(s),
                 Event::Ended(reason) => {
                     ended = Some(reason);
@@ -491,7 +502,9 @@ impl App {
         mods: ratatui::crossterm::event::KeyModifiers,
     ) {
         if let Some(run) = self.vnc_ready(t, c) {
-            run.session.send_keys(&super::vnc::key_events(code, mods));
+            let layout = run.scancodes.then_some(run.keymap);
+            run.session
+                .send_keys(&super::vnc::key_events(code, mods, layout));
         }
     }
 

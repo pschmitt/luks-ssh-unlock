@@ -122,6 +122,10 @@ impl ResizeStatus {
 pub struct Key {
     pub keysym: u32,
     pub down: bool,
+    /// The XT scancode of the physical key, when it is known. A server that
+    /// takes scancodes (QEMU's extended key event) then gets the key itself,
+    /// whatever keyboard layout it would otherwise assume for the keysym.
+    pub scancode: Option<u16>,
 }
 
 /// Where the pointer is and which buttons are held.
@@ -179,6 +183,9 @@ pub enum Update {
     ///
     /// A backend that only ever pushes says `true` once, before anything else.
     Pushing(bool),
+    /// The server takes keys by scancode ([`Key::scancode`]), so keys can be sent
+    /// as the guest's layout types them.
+    Scancodes,
     /// A round trip can be measured from now on, with [`Input::ProbeLatency`].
     LatencyAvailable,
     /// The round trip asked for by [`Input::ProbeLatency`] came back.

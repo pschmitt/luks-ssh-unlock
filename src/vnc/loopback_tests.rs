@@ -97,6 +97,7 @@ async fn exercise_loopback(preconnected: bool) {
         .send(Input::Key(Key {
             keysym: u32::from(b'a'),
             down: true,
+            scancode: None,
         }))
         .await
         .unwrap();

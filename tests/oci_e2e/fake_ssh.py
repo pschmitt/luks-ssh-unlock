@@ -114,8 +114,13 @@ async def rfb(r, w):
             elif m == 2:
                 d = await read(3)
                 n = struct.unpack(">H", d[1:3])[0]
-                await read(4 * n)
+                encodings = struct.unpack(f">{n}i", await read(4 * n))
                 log(f"vnc setencodings n={n}")
+                if -258 in encodings:
+                    # Like QEMU: acknowledge extended key events with an empty
+                    # rectangle of that encoding.
+                    w.write(struct.pack(">BxH", 0, 1) + struct.pack(">HHHHi", 0, 0, 0, 0, -258))
+                    await w.drain()
             elif m == 3:
                 await read(9)
                 state["pending"] = True
@@ -125,6 +130,17 @@ async def rfb(r, w):
                 down, key = d[0], struct.unpack(">I", d[3:7])[0]
                 label = KEYS.get(key) or (chr(key) if 32 <= key < 127 else hex(key))
                 log(f"vnc key down={down} {label}")
+                if down:
+                    state["stripe"] = ((state["stripe"][0] + 60) % 256, (state["stripe"][1] + 90) % 256, (state["stripe"][2] + 30) % 256)
+                    state["dirty"] = True
+                    await push()
+            elif m == 255:
+                # QEMU extended key event: submessage, down, keysym, scancode.
+                d = await read(11)
+                down = struct.unpack(">H", d[1:3])[0]
+                key, code = struct.unpack(">II", d[3:11])
+                label = KEYS.get(key) or (chr(key) if 32 <= key < 127 else hex(key))
+                log(f"vnc key down={down} {label} sc={code:#x}")
                 if down:
                     state["stripe"] = ((state["stripe"][0] + 60) % 256, (state["stripe"][1] + 90) % 256, (state["stripe"][2] + 30) % 256)
                     state["dirty"] = True

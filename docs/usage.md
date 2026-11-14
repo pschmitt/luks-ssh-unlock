@@ -355,8 +355,19 @@ are shown as one of a few fixed messages (host key rejected, key refused,
 console busy, instance without a VNC server, service unreachable); the output
 of `ssh` is never shown.
 
+Every graphical source also takes `keymap`, the keyboard layout of the guest's
+console (`de` or `us`; by default the layout of this machine's console, from
+`KEYMAP` in `/etc/vconsole.conf`). A server that takes scancodes (QEMU's
+extended key event, as OpenStack and OCI consoles do) then gets the physical
+keys that type each character in that layout, Shift and AltGr included, so a
+German guest gets `z` for `z` and `@` for `@`. A character the layout does not
+have, and every key on a server without scancodes, goes by keysym as before.
+
 When a target has both a VNC endpoint and a serial console, `F6` (or `c` in the
-dashboard) shows the next view. The pane's keys, while it has the focus and the
+dashboard) shows the next view. A target opens with the view whose sidecar
+says `"default": true` (`{"default": true, "type": "openstack", ...}`); the
+NixOS module writes it from the instance's `defaultView` (`"vnc"` or
+`"console"`), which defaults to `services.luks-ssh-unlock.tui.defaultView`. The pane's keys, while it has the focus and the
 desktop has the keyboard:
 
 | Key | Action |

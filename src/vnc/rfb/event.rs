@@ -123,6 +123,8 @@ pub enum VncEvent {
         num: bool,
         caps: bool,
     },
+    /// The server takes keys as scancodes (QEMU's extended key event).
+    ExtendedKeys,
     /// The server is no longer pushing updates unasked.
     ///
     /// Also how support is discovered: a server sends this the first time it sees

@@ -22,6 +22,10 @@ pub enum VncEncoding {
     /// The server reports the state of the lock keys, so the client can tell when
     /// its own caps lock disagrees with the remote one.
     QemuLedStatePseudo = -261,
+    /// The client can send keys as scancodes (QEMU's extended key event).
+    /// Requesting this is how support is discovered: the server answers with an
+    /// empty rectangle of this encoding.
+    QemuExtendedKeyEventPseudo = -258,
     /// The client understands `ServerFence` and will answer it. Requesting this is
     /// how a client discovers the extension: the server sends a fence in reply.
     FencePseudo = -312,
@@ -106,6 +110,7 @@ impl TryFrom<u32> for VncEncoding {
             -224 => Ok(VncEncoding::LastRectPseudo),
             -308 => Ok(VncEncoding::ExtendedDesktopSizePseudo),
             -261 => Ok(VncEncoding::QemuLedStatePseudo),
+            -258 => Ok(VncEncoding::QemuExtendedKeyEventPseudo),
             -312 => Ok(VncEncoding::FencePseudo),
             -313 => Ok(VncEncoding::ContinuousUpdatesPseudo),
             -1_063_131_698 => Ok(VncEncoding::ExtendedClipboardPseudo),

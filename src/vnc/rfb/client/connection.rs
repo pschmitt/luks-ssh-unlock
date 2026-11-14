@@ -208,7 +208,14 @@ impl VncInner {
         let msg = match event {
             X11Event::Refresh => ClientMsg::FramebufferUpdateRequest(self.full_rect(), 1),
             X11Event::FullRefresh => ClientMsg::FramebufferUpdateRequest(self.full_rect(), 0),
-            X11Event::KeyEvent(key) => ClientMsg::KeyEvent(key.keysym, key.down),
+            X11Event::KeyEvent(key) => match key.scancode {
+                Some(scancode) => ClientMsg::QemuKeyEvent {
+                    keysym: key.keysym,
+                    scancode: u32::from(scancode),
+                    down: key.down,
+                },
+                None => ClientMsg::KeyEvent(key.keysym, key.down),
+            },
             X11Event::PointerEvent(mouse) => {
                 ClientMsg::PointerEvent(mouse.x, mouse.y, mouse.buttons)
             }
@@ -539,6 +546,10 @@ where
                                 layout.status
                             );
                             output_func(VncEvent::DesktopLayout(layout)).await?;
+                        }
+                        // No payload: the rectangle itself is the acknowledgement.
+                        VncEncoding::QemuExtendedKeyEventPseudo => {
+                            output_func(VncEvent::ExtendedKeys).await?;
                         }
                         VncEncoding::QemuLedStatePseudo => {
                             // One byte: scroll lock, num lock, caps lock.

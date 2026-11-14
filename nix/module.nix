@@ -329,7 +329,9 @@ in
       // (mapAttrs' (
         name: instance:
         nameValuePair "luks-ssh-unlock/${name}.console.json" {
-          text = builtins.toJSON instance.console;
+          text = builtins.toJSON (
+            instance.console // optionalAttrs (instance.defaultView == "console") { default = true; }
+          );
         }
       ) (filterAttrs (_: instance: instance.console != null) cfg.instances))
       // (mapAttrs' (
@@ -337,6 +339,7 @@ in
         nameValuePair "luks-ssh-unlock/${name}.vnc.json" {
           text = builtins.toJSON {
             inherit (instance.vnc) type;
+            default = instance.defaultView == "vnc";
             # Each source takes only its own settings (the file rejects others).
             parameters = filterAttrs (_: value: value != null) (
               removeAttrs instance.vnc (
@@ -617,6 +620,21 @@ in
       '';
       example = literalExpression ''[ "console=zsh -lc 'zhj openstack::console-log {host}'" ]'';
     };
+    tui.defaultView = mkOption {
+      type = types.nullOr (
+        types.enum [
+          "console"
+          "vnc"
+        ]
+      );
+      default = null;
+      example = "vnc";
+      description = ''
+        The view the dashboard shows first for a target that has it: its
+        `console` or its graphical `vnc` console. `null` keeps the order of the
+        extra commands. Each instance can override it with `defaultView`.
+      '';
+    };
     activationScript = {
       enable = mkEnableOption "Generate initrd checksum and metadata during activation";
       dir = mkOption {
@@ -796,6 +814,17 @@ in
               };
               default = { };
               description = "Optional DHCP-triggered unlock listener settings.";
+            };
+            defaultView = mkOption {
+              type = types.nullOr (
+                types.enum [
+                  "console"
+                  "vnc"
+                ]
+              );
+              default = cfg.tui.defaultView;
+              defaultText = literalExpression "config.services.luks-ssh-unlock.tui.defaultView";
+              description = "The view the dashboard shows first for this target (see `tui.defaultView`).";
             };
             console = mkOption {
               type = types.nullOr (
@@ -1049,6 +1078,22 @@ in
                       type = types.bool;
                       default = false;
                       description = "Ask the remote desktop to take the size of the dashboard pane.";
+                    };
+                    keymap = mkOption {
+                      type = types.nullOr (
+                        types.enum [
+                          "de"
+                          "us"
+                        ]
+                      );
+                      default = null;
+                      description = ''
+                        Keyboard layout of the guest's console. Keys are sent as the
+                        scancodes that type each character in this layout (when the
+                        server takes scancodes, as QEMU does), so the guest gets what
+                        was typed. `null` assumes the dashboard machine's own console
+                        layout (`KEYMAP` in `/etc/vconsole.conf`).
+                      '';
                     };
                     allowRemote = mkOption {
                       type = types.bool;
