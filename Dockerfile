@@ -15,7 +15,7 @@ RUN nix --option filter-syscalls false build '.#busybox-static' --out-link /tmp/
 # cargo-chef splits dependency compilation into its own layer, keyed only on
 # the dependency graph, so the layer cache skips rebuilding dependencies when
 # only our own sources change. Alpine's Rust targets musl: a static binary.
-FROM docker.io/library/rust:1.99-alpine AS chef
+FROM docker.io/library/rust:1.100-alpine AS chef
 # hadolint ignore=DL3018
 RUN apk add --no-cache musl-dev \
     && cargo install cargo-chef --locked --version 0.1.78
