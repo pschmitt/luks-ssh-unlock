@@ -24,9 +24,9 @@ impl Decoder {
             palette: Vec::with_capacity(MAX_PALETTE * 4),
             ..Default::default()
         };
-        for i in 0..4 {
+        for zlib in &mut new.zlibs {
             let decompressor = flate2::Decompress::new(true);
-            new.zlibs[i] = Some(decompressor);
+            *zlib = Some(decompressor);
         }
         new
     }
@@ -64,9 +64,9 @@ impl Decoder {
         };
 
         let ctrl = input.read_u8().await?;
-        for i in 0..4 {
+        for (i, zlib) in self.zlibs.iter_mut().enumerate() {
             if (ctrl >> i) & 1 == 1 {
-                self.zlibs[i].as_mut().unwrap().reset(true);
+                zlib.as_mut().unwrap().reset(true);
             }
         }
 
