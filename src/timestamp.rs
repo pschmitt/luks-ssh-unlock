@@ -1,8 +1,8 @@
-use jiff::{Timestamp, Zoned, tz::TimeZone};
+use jiff::{Timestamp, ZonedDateTime, tz::TimeZone};
 use serde::{Serialize, Serializer};
 
-pub fn local(timestamp: Timestamp) -> Zoned {
-    timestamp.to_zoned(TimeZone::system())
+pub fn local(timestamp: Timestamp) -> ZonedDateTime {
+    timestamp.to_zoned_datetime(TimeZone::system())
 }
 
 pub fn rfc3339(timestamp: Timestamp) -> String {
