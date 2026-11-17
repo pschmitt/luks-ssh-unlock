@@ -10,7 +10,7 @@ readme = "README.md"
 
 [dependencies]
 anyhow = "1"
-jiff = "0.2"
+jiff = "1.0"
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 clap_complete = "4"
 flate2 = "1.1"
