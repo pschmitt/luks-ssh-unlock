@@ -104,7 +104,8 @@ impl Ctx {
                     writeln!(
                         f,
                         "{} {} {}",
-                        chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+                        crate::timestamp::local(jiff::Timestamp::now())
+                            .strftime("%Y-%m-%dT%H:%M:%S%:z"),
                         event.as_str(),
                         message
                     )
