@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::num::NonZeroU16;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -1881,7 +1882,11 @@ impl App {
                 std::mem::take(&mut self.force_reload),
             )
             .map(|(pgid, ended, pty)| {
-                slot.screen = Some(vt100::Parser::new(rows, cols, EXTRA_LINES));
+                slot.screen = Some(vt100::Parser::new(
+                    NonZeroU16::new(rows).unwrap_or(NonZeroU16::MIN),
+                    NonZeroU16::new(cols).unwrap_or(NonZeroU16::MIN),
+                    EXTRA_LINES,
+                ));
                 slot.restart = false;
                 (pgid, ended, Some(pty))
             })
@@ -3308,8 +3313,10 @@ impl App {
         let Some(parser) = self.targets[idx].extra[c].screen.as_mut() else {
             return;
         };
-        if parser.screen().size() != (inner.height, inner.width) {
-            parser.screen_mut().set_size(inner.height, inner.width);
+        let rows = NonZeroU16::new(inner.height).expect("nonempty console height");
+        let cols = NonZeroU16::new(inner.width).expect("nonempty console width");
+        if parser.screen().size() != (rows, cols) {
+            parser.screen_mut().set_size(rows, cols);
         }
         parser.screen_mut().set_scrollback(scroll);
         let screen = parser.screen();
@@ -4297,7 +4304,8 @@ mod tests {
             screen_text(a).lines().any(|l| l.trim() == want)
         });
         let screen = a.targets[0].extra[0].screen.as_ref().unwrap().screen();
-        assert_eq!(screen.size(), (rows, cols));
+        let (screen_rows, screen_cols) = screen.size();
+        assert_eq!((screen_rows.get(), screen_cols.get()), (rows, cols));
         a.stop_extra(true);
     }
 

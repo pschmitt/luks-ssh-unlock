@@ -2093,7 +2093,8 @@ esac
         drop(owner);
         assert!(eventually(|| fx.deletes().len() == 1), "{:#?}", fx.log());
         assert!(fx.deletes()[0].contains(CONN));
-        assert!(fx.path("after_create").exists());
+        // The call is logged before the fake CLI writes its completion marker.
+        assert!(eventually(|| fx.path("after_create").exists()));
         assert!(fx.lists().is_empty(), "the id was known: no lookup");
     }
 
