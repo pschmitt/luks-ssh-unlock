@@ -342,8 +342,8 @@ fn details(s: &Settings, report: &crate::status::Report) -> Details {
             .uptime
             .as_deref()
             .and_then(crate::status::uptime_seconds),
-        baseline_refreshed: report.baseline_refreshed.map(|d| d.timestamp()),
-        remote_baseline: report.remote_baseline_at.map(|d| d.timestamp()),
+        baseline_refreshed: report.baseline_refreshed.map(|d| d.as_second()),
+        remote_baseline: report.remote_baseline_at.map(|d| d.as_second()),
     }
 }
 
