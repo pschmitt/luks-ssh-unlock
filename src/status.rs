@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 use std::time::Instant;
 
 use anyhow::Result;
-use chrono::{DateTime, Local};
+use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::checksum::ChecksumResult;
@@ -51,16 +51,19 @@ pub struct Report {
     pub checksum_file: Option<String>,
     pub signature_required: bool,
     pub host_keys_pinned: bool,
-    pub baseline_refreshed: Option<DateTime<Local>>,
+    #[serde(serialize_with = "crate::timestamp::serialize_optional")]
+    pub baseline_refreshed: Option<Timestamp>,
     pub uptime: Option<String>,
     pub remote_baseline_date: Option<String>,
     /// The same date as a time, when it could be read.
-    pub remote_baseline_at: Option<DateTime<Local>>,
+    #[serde(serialize_with = "crate::timestamp::serialize_optional")]
+    pub remote_baseline_at: Option<Timestamp>,
     pub state: TargetState,
     /// The initrd would be unlocked by `run` right now.
     pub unlockable: bool,
     pub notes: Vec<Note>,
-    pub checked_at: DateTime<Local>,
+    #[serde(serialize_with = "crate::timestamp::serialize")]
+    pub checked_at: Timestamp,
     pub duration_ms: u128,
 }
 
@@ -70,10 +73,8 @@ impl Report {
     }
 }
 
-fn parse_date(text: &str) -> Option<DateTime<Local>> {
-    DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f %z")
-        .ok()
-        .map(|d| d.with_timezone(&Local))
+fn parse_date(text: &str) -> Option<Timestamp> {
+    Timestamp::strptime("%Y-%m-%d %H:%M:%S%.f %z", text.trim()).ok()
 }
 
 fn format_date(text: &str) -> String {
@@ -81,8 +82,10 @@ fn format_date(text: &str) -> String {
 }
 
 /// A time as the details show it.
-pub fn format_time(d: &DateTime<Local>) -> String {
-    d.format("%d %b %Y, %H:%M:%S %Z").to_string()
+pub fn format_time(d: &Timestamp) -> String {
+    crate::timestamp::local(*d)
+        .strftime("%d %b %Y, %H:%M:%S %:z")
+        .to_string()
 }
 
 const UPTIME_UNITS: [(&str, u64); 6] = [
@@ -152,7 +155,7 @@ impl Ctx {
             .as_ref()
             .and_then(|f| fs::metadata(f).ok())
             .and_then(|m| m.modified().ok())
-            .map(DateTime::<Local>::from);
+            .and_then(|time| Timestamp::try_from(time).ok());
 
         let mut report = Report {
             hostname: s.hostname.clone(),
@@ -169,7 +172,7 @@ impl Ctx {
             state: TargetState::Unreachable,
             unlockable: false,
             notes: Vec::new(),
-            checked_at: Local::now(),
+            checked_at: Timestamp::now(),
             duration_ms: 0,
         };
         if !report.host_keys_pinned {
@@ -337,7 +340,8 @@ pub fn print_text(r: &Report) {
         "Baseline refreshed",
         c.yellow,
         &r.baseline_refreshed
-            .map(|d| d.format("%d %b %Y, %H:%M:%S %Z").to_string())
+            .as_ref()
+            .map(format_time)
             .unwrap_or_else(|| "not available".into()),
     );
 
@@ -400,7 +404,22 @@ mod tests {
     #[test]
     fn remote_baseline_dates_are_read() {
         let d = parse_date("2026-11-13 08:00:01.123456789 +0100").unwrap();
-        assert_eq!(d.timestamp(), 1_794_553_201);
-        assert!(parse_date("yesterday").is_none());
+        assert_eq!(d.as_second(), 1_794_553_201);
+        assert_eq!(d.subsec_nanosecond(), 123_456_789);
+        assert_eq!(
+            parse_date("2026-11-13 07:00:01 +0000").unwrap(),
+            Timestamp::from_second(1_794_553_201).unwrap()
+        );
+        assert_eq!(
+            parse_date(" 2026-11-13 02:00:01 -0500\n").unwrap(),
+            Timestamp::from_second(1_794_553_201).unwrap()
+        );
+        for invalid in [
+            "yesterday",
+            "2026-02-30 00:00:00 +0000",
+            "2026-11-13 07:00:01",
+        ] {
+            assert!(parse_date(invalid).is_none(), "{invalid}");
+        }
     }
 }
