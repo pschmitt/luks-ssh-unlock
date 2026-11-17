@@ -1267,7 +1267,14 @@ mod tests {
             let path = dir.path().join("openstack");
             {
                 let _guard = script_lock();
-                fs::write(&path, script).unwrap();
+                // Other modules fork too; never let them inherit a writable script fd.
+                let status = Command::new("sh")
+                    .args(["-c", "printf '%s' \"$1\" > \"$2\"", "write-fixture"])
+                    .arg(script)
+                    .arg(&path)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
             }
             Self { dir }
@@ -1430,7 +1437,7 @@ mod tests {
         let cli = FakeCli::new("echo $$ > \"$d/pid\"; sleep 30");
         let opts = cli.opts("srv");
         let pid_file = cli.dir.path().join("pid");
-        {
+        let pid: i32 = {
             let _guard = script_lock();
             rt().block_on(async {
                 // Until the client runs (a loaded build machine can take a
@@ -1440,21 +1447,22 @@ mod tests {
                 let end = Instant::now() + Duration::from_secs(10);
                 loop {
                     tokio::select! {
-                        _ = &mut fetching => break,
+                        result = &mut fetching => {
+                            panic!("client exited before cancellation: {result:?}");
+                        }
                         () = tokio::time::sleep(Duration::from_millis(50)) => {
-                            if pid_file.exists() || Instant::now() > end {
-                                break;
+                            if let Some(pid) = fs::read_to_string(&pid_file)
+                                .ok()
+                                .and_then(|text| text.trim().parse().ok())
+                            {
+                                break pid;
                             }
+                            assert!(Instant::now() < end, "client did not publish its pid");
                         }
                     }
                 }
-            });
-        }
-        let pid: i32 = fs::read_to_string(pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+            })
+        };
         let end = Instant::now() + Duration::from_secs(10);
         loop {
             // SAFETY: signal 0 only probes for the process.
