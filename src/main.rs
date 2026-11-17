@@ -17,6 +17,7 @@ mod process;
 mod progress;
 mod settings;
 mod status;
+mod timestamp;
 mod tui;
 mod unlock;
 mod vnc;

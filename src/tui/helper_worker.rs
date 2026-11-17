@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
+use jiff::Timestamp;
 
 use super::{Cmd, Msg, UnitInfo};
 use crate::daemon::State;
@@ -267,7 +267,7 @@ fn report(host: &str, outcome: &Outcome, took: Duration) -> Option<Report> {
         state: target_state,
         unlockable: *unlockable,
         notes,
-        checked_at: Local::now(),
+        checked_at: Timestamp::now(),
         duration_ms: took.as_millis(),
     })
 }
@@ -291,8 +291,8 @@ fn route(d: &Details) -> String {
     route
 }
 
-fn local_time(unix: i64) -> Option<chrono::DateTime<Local>> {
-    chrono::DateTime::from_timestamp(unix, 0).map(|t| t.with_timezone(&Local))
+fn local_time(unix: i64) -> Option<Timestamp> {
+    Timestamp::from_second(unix).ok()
 }
 
 fn check_notes(checks: &Checks) -> Vec<Note> {

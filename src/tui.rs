@@ -33,7 +33,7 @@ use crate::log::{Level, LogLine, Logger};
 use crate::settings::{GlobalOpts, Settings, parse_env_file};
 use crate::status::{Report, Severity, TargetState};
 use crate::vnc_graphics::{self, Renderer};
-use chrono::{DateTime, Local, TimeZone};
+use jiff::Timestamp;
 
 mod helper_worker;
 mod viewer;
@@ -1047,7 +1047,7 @@ struct Target {
 /// journal, or something this dashboard did.
 #[derive(Clone)]
 struct Entry {
-    at: DateTime<Local>,
+    at: Timestamp,
     level: Level,
     service: bool,
     message: String,
@@ -1065,7 +1065,7 @@ impl Entry {
 
     fn service_note(level: Level, message: String) -> Self {
         Self {
-            at: Local::now(),
+            at: Timestamp::now(),
             level,
             service: true,
             message,
@@ -1088,7 +1088,7 @@ impl Entry {
             _ => Level::Info,
         };
         Some(Self {
-            at: Local.timestamp_micros(micros).single()?,
+            at: Timestamp::from_microsecond(micros).ok()?,
             level,
             service: true,
             message,
@@ -2398,7 +2398,7 @@ impl App {
             self.push_entry(
                 i,
                 Entry {
-                    at: Local::now(),
+                    at: Timestamp::now(),
                     level: Level::Warning,
                     service: false,
                     message: note.into(),
@@ -2907,7 +2907,7 @@ impl App {
         spans.push(
             format!(
                 "Ctrl+P switch · {}",
-                chrono::Local::now().format("%H:%M:%S")
+                crate::timestamp::local(Timestamp::now()).strftime("%H:%M:%S")
             )
             .dim(),
         );
@@ -3090,7 +3090,7 @@ impl App {
             }
             let mut footer = format!(
                 "checked {} ({:.1}s)",
-                r.checked_at.format("%H:%M:%S"),
+                crate::timestamp::local(r.checked_at).strftime("%H:%M:%S"),
                 r.duration_ms as f64 / 1000.0
             );
             if let Some((at, state)) = &t.last_unlock {
@@ -3162,7 +3162,10 @@ impl App {
                     Level::Error => Style::new().red(),
                 };
                 Line::from(vec![
-                    Span::styled(format!("{} ", l.at.format("%H:%M:%S")), Style::new().dim()),
+                    Span::styled(
+                        format!("{} ", crate::timestamp::local(l.at).strftime("%H:%M:%S")),
+                        Style::new().dim(),
+                    ),
                     // Magenta for what the service logged, blue for what this
                     // dashboard did, so the two streams are easy to tell apart.
                     if l.service {
@@ -3922,7 +3925,7 @@ mod tests {
             state,
             unlockable: false,
             notes: Vec::new(),
-            checked_at: Local::now(),
+            checked_at: Timestamp::now(),
             duration_ms: 100,
         }
     }
