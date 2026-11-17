@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Local};
+use jiff::Timestamp;
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -20,7 +20,7 @@ pub enum Level {
 
 #[derive(Clone, Debug)]
 pub struct LogLine {
-    pub at: DateTime<Local>,
+    pub at: Timestamp,
     pub level: Level,
     pub message: String,
 }
@@ -62,7 +62,7 @@ impl Logger {
         for line in message.as_ref().lines() {
             if let Some(sink) = &self.sink {
                 sink(LogLine {
-                    at: Local::now(),
+                    at: Timestamp::now(),
                     level,
                     message: line.to_string(),
                 });
