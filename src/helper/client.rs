@@ -44,6 +44,10 @@ pub enum ClientError {
     /// No helper socket could be reached: it is not enabled, or the user is
     /// not in the group that may use it.
     Unavailable,
+    /// The helper's socket exists, but this process may not connect to it:
+    /// the user is not in its group, or a group added since login is not yet
+    /// part of the session.
+    NoAccess,
     /// Something is listening, but it is not the helper, or is not where the
     /// helper's socket would be.
     Untrusted,
@@ -66,6 +70,9 @@ impl ClientError {
         match self {
             Self::Unavailable => {
                 "the privileged helper is not available (is it enabled, and are you in its group?)"
+            }
+            Self::NoAccess => {
+                "permission denied on the privileged helper's socket: you are not in the group luks-ssh-unlock (or luks-ssh-unlock-admin), or your session predates joining it; log out and in again, or run the dashboard through `sg luks-ssh-unlock -c ...`"
             }
             Self::Untrusted => "the helper socket is not served by the trusted user",
             Self::Denied => "the helper does not allow this",
@@ -277,16 +284,22 @@ impl Client {
             Needs::Basic | Needs::BasicRead => &[&self.basic, &self.admin],
             Needs::Admin => &[&self.admin],
         };
+        let mut no_access = false;
         for path in candidates {
             match self.exchange(path, request, timeout) {
                 // A user may be in only one of the two groups.
                 Err(ClientError::Unavailable) => {}
+                Err(ClientError::NoAccess) => no_access = true,
                 // A socket that is not the helper's is a reason to stop, not
                 // to quietly try the next one.
                 other => return other,
             }
         }
-        Err(ClientError::Unavailable)
+        Err(if no_access {
+            ClientError::NoAccess
+        } else {
+            ClientError::Unavailable
+        })
     }
 
     fn exchange(
@@ -296,7 +309,13 @@ impl Client {
         timeout: Duration,
     ) -> Result<Value, ClientError> {
         check_path(path, self.server_uid)?;
-        let stream = UnixStream::connect(path).map_err(|_| ClientError::Unavailable)?;
+        let stream = UnixStream::connect(path).map_err(|e| {
+            if e.kind() == io::ErrorKind::PermissionDenied {
+                ClientError::NoAccess
+            } else {
+                ClientError::Unavailable
+            }
+        })?;
         let peer = peer_of(stream.as_raw_fd()).map_err(|_| ClientError::Untrusted)?;
         if peer.uid != self.server_uid {
             return Err(ClientError::Untrusted);

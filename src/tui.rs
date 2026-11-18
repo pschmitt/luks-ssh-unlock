@@ -1578,6 +1578,24 @@ pub fn run(
         targets.push(target);
     }
 
+    // Nothing to show but errors: a dashboard of identical failures hides the
+    // one cause, so report it instead and leave the terminal untouched.
+    if !targets.is_empty() && targets.iter().all(|t| t.error.is_some()) {
+        let mut causes: Vec<&str> = Vec::new();
+        for t in &targets {
+            if let Some(e) = t.error.as_deref().filter(|e| !causes.contains(e)) {
+                causes.push(e);
+            }
+        }
+        let mut msg = format!("none of the {} targets can be monitored:", targets.len());
+        for c in causes {
+            msg.push_str(&format!("\n  - {c}"));
+        }
+        let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+        msg.push_str(&format!("\n(targets: {})", names.join(", ")));
+        anyhow::bail!(msg);
+    }
+
     let has_extras = targets.iter().any(|t| !t.cmds.is_empty());
     let mut app = App {
         targets,
