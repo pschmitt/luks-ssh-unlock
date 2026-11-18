@@ -167,6 +167,9 @@ fn admin_hint(e: ClientError) -> String {
         ClientError::Unavailable => {
             "the admin helper socket is not available (it needs the admin group)".into()
         }
+        ClientError::NoAccess => {
+            "permission denied on the admin helper socket (it needs the group luks-ssh-unlock-admin; log out and in after joining it)".into()
+        }
         e => e.message().into(),
     }
 }
