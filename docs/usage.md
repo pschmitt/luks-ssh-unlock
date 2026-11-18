@@ -1,6 +1,8 @@
 # Usage
 
-`luks-ssh-unlock COMMAND [OPTIONS]`. Without any argument it prints this usage; it does not start unlocking, use `run` for that. Options go before or after the
+`luks-ssh-unlock [COMMAND] [OPTIONS]`. Without any argument it opens the
+dashboard (`tui`); it does not start unlocking, use `run` for that. Options alone,
+without a command, mean `run`. Options go before or after the
 command, and every option has an environment variable (see
 [configuration](configuration.md)).
 
@@ -12,7 +14,7 @@ command, and every option has an environment variable (see
 | `run --once` | Make one attempt and exit. |
 | `status` | Show the configuration and what the target is doing, without sending anything. |
 | `status --json` | The same report as JSON. |
-| `tui [FILES...]` | The dashboard, see below. |
+| `tui [FILES...]` | The dashboard, see below. Also what a bare `luks-ssh-unlock` opens. |
 | `completions SHELL` | Shell completions for bash, zsh, fish, elvish or PowerShell. |
 
 `--force` (only with `--once`) skips the initrd checksum, its signature and

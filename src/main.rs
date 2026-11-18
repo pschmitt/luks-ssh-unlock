@@ -46,8 +46,6 @@ use crate::settings::{GlobalOpts, Settings};
     name = "luks-ssh-unlock",
     version,
     propagate_version = true,
-    // Without any argument, show the usage instead of starting to unlock.
-    arg_required_else_help = true,
     max_term_width = 100
 )]
 struct Cli {
@@ -63,6 +61,9 @@ struct Cli {
     opts: GlobalOpts,
 }
 
+/// Seconds between two status checks of a target in the dashboard.
+const TUI_REFRESH_SECS: u64 = 30;
+
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Watch the target and unlock it when it waits in its initrd
@@ -73,14 +74,14 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Interactive dashboard of all targets
+    /// Interactive dashboard of all targets (default without any argument)
     #[command(visible_alias = "ui")]
     Tui {
         /// Environment files or directories of targets
         /// [default: /etc/luks-ssh-unlock/*.env, else the current options]
         files: Vec<PathBuf>,
         /// Seconds between two status checks of a target
-        #[arg(long, default_value_t = 30, value_name = "SECONDS")]
+        #[arg(long, default_value_t = TUI_REFRESH_SECS, value_name = "SECONDS")]
         refresh: u64,
         /// Only show targets whose name or host contains this text
         /// (case-insensitive); `/` changes it in the dashboard
@@ -184,7 +185,19 @@ fn real_main() -> Result<bool> {
     if matches!(cli.command, Some(Cmd::Console { .. } | Cmd::Helper(_))) {
         elevate::forbid();
     }
-    match cli.command.unwrap_or(Cmd::Run) {
+    // No argument at all opens the dashboard; options alone keep meaning
+    // `run`, as they did before commands existed.
+    let command = match cli.command {
+        Some(command) => command,
+        None if std::env::args_os().len() <= 1 => Cmd::Tui {
+            files: Vec::new(),
+            refresh: TUI_REFRESH_SECS,
+            filter: None,
+            extra_commands: Vec::new(),
+        },
+        None => Cmd::Run,
+    };
+    match command {
         Cmd::Run => {
             let mut ctx = context(&cli.opts, Mode::Run)?;
             if ctx.s.force && !ctx.s.once {
@@ -416,12 +429,10 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_show_the_usage() {
-        let err = Cli::try_parse_from(["luks-ssh-unlock"]).unwrap_err();
-        assert_eq!(
-            err.kind(),
-            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        );
+    fn no_arguments_parse_without_a_command() {
+        // main() turns that into the dashboard.
+        let cli = Cli::try_parse_from(["luks-ssh-unlock"]).unwrap();
+        assert!(cli.command.is_none());
     }
 
     #[test]
