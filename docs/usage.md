@@ -1,6 +1,6 @@
 # Usage
 
-`luks-ssh-unlock [COMMAND] [OPTIONS]`. Options go before or after the
+`luks-ssh-unlock COMMAND [OPTIONS]`. Without any argument it prints this usage; it does not start unlocking, use `run` for that. Options go before or after the
 command, and every option has an environment variable (see
 [configuration](configuration.md)).
 
@@ -8,7 +8,7 @@ command, and every option has an environment variable (see
 
 | Command | What it does |
 | --- | --- |
-| `run` | Watch the target and unlock it whenever it waits in its initrd. The default. |
+| `run` | Watch the target and unlock it whenever it waits in its initrd. |
 | `run --once` | Make one attempt and exit. |
 | `status` | Show the configuration and what the target is doing, without sending anything. |
 | `status --json` | The same report as JSON. |

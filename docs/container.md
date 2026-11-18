@@ -28,7 +28,8 @@ docker run --rm \
   ghcr.io/pschmitt/luks-ssh-unlock:latest
 ```
 
-Arguments after the image name are passed to `luks-ssh-unlock`, for example
+Without arguments the container runs `luks-ssh-unlock run`. Arguments after the
+image name replace that and are passed to `luks-ssh-unlock`, for example
 `status` or `run --once`.
 
 | Path | Purpose |

@@ -145,7 +145,7 @@
                 };
               assert console.type == "oci";
               assert console.parameters.identity == "/home/user/.ssh/id_rsa";
-              assert start == builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock";
+              assert start == builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock run";
               assert nixpkgs.lib.hasPrefix
                 (builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock-dhcp-listener")
                 dhcp;

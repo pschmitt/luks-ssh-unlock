@@ -61,7 +61,7 @@ From source: `cargo install --path .` (needs OpenSSH at run time).
 luks-ssh-unlock status --host target.example.com \
   --ssh-key ~/.ssh/id_ed25519 \
   --ssh-initrd-known-hosts-file ~/.ssh/known_hosts_initrd   # what is it doing?
-luks-ssh-unlock --host target.example.com \
+luks-ssh-unlock run --host target.example.com \
   --ssh-key ~/.ssh/id_ed25519 \
   --ssh-initrd-known-hosts-file ~/.ssh/known_hosts_initrd \
   --luks-passphrase-file /run/secrets/luks_target \

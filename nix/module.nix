@@ -515,7 +515,7 @@ in
               Type = "simple";
               EnvironmentFile = "/etc/luks-ssh-unlock/${name}.env";
               LoadCredential = passphraseCredential instance;
-              ExecStart = "${package}/bin/luks-ssh-unlock";
+              ExecStart = "${package}/bin/luks-ssh-unlock run";
             };
           }
         ) cfg.instances

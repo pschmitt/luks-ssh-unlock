@@ -63,3 +63,5 @@ ENV INITRD_CHECKSUM_DIR=/data/initrd-checksum \
 
 VOLUME ["/config", "/data"]
 ENTRYPOINT ["/entrypoint.sh"]
+# Watch and unlock, configured through the environment; arguments replace it.
+CMD ["run"]

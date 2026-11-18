@@ -46,6 +46,8 @@ use crate::settings::{GlobalOpts, Settings};
     name = "luks-ssh-unlock",
     version,
     propagate_version = true,
+    // Without any argument, show the usage instead of starting to unlock.
+    arg_required_else_help = true,
     max_term_width = 100
 )]
 struct Cli {
@@ -63,7 +65,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Watch the target and unlock it when it waits in its initrd (default)
+    /// Watch the target and unlock it when it waits in its initrd
     Run,
     /// Show the configuration and what the target is doing, without unlocking
     Status {
@@ -414,9 +416,17 @@ mod tests {
     }
 
     #[test]
+    fn no_arguments_show_the_usage() {
+        let err = Cli::try_parse_from(["luks-ssh-unlock"]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+    }
+
+    #[test]
     fn legacy_invocations_parse() {
         for argv in [
-            vec!["luks-ssh-unlock"],
             vec!["luks-ssh-unlock", "run", "--once", "-f"],
             vec!["luks-ssh-unlock", "--once", "run"],
             vec![
