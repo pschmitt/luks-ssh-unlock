@@ -48,12 +48,6 @@
           # The package build runs the unit tests.
           checks = {
             inherit luks-ssh-unlock;
-            # A VM in its initrd, checked over SSH and then tampered with.
-            initrd-checksum-vm = import ./nix/vm-test.nix {
-              inherit pkgs;
-              nixosModule = self.nixosModules.default;
-              package = luks-ssh-unlock;
-            };
             # Evaluates a NixOS system with one instance and checks the
             # rendered units point at this flake's package.
             nixos-module =
@@ -151,6 +145,16 @@
                 (builtins.unsafeDiscardStringContext "${luks-ssh-unlock}/bin/luks-ssh-unlock-dhcp-listener")
                 dhcp;
               pkgs.runCommand "luks-ssh-unlock-nixos-module-check" { } "touch $out";
+          }
+          # A VM in its initrd, checked over SSH and then tampered with. It
+          # needs KVM, which the aarch64 GitHub runners do not offer; nixbot
+          # runs it for x86_64.
+          // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            initrd-checksum-vm = import ./nix/vm-test.nix {
+              inherit pkgs;
+              nixosModule = self.nixosModules.default;
+              package = luks-ssh-unlock;
+            };
           };
 
           formatter = pkgs.nixfmt;
