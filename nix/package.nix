@@ -11,6 +11,7 @@
   cpio,
   diffutils,
   findutils,
+  gnugrep,
   gzip,
   msmtp,
   openssh,
@@ -81,6 +82,7 @@ let
     cpio
     diffutils
     findutils
+    gnugrep
     gzip
     openssh
     util-linux
@@ -133,6 +135,53 @@ craneLib.buildPackage (
         --bash luks-ssh-unlock.bash \
         --zsh luks-ssh-unlock.zsh \
         --fish luks-ssh-unlock.fish
+    '';
+
+    # initrd-checksum runs where the caller's PATH may hold next to nothing
+    # (the module's activation script, nixos-enter). Run it with an empty
+    # environment on an initrd shaped like NixOS's (an uncompressed early
+    # archive, padding, then a zstd archive), so a tool missing from
+    # checksumPath fails the build instead of a host's activation.
+    doInstallCheck = true;
+    nativeInstallCheckInputs = [
+      coreutils
+      cpio
+      gnugrep
+      zstd
+    ];
+    installCheckPhase = ''
+      runHook preInstallCheck
+
+      mkdir -p fixture/early/kernel fixture/main/etc
+      echo microcode > fixture/early/kernel/ucode.bin
+      echo main > fixture/main/etc/initrd-release
+      (cd fixture/early && find . | cpio --quiet -o -H newc) > fixture/initrd
+      head -c 512 /dev/zero >> fixture/initrd
+      (cd fixture/main && find . | cpio --quiet -o -H newc | zstd -q -c) >> fixture/initrd
+
+      env -i TMPDIR="$TMPDIR" $out/bin/initrd-checksum check \
+        --initrd="$PWD/fixture/initrd" > fixture/checksum
+      grep -q ' /kernel/ucode.bin$' fixture/checksum
+      grep -q ' /etc/initrd-release$' fixture/checksum
+
+      # A tail that is neither compressed nor cpio must fail with a short
+      # error, not feed garbage to cpio.
+      (cd fixture/early && find . | cpio --quiet -o -H newc) > fixture/bad
+      head -c 65536 /dev/urandom | tr -d '\037\050' >> fixture/bad
+      if env -i TMPDIR="$TMPDIR" $out/bin/initrd-checksum check \
+        --initrd="$PWD/fixture/bad" > /dev/null 2> fixture/bad.err
+      then
+        echo "initrd-checksum accepted a garbage initrd tail" >&2
+        exit 1
+      fi
+      if [ "$(wc -l < fixture/bad.err)" -gt 20 ]
+      then
+        echo "initrd-checksum flooded stderr on a garbage initrd tail:" >&2
+        head -n 20 fixture/bad.err >&2
+        exit 1
+      fi
+
+      runHook postInstallCheck
     '';
 
     meta = {

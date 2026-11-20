@@ -218,6 +218,17 @@ options and the container interface are compatible.
   or on a usable `TMPDIR` (it falls back to `/tmp` and creates it),
   and `meta.json` records `"generation": null` when the system profile does not
   exist yet (`nixos-install`) instead of failing.
+- `initrd-checksum` in the Nix package did not have `grep` on its `PATH` and
+  relied on the caller's. Since the `activationScript` uses a fixed `PATH`,
+  hashing an initrd with a concatenated payload (an early microcode archive
+  followed by a compressed one) failed on every switch. `grep` is now part of
+  the wrapper, and the package build runs `initrd-checksum` with an empty
+  environment on such an initrd, so a missing tool fails the build.
+- `initrd-checksum` no longer passes an initrd tail that is neither compressed
+  nor a cpio archive to `cpio`, which printed an error line for every byte
+  (hundreds of thousands of lines, enough for journald to drop the rest of the
+  activation output). It fails with one error line instead, and shows at most
+  five lines of `cpio` errors when unpacking fails.
 
 ### Changed
 

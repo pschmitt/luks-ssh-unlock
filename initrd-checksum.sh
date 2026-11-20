@@ -267,15 +267,30 @@ detect_decompress_cmd() {
 }
 
 extract_cpio() {
-  local archive_path=$1 decompress_cmd=""
+  local archive_path=$1 decompress_cmd="" err_file="" rc=0
   decompress_cmd=$(detect_decompress_cmd "$archive_path")
 
+  # cpio reports every byte it cannot parse on its own line: on a stream that
+  # is not a cpio archive that is hundreds of thousands of lines, which floods
+  # the journal and hides everything after it. Keep its errors and show only
+  # the first few.
+  err_file=$(mktemp)
   if [[ "$decompress_cmd" == "cat" ]]
   then
-    cpio -idmu < "$archive_path"
+    cpio --quiet -idmu < "$archive_path" 2> "$err_file" || rc=$?
   else
-    $decompress_cmd "$archive_path" | cpio -idmu
+    $decompress_cmd "$archive_path" 2> "$err_file" | cpio --quiet -idmu 2>> "$err_file" || rc=$?
   fi
+
+  if (( rc != 0 ))
+  then
+    log_err "failed to unpack $archive_path (${decompress_cmd%% *}, exit $rc):"
+    head -n 5 "$err_file" | LC_ALL=C tr -c '[:print:]\n' '?' >&2
+    rm -f "$err_file"
+    return 1
+  fi
+
+  rm -f "$err_file"
 }
 
 newc_end_offset() {
@@ -338,6 +353,12 @@ write_initrd_tail() {
 
 find_compressed_magic_offset() {
   local archive_path=$1 offset_gzip="" offset_zstd=""
+
+  if ! command -v grep &>/dev/null
+  then
+    log_err "grep not found: cannot locate the compressed initrd payload"
+    return 2
+  fi
 
   offset_zstd=$(LC_ALL=C grep -aob -m1 $'\x28\xb5\x2f\xfd' "$archive_path" | head -n1 | cut -d: -f1)
   offset_gzip=$(LC_ALL=C grep -aob -m1 $'\x1f\x8b\x08' "$archive_path" | head -n1 | cut -d: -f1)
@@ -540,7 +561,7 @@ measure_initrd_image() {
   log_info "mode=initrd-image source=$initrd_src unpack_dir=$tmpdir"
 
   cd "$tmpdir"
-  extract_cpio "$initrd_src"
+  extract_cpio "$initrd_src" || return 1
 
   initrd_tail=$(mktemp)
   add_exit_trap "rm -f '$initrd_tail'"
@@ -548,19 +569,29 @@ measure_initrd_image() {
   then
     log_info "detected concatenated initrd payload at offset=$tail_offset; unpacking tail"
     tail_stream=$initrd_tail
-    if [[ $(detect_decompress_cmd "$tail_stream") == "cat" ]] && magic_offset=$(find_compressed_magic_offset "$tail_stream")
+    if [[ $(detect_decompress_cmd "$tail_stream") == "cat" ]]
     then
-      tail_stream_tmp=$(mktemp)
-      add_exit_trap "rm -f '$tail_stream_tmp'"
-      if dd if="$tail_stream" of="$tail_stream_tmp" bs=4M skip="$magic_offset" iflag=skip_bytes status=none 2>/dev/null
+      # The tail is usually padding followed by a compressed archive. Without
+      # a compression magic it must itself be an uncompressed newc archive;
+      # anything else would make cpio parse garbage.
+      if magic_offset=$(find_compressed_magic_offset "$tail_stream")
       then
+        tail_stream_tmp=$(mktemp)
+        add_exit_trap "rm -f '$tail_stream_tmp'"
+        if ! dd if="$tail_stream" of="$tail_stream_tmp" bs=4M skip="$magic_offset" iflag=skip_bytes status=none
+        then
+          log_err "failed to cut the initrd tail at offset=$magic_offset"
+          return 1
+        fi
         tail_stream=$tail_stream_tmp
-      else
-        rm -f "$tail_stream_tmp"
+      elif [[ $(head -c 6 "$tail_stream" | LC_ALL=C tr -d '\0') != "070701" ]]
+      then
+        log_err "initrd tail at offset=$tail_offset is neither compressed (gzip, zstd) nor a newc cpio archive"
+        return 1
       fi
     fi
 
-    extract_cpio "$tail_stream"
+    extract_cpio "$tail_stream" || return 1
   fi
 
   hash_tree "$tmpdir"
