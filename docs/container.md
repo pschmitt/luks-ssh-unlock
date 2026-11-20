@@ -37,7 +37,7 @@ image name replace that and are passed to `luks-ssh-unlock`, for example
 | `/config/msmtprc` | msmtp configuration for mail notifications, installed to `/etc/msmtprc` on start |
 | `/data/initrd-checksum` | `INITRD_CHECKSUM_DIR`: baselines fetched from booted hosts |
 | `/data/events` | A place for `EVENTS_FILE` |
-| `/busybox` | The BusyBox bundle for paranoid checks |
+| `/usr/local/libexec/initrd-measure` | The static measurers uploaded for initrd checks |
 
 [`docker-compose.yaml`](../docker-compose.yaml) shows several targets with
 health checks, notifications, a jumphost and initrd validation.

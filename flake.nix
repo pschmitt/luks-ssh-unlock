@@ -17,19 +17,14 @@
       crane,
     }:
     let
-      # The target's busybox bundle holds a real binary per target arch, from
-      # a native package set so it comes from the binary cache.
-      busyboxFor =
-        pkgs:
-        pkgs.callPackage ./nix/busybox.nix {
-          busyboxAmd64 = nixpkgs.legacyPackages.x86_64-linux.pkgsStatic.busybox;
-          busyboxArm64 = nixpkgs.legacyPackages.aarch64-linux.pkgsStatic.busybox;
-        };
+      # The static measurer initrd-checksum uploads, one binary per target
+      # arch.
+      measureFor = pkgs: pkgs.callPackage ./nix/measure.nix { inherit crane; };
       packageFor =
         pkgs:
         pkgs.callPackage ./nix/package.nix {
           craneLib = crane.mkLib pkgs;
-          busyboxBundle = busyboxFor pkgs;
+          initrdMeasure = measureFor pkgs;
         };
       eachSystem = flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
         system:
@@ -41,7 +36,7 @@
           packages = {
             default = luks-ssh-unlock;
             inherit luks-ssh-unlock;
-            busybox-static = busyboxFor pkgs;
+            initrd-measure = measureFor pkgs;
             entrypoint = pkgs.callPackage ./nix/entrypoint.nix { };
           };
 
@@ -53,6 +48,12 @@
           # The package build runs the unit tests.
           checks = {
             inherit luks-ssh-unlock;
+            # A VM in its initrd, checked over SSH and then tampered with.
+            initrd-checksum-vm = import ./nix/vm-test.nix {
+              inherit pkgs;
+              nixosModule = self.nixosModules.default;
+              package = luks-ssh-unlock;
+            };
             # Evaluates a NixOS system with one instance and checks the
             # rendered units point at this flake's package.
             nixos-module =

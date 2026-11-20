@@ -231,7 +231,8 @@ or masked is marked with a warning, since nothing will unlock it
 automatically.
 
 The periodic checks never send notifications and skip the initrd checksum,
-which can be slow in paranoid mode. An unlock always runs it first.
+which uploads and runs the measurer each time. An unlock always runs it
+first.
 
 ## Privileged helper
 

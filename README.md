@@ -25,8 +25,9 @@ initrd host keys, and optionally a signed checksum of the initrd's contents.
   `cryptroot-unlock`), systemd's password agent on a remote TTY,
   `cryptsetup luksOpen` plus the cryptsetup unit, and `luks-mount`.
 - **Initrd integrity**: compares the running initrd with a baseline the host
-  signed with its SSH host key (`ssh-keygen -Y`), optionally with a minimal
-  BusyBox bundle uploaded to the target.
+  signed with its SSH host key (`ssh-keygen -Y`). A static measurer is
+  uploaded to the target for each check, so the target's own tools do not
+  measure themselves.
 - **Dashboard**: `luks-ssh-unlock tui` shows every target's live state,
   details and logs, and unlocks one after confirmation; an interactive
   console pane (`@COMMAND`) takes the keyboard while focused (`Ctrl+]` leaves

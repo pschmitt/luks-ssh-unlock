@@ -10,14 +10,12 @@
   coreutils,
   cpio,
   diffutils,
-  findutils,
   gnugrep,
-  gzip,
   msmtp,
   openssh,
-  util-linux,
   zstd,
-  busyboxBundle,
+  # The static initrd measurers (nix/measure.nix).
+  initrdMeasure,
 }:
 let
   cargoToml = lib.importTOML ../Cargo.toml;
@@ -44,10 +42,12 @@ let
   # Only the normalized manifests and a stub main, unlike crane's mkDummySrc,
   # which also copies the real ones.
   depsSrc = runCommand "luks-ssh-unlock-deps-src" { } ''
-    mkdir -p $out/src
+    mkdir -p $out/src $out/initrd-measure/src
     cp ${normalized ../Cargo.toml} $out/Cargo.toml
     cp ${normalized ../Cargo.lock} $out/Cargo.lock
+    cp ${../initrd-measure/Cargo.toml} $out/initrd-measure/Cargo.toml
     echo 'fn main() {}' > $out/src/main.rs
+    echo 'fn main() {}' > $out/initrd-measure/src/main.rs
   '';
   # The dependencies, built once: source changes and version bumps reuse them.
   deps = craneLib.buildDepsOnly (
@@ -67,6 +67,9 @@ let
       ../Cargo.toml
       ../Cargo.lock
       ../src
+      # The workspace's other member; its static builds are nix/measure.nix.
+      ../initrd-measure/Cargo.toml
+      ../initrd-measure/src
     ];
   };
   # Tools the unlocker runs: OpenSSH for every connection, msmtp as sendmail,
@@ -76,17 +79,12 @@ let
     openssh
     msmtp
   ];
+  # initrd-checksum only orchestrates: initrd-measure does the measuring.
   checksumPath = lib.makeBinPath [
     bash
     coreutils
-    cpio
     diffutils
-    findutils
-    gnugrep
-    gzip
     openssh
-    util-linux
-    zstd
   ];
 in
 craneLib.buildPackage (
@@ -112,20 +110,19 @@ craneLib.buildPackage (
       substitute ${../initrd-checksum.sh} $out/bin/initrd-checksum \
         --replace-fail '#!/usr/bin/env bash' '#!${bash}/bin/bash'
       chmod 755 $out/bin/initrd-checksum
-      wrapProgram $out/bin/initrd-checksum --prefix PATH : ${checksumPath}
+      mkdir -p $out/libexec/initrd-measure
+      cp ${initrdMeasure}/initrd-measure-* $out/libexec/initrd-measure/
+      wrapProgram $out/bin/initrd-checksum \
+        --prefix PATH : ${checksumPath} \
+        --set-default INITRD_CHECKSUM_MEASURE_DIR $out/libexec/initrd-measure
 
       wrapProgram $out/bin/luks-ssh-unlock \
         --prefix PATH : ${runtimePath} \
-        --set-default INITRD_CHECKSUM_SCRIPT $out/bin/initrd-checksum \
-        --set-default INITRD_CHECKSUM_BUSYBOX_DIR $out/busybox
+        --set-default INITRD_CHECKSUM_SCRIPT $out/bin/initrd-checksum
 
       # The NixOS module starts the DHCP listener under this name.
       makeWrapper $out/bin/luks-ssh-unlock $out/bin/luks-ssh-unlock-dhcp-listener \
         --add-flags dhcp-listener
-
-      mkdir -p $out/busybox
-      cp ${busyboxBundle}/busybox-amd64 ${busyboxBundle}/busybox-arm64 $out/busybox/
-      ln -s busybox-amd64 $out/busybox/busybox
     ''
     + lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
       for shell in bash zsh fish; do
@@ -140,8 +137,9 @@ craneLib.buildPackage (
     # initrd-checksum runs where the caller's PATH may hold next to nothing
     # (the module's activation script, nixos-enter). Run it with an empty
     # environment on an initrd shaped like NixOS's (an uncompressed early
-    # archive, padding, then a zstd archive), so a tool missing from
-    # checksumPath fails the build instead of a host's activation.
+    # archive, padding, then a zstd archive) made by the real cpio and zstd,
+    # so a tool missing from checksumPath fails the build instead of a host's
+    # activation, and the measurer reads what those tools write.
     doInstallCheck = true;
     nativeInstallCheckInputs = [
       coreutils
@@ -163,6 +161,21 @@ craneLib.buildPackage (
         --initrd="$PWD/fixture/initrd" > fixture/checksum
       grep -q ' /kernel/ucode.bin$' fixture/checksum
       grep -q ' /etc/initrd-release$' fixture/checksum
+      grep -qx '# initrd-measure format 2' fixture/checksum
+
+      # The image and the tree it unpacks to measure the same, in both
+      # formats: the comparison a check of a running initrd makes.
+      mkdir fixture/tree
+      (cd fixture/early && find . | cpio --quiet -pdm ../tree)
+      (cd fixture/main && find . | cpio --quiet -pdm ../tree)
+      for format in 1 2
+      do
+        $out/libexec/initrd-measure/initrd-measure-$(uname -m) --format $format \
+          image fixture/initrd > fixture/image.$format
+        $out/libexec/initrd-measure/initrd-measure-$(uname -m) --format $format \
+          live-root --root fixture/tree > fixture/tree.$format
+        cmp fixture/image.$format fixture/tree.$format
+      done
 
       # A tail that is neither compressed nor cpio must fail with a short
       # error, not feed garbage to cpio.

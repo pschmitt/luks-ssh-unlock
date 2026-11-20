@@ -187,7 +187,7 @@ impl SystemBackend {
             let script = script.ok_or(Failure::Config)?;
             v.program(script, &self.env.dirs)
                 .map_err(|_| Failure::Config)?;
-            if let Some(dir) = &s.initrd.busybox_dir {
+            if let Some(dir) = &s.initrd.measure_dir {
                 config(v.tree(Path::new(dir)))?;
             }
             self.command("ssh-keygen")?;
@@ -1082,12 +1082,12 @@ exit 0
                 }),
             ),
             (
-                "busybox tree",
+                "measurer tree",
                 Box::new(|s| {
                     s.mkdir("tree", 0o755);
-                    s.put("tree/busybox", "", 0o666);
+                    s.put("tree/initrd-measure-x86_64", "", 0o666);
                     let dir = s.p("tree").display().to_string();
-                    s.config(&[], &[format!("INITRD_CHECKSUM_BUSYBOX_DIR={dir}")]);
+                    s.config(&[], &[format!("INITRD_CHECKSUM_MEASURE_DIR={dir}")]);
                 }),
             ),
         ];

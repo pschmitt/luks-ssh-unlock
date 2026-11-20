@@ -3,8 +3,8 @@
 ## 0.2.0 (unreleased)
 
 Rewritten in Rust. `luks-ssh-unlock.sh` and `dhcp-listener.py` are replaced
-by one binary; `initrd-checksum.sh` stays a shell script because it runs on
-the target. The command line, the environment variables, the NixOS module
+by one binary; `initrd-checksum.sh` stays a small shell script that uploads
+the static `initrd-measure` to the target. The command line, the environment variables, the NixOS module
 options and the container interface are compatible.
 
 ### New
@@ -232,6 +232,28 @@ options and the container interface are compatible.
 
 ### Changed
 
+- The initrd is measured by `initrd-measure`, a static Rust binary for
+  x86_64 and aarch64, instead of the shell pipeline and the BusyBox bundle.
+  `initrd-checksum` uploads it to the target and runs it in one SSH
+  connection, so the measurement no longer runs the target's bash, `find`,
+  `sha256sum`, `cpio` or decompressors; only its shell, `mkdir`, `cat` and
+  `chmod` put the binary in place. Images are unpacked in memory the way the
+  kernel unpacks them (any number of uncompressed, gzip and zstd segments,
+  hard links, symlinked parents), and nothing is written to disk.
+  `initrd-checksum` itself needs only bash, coreutils, diffutils and ssh.
+- Baselines have a new default format 2 (first line
+  `# initrd-measure format 2`). It also covers symlinks (most of a NixOS
+  initrd: a redirected symlink went unnoticed before) and directories on
+  another file system, escapes control characters in paths, and leaves out
+  only the exact paths on its ignore list, not every path that starts with
+  one. The checker measures in the baseline's format, so existing format 1
+  baselines keep working; update the unlocking hosts before the targets, or
+  set `activationScript.format = 1` until they are.
+- `--paranoid`, `PARANOID` and the module's `initrdCheck.paranoid` have no
+  effect: every check uploads the measurer. `INITRD_CHECKSUM_BUSYBOX_DIR`,
+  `initrdCheck.busyboxDir` and the `busybox-static` package are gone;
+  `INITRD_CHECKSUM_MEASURE_DIR` (`initrdCheck.measureDir`) names the
+  measurers, and `packages.<system>.initrd-measure` builds them.
 - SSH runs with `BatchMode=yes`: a missing key fails instead of prompting.
 - `--once` runs are also bounded by `TICK_TIMEOUT`.
 - Boolean variables are off when `0`, `false`, `no` or `off` (before, any

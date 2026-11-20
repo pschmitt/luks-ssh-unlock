@@ -11,7 +11,9 @@ nix flake check                             # package build with unit tests, mod
 
 - `packages.<system>.luks-ssh-unlock` (also `default`), for x86_64-linux and
   aarch64-linux.
-- `packages.<system>.busybox-static`: the BusyBox bundle for paranoid checks.
+- `packages.<system>.initrd-measure`: the static measurers that
+  `initrd-checksum` uploads (`initrd-measure-x86_64`, `initrd-measure-aarch64`).
+- `checks.<system>.initrd-checksum-vm`: a VM in its initrd, checked over SSH.
 - `overlays.default` adds `pkgs.luks-ssh-unlock`.
 - `nixosModules.default`: the module, using this flake's package.
 

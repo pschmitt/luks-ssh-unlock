@@ -256,10 +256,7 @@ in
                   INITRD_CHECKSUM_DIR=${initrdChecksumDir}
                 ''}
                 INITRD_CHECKSUM_SCRIPT=${toString initrdCheck.script}
-                INITRD_CHECKSUM_BUSYBOX_DIR=${toString initrdCheck.busyboxDir}
-                ${optionalString initrdCheck.paranoid ''
-                  PARANOID=1
-                ''}
+                INITRD_CHECKSUM_MEASURE_DIR=${toString initrdCheck.measureDir}
                 ${optionalString initrdCheck.requireSignature ''
                   INITRD_CHECKSUM_REQUIRE_SIGNATURE=1
                 ''}
@@ -579,7 +576,7 @@ in
             META_FILE="''${CHECKSUM_DIR}/meta.json"
             SSH_HOST_KEY="/etc/ssh/ssh_host_ed25519_key"
 
-            # initrd-checksum unpacks the initrd with mktemp. Inside nixos-enter
+            # initrd-checksum keeps its output in a mktemp file. Inside nixos-enter
             # TMPDIR may be unset or name a directory that does not exist, and
             # /tmp may not exist yet either.
             if [ -z "''${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]
@@ -595,6 +592,7 @@ in
             trap 'rm -rf "$TMP_DIR"' EXIT
 
             ${package}/bin/initrd-checksum check \
+              --format ${toString cfg.activationScript.format} \
               --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" \
               > "''${TMP_DIR}/checksum"
             if [ ! -s "''${TMP_DIR}/checksum" ]
@@ -696,6 +694,19 @@ in
         default = "/etc/initrd-checksum";
         description = "Directory where the activation script stores checksum snapshots and metadata.";
       };
+      format = mkOption {
+        type = types.enum [
+          1
+          2
+        ];
+        default = 2;
+        description = ''
+          Format of the baseline. 2 also covers symlinks and mount points and
+          escapes paths; 1 lists regular files only, as versions before the
+          static measurer did. The checker measures in the baseline's format,
+          so only a checker older than the static measurer needs 1.
+        '';
+      };
     };
     instances = mkOption {
       default = { };
@@ -796,7 +807,7 @@ in
                       Directory to store fetched initrd checksum snapshots
                       (INITRD_CHECKSUM_DIR). fetch_initrd_checksum() refreshes the
                       signed baseline here on every successful healthcheck, so leaving
-                      this at its default is what makes paranoid/requireSignature mode
+                      this at its default is what makes requireSignature mode
                       self-bootstrapping. Set to null to disable baseline fetching
                       entirely (do not combine with requireSignature = true).
                     '';
@@ -808,20 +819,27 @@ in
                     # expand $SCRIPT_DIR (that only works when the .env is
                     # shell-sourced, e.g. the Docker entrypoint). Default
                     # to the real store path so INITRD_CHECKSUM_SCRIPT is
-                    # actually executable under NixOS, matching busyboxDir
+                    # actually executable under NixOS, matching measureDir
                     # below.
                     default = "${package}/bin/initrd-checksum";
                     description = "Path to initrd-checksum helper (INITRD_CHECKSUM_SCRIPT).";
                   };
-                  busyboxDir = mkOption {
+                  measureDir = mkOption {
                     type = pathOrStr;
-                    default = "${package}/busybox";
-                    description = "BusyBox bundle directory for paranoid initrd-checksum (INITRD_CHECKSUM_BUSYBOX_DIR).";
+                    default = "${package}/libexec/initrd-measure";
+                    description = ''
+                      Directory of the static measurers (initrd-measure-ARCH) that
+                      initrd-checksum uploads to the target (INITRD_CHECKSUM_MEASURE_DIR).
+                    '';
                   };
                   paranoid = mkOption {
                     type = types.bool;
                     default = false;
-                    description = "Enable paranoid initrd-checksum mode (PARANOID=1).";
+                    description = ''
+                      No effect, kept so existing configurations evaluate: the static
+                      measurer is now always uploaded to the target, so no check
+                      depends on the target's own tools.
+                    '';
                   };
                   requireSignature = mkOption {
                     type = types.bool;

@@ -101,14 +101,11 @@ impl Ctx {
             .args(self.checksum_ssh_args())
             .arg("--diff")
             .arg(&baseline);
-        if self.s.initrd.paranoid {
-            cmd.arg("--paranoid");
-        }
         if self.log.debug_enabled() {
             cmd.arg("--debug");
         }
-        if let Some(dir) = &self.s.initrd.busybox_dir {
-            cmd.env("INITRD_CHECKSUM_BUSYBOX_DIR", dir);
+        if let Some(dir) = &self.s.initrd.measure_dir {
+            cmd.env("INITRD_CHECKSUM_MEASURE_DIR", dir);
         }
         let out = match self.exec(cmd, None) {
             Ok(out) => out,

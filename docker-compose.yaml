@@ -72,7 +72,6 @@ services:
       SKIP_SSH_PORT_CHECK: "1"
       # Initrd checksum validation
       INITRD_CHECKSUM_FILE: "/run/secrets/initrd_checksum"
-      PARANOID: "1"
       # Health check against a custom command
       HEALTHCHECK_REMOTE_CMD: "ls /dev/mapper"
 

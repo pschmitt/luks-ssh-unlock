@@ -2,26 +2,19 @@
 set -euo pipefail
 export LC_ALL=C
 
-# Requirements (binaries):
-# - coreutils: find, sort, sha256sum, mktemp, cat, printf
-# - util-linux: readlink, realpath
-# - cpio: cpio (only for initrd image mode)
-# - gzip or zstd: gzip/zstd (only for initrd image mode)
-# - openssh-client: ssh (remote modes)
-# - bash: for local and remote shells
-# - tee (only if you re-enable streaming outputs)
-# Remote live-root mode: needs bash + find + sort + sha256sum (pkgs.bashInteractive pkgs.coreutils pkgs.findutils).
-# Remote initrd-image mode: additionally needs cpio + gzip/zstd (pkgs.cpio pkgs.gzip/pkgs.zstd).
-# Paranoid mode: pushes a tiny bundle to /run/initrd-checksum/bin on the remote host and prepends it to PATH for all remote actions.
+# The measuring is done by initrd-measure, a static binary per target arch
+# (initrd-measure-$(uname -m) in INITRD_CHECKSUM_MEASURE_DIR, by default the
+# directory of this script). For a remote host it is uploaded over SSH and
+# run there, so nothing of the target's userland does the measuring: only its
+# shell, mkdir, cat and chmod put the binary in place.
 #
-# Nix quick refs (packages providing the above):
-#   pkgs.coreutils, pkgs.findutils, pkgs.util-linux, pkgs.cpio,
-#   pkgs.gzip, pkgs.zstd, pkgs.openssh, pkgs.bashInteractive
+# Requirements (binaries): bash, coreutils (mktemp, sort, cat, uname,
+# dirname), diffutils (diff), openssh-client (ssh, remote modes).
 
 usage() {
   cat <<EOF
-Usage: $0 [ACTION] [OPTIONS]
-  or:  $0 diff FILE1 FILE2
+Usage: $(basename "$0") [ACTION] [OPTIONS]
+  or:  $(basename "$0") diff FILE1 FILE2
 Hash initrd contents locally or over SSH, or diff two checksum files.
 
 Actions:
@@ -36,9 +29,11 @@ Options (checksum):
   -i, --identity FILE     SSH identity file to use.
       --initrd[=PATH]     Force hashing of an initrd image (default: /run/current-system/initrd).
       --diff FILE         After hashing, show diff vs FILE (sorted).
+      --format 1|2        Output format (default: that of the --diff FILE, else 2).
+                          1 lists regular files only; 2 adds symlinks and mount points.
   -q, --quiet             Suppress checksum stdout and routine info logs; warnings/errors remain.
       --debug             Enable verbose debug and info logs (overrides --quiet for logs).
-      --paranoid          Push a minimal bundle to /run/initrd-checksum/bin on the remote host and prepend to PATH.
+      --paranoid          Accepted for compatibility; the measurer is always uploaded.
       --insecure-ssh      Disable host key verification (unsafe; sets StrictHostKeyChecking=no and null known_hosts files).
       --known-hosts-file FILE
                           Override the SSH UserKnownHostsFile (only in secure mode).
@@ -146,7 +141,6 @@ SSH_KNOWN_HOSTS_FILE=""
 SSH_IDENTITY_FILE=""
 INSECURE_SSH=0
 SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s' "$0")
-REMOTE_SCRIPT_PATH=""
 
 enable_secure_ssh() {
   INSECURE_SSH=0
@@ -193,442 +187,121 @@ apply_identity_file() {
 
 enable_secure_ssh
 
-IGNORE_RELS=(
-  # machine-id is regenerated each boot
-  "etc/machine-id"
+MEASURE_DIR="${INITRD_CHECKSUM_MEASURE_DIR:-$(dirname "$SCRIPT_PATH")}"
+FORMAT_V2_HEADER="# initrd-measure format 2"
 
-  # empty root history file in NixOS initrd
-  "var/empty/.bash_history"
+# The measurer binary for ARCH (as `uname -m` prints it). A remote ARCH comes
+# from the target, so it must never pick any other file than a measurer.
+measure_bin() {
+  local arch=$1 bin=""
 
-  # initrd ssh host keys
-  "etc/ssh/initrd/ssh_host_ed25519_key"
-  "etc/ssh/initrd/ssh_host_ed25519_key.pub"
-  "etc/ssh/initrd/ssh_host_rsa_key"
-  "etc/ssh/initrd/ssh_host_rsa_key.pub"
+  case "$arch" in
+    aarch64|arm64)
+      arch=aarch64
+    ;;
+    x86_64|amd64)
+      arch=x86_64
+    ;;
+    *)
+      log_err "unsupported architecture: $(printf '%q' "$arch")"
+      return 1
+    ;;
+  esac
 
-  # initrd SSH host keys (initrd secrets)
-  ".initrd-secrets/etc/ssh/initrd/ssh_host_ed25519_key"
-  ".initrd-secrets/etc/ssh/initrd/ssh_host_rsa_key"
-
-  # rendered Wi-Fi supplicant config may legitimately differ across boots/build inputs
-  "etc/wpa_supplicant/"
-  ".initrd-secrets/etc/wpa_supplicant/"
-
-  # early AMD/Intel microcode blob living in concatenated initrd payload
-  "kernel/x86/microcode/AuthenticAMD.bin"
-  "kernel/x86/microcode/GenuineIntel.bin"
-)
-
-IGNORE_GLOBS=(
-  # initrd secret staging content is expected to differ from the unpacked target paths
-  "/.initrd-secrets/**"
-
-  # encrypted SOPS payloads are secret inputs, not stable runtime artifacts
-  "**.sops.**"
-)
-
-REMOTE_PATH_PREFIX=""
-LOCAL_BUSYBOX_DIR="${INITRD_CHECKSUM_BUSYBOX_DIR:-/busybox}"
-
-resolve_initrd_path() {
-  local input_path=$1 resolved=""
-
-  if resolved=$(readlink -f "$input_path" 2>/dev/null)
+  bin="${MEASURE_DIR}/initrd-measure-${arch}"
+  if [[ -x "$bin" ]]
   then
-    printf '%s\n' "$resolved"
-    return
+    printf '%s\n' "$bin"
+    return 0
   fi
 
-  if resolved=$(realpath "$input_path" 2>/dev/null)
+  # A plain build (cargo install) for this machine only.
+  if [[ "$arch" == "$(uname -m)" ]] && bin=$(command -v initrd-measure)
   then
-    printf '%s\n' "$resolved"
-    return
+    printf '%s\n' "$bin"
+    return 0
   fi
 
-  printf '%s\n' "$input_path"
+  log_err "no initrd-measure binary for $arch (looked for ${MEASURE_DIR}/initrd-measure-${arch})"
+  return 1
 }
 
-detect_decompress_cmd() {
-  local input_path=$1
+# The format of an existing checksum file: 2 if it starts with the format 2
+# header, 1 otherwise (the original shell output).
+file_format() {
+  local file=$1 first=""
 
-  if command -v zstd &>/dev/null && zstd -t "$input_path" &>/dev/null
+  if [[ -r "$file" ]] && IFS= read -r first < "$file" && [[ "$first" == "$FORMAT_V2_HEADER" ]]
   then
-    printf 'zstd -dc\n'
-    return
+    printf '2\n'
+    return 0
   fi
-
-  if command -v gzip &>/dev/null && gzip -t "$input_path" &>/dev/null
-  then
-    printf 'gzip -dc\n'
-    return
-  fi
-
-  printf 'cat\n'
+  printf '1\n'
 }
 
-extract_cpio() {
-  local archive_path=$1 decompress_cmd="" err_file="" rc=0
-  decompress_cmd=$(detect_decompress_cmd "$archive_path")
+# Single-quote a word for a POSIX shell.
+sh_quote() {
+  printf "'%s'" "${1//\'/\'\\\'\'}"
+}
 
-  # cpio reports every byte it cannot parse on its own line: on a stream that
-  # is not a cpio archive that is hundreds of thousands of lines, which floods
-  # the journal and hides everything after it. Keep its errors and show only
-  # the first few.
-  err_file=$(mktemp)
-  if [[ "$decompress_cmd" == "cat" ]]
+# The measurer's arguments, in MEASURE_ARGS: auto-detect (the live root
+# inside an initrd, else the image), or always the image.
+measure_args() {
+  local format=$1 initrd_mode=$2 initrd_path=$3
+
+  MEASURE_ARGS=(--format "$format")
+  if [[ -n "$initrd_mode" ]]
   then
-    cpio --quiet -idmu < "$archive_path" 2> "$err_file" || rc=$?
+    MEASURE_ARGS+=(image)
   else
-    $decompress_cmd "$archive_path" 2> "$err_file" | cpio --quiet -idmu 2>> "$err_file" || rc=$?
+    MEASURE_ARGS+=(auto)
   fi
-
-  if (( rc != 0 ))
+  if [[ -n "$initrd_path" ]]
   then
-    log_err "failed to unpack $archive_path (${decompress_cmd%% *}, exit $rc):"
-    head -n 5 "$err_file" | LC_ALL=C tr -c '[:print:]\n' '?' >&2
-    rm -f "$err_file"
-    return 1
+    MEASURE_ARGS+=("$initrd_path")
   fi
-
-  rm -f "$err_file"
 }
 
-newc_end_offset() {
-  local archive_path=$1 offset=0 header="" magic="" namesize_hex="" filesize_hex="" namesize=0 filesize=0 name=""
+measure_local() {
+  local format=$1 initrd_mode=$2 initrd_path=$3 bin=""
 
-  while true
+  bin=$(measure_bin "$(uname -m)") || return 1
+  measure_args "$format" "$initrd_mode" "$initrd_path"
+  log_info "local mode=${MEASURE_ARGS[2]} format=$format measurer=$bin"
+  "$bin" "${MEASURE_ARGS[@]}"
+}
+
+measure_remote() {
+  local host=$1 ssh_user=$2 format=$3 initrd_mode=$4 initrd_path=$5
+  local arch="" bin="" args="" arg="" remote_cmd=""
+
+  if ! arch=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" -- uname -m)
+  then
+    log_err "cannot detect the architecture of $host"
+    return 1
+  fi
+  bin=$(measure_bin "$arch") || return 1
+  log_info "remote arch detected: $arch"
+
+  measure_args "$format" "$initrd_mode" "$initrd_path"
+  for arg in "${MEASURE_ARGS[@]}"
   do
-    header=$(dd if="$archive_path" bs=1 count=110 skip=$offset status=none 2>/dev/null | LC_ALL=C tr -d '\0') || return 1
-    if [[ ${#header} -lt 110 ]]
-    then
-      return 1
-    fi
-    magic=${header:0:6}
-    if [[ "$magic" != "070701" ]]
-    then
-      return 1
-    fi
-
-    namesize_hex=${header:94:8}
-    filesize_hex=${header:54:8}
-    namesize=$((16#$namesize_hex))
-    filesize=$((16#$filesize_hex))
-    if (( namesize <= 0 ))
-    then
-      return 1
-    fi
-
-    name=$(dd if="$archive_path" bs=1 count=$((namesize - 1)) skip=$((offset + 110)) status=none 2>/dev/null) || return 1
-
-    offset=$(( (offset + 110 + namesize + 3) & ~3 ))
-    offset=$(( (offset + filesize + 3) & ~3 ))
-
-    if [[ "$name" == "TRAILER!!!" ]]
-    then
-      printf '%s\n' "$offset"
-      return 0
-    fi
+    args+=" $(sh_quote "$arg")"
   done
-}
 
-write_initrd_tail() {
-  local src=$1 dest=$2 end_offset="" total_size=""
+  # One connection: stdin is the binary, written to a private directory
+  # (in /run, else a mktemp one for an unprivileged user), run and removed.
+  # Plain POSIX sh: the target's shell may be busybox ash.
+  remote_cmd="umask 077"
+  remote_cmd+=" && d=/run/initrd-measure.\$\$"
+  remote_cmd+=" && { mkdir \"\$d\" 2>/dev/null || d=\$(mktemp -d) || exit 97; }"
+  remote_cmd+=" && trap 'rm -rf \"\$d\"' EXIT"
+  remote_cmd+=" && cat > \"\$d/initrd-measure\""
+  remote_cmd+=" && chmod 700 \"\$d/initrd-measure\""
+  remote_cmd+=" && \"\$d/initrd-measure\"${args}"
 
-  end_offset=$(newc_end_offset "$src") || return 1
-  total_size=$(stat -c '%s' "$src") || return 1
-
-  if (( end_offset >= total_size ))
-  then
-    return 1
-  fi
-
-  if dd if="$src" of="$dest" bs=4M skip="$end_offset" iflag=skip_bytes status=none 2>/dev/null
-  then
-    printf '%s\n' "$end_offset"
-    return 0
-  fi
-
-  return 1
-}
-
-find_compressed_magic_offset() {
-  local archive_path=$1 offset_gzip="" offset_zstd=""
-
-  if ! command -v grep &>/dev/null
-  then
-    log_err "grep not found: cannot locate the compressed initrd payload"
-    return 2
-  fi
-
-  offset_zstd=$(LC_ALL=C grep -aob -m1 $'\x28\xb5\x2f\xfd' "$archive_path" | head -n1 | cut -d: -f1)
-  offset_gzip=$(LC_ALL=C grep -aob -m1 $'\x1f\x8b\x08' "$archive_path" | head -n1 | cut -d: -f1)
-
-  if [[ -n "$offset_zstd" && -n "$offset_gzip" ]]
-  then
-    if (( offset_zstd <= offset_gzip ))
-    then
-      printf '%s\n' "$offset_zstd"
-    else
-      printf '%s\n' "$offset_gzip"
-    fi
-    return 0
-  fi
-
-  if [[ -n "$offset_zstd" ]]
-  then
-    printf '%s\n' "$offset_zstd"
-    return 0
-  fi
-
-  if [[ -n "$offset_gzip" ]]
-  then
-    printf '%s\n' "$offset_gzip"
-    return 0
-  fi
-
-  return 1
-}
-
-hash_tree() {
-  local root=$1
-
-  cd "$root"
-
-  find . -xdev \
-    \( -path ./dev -o -path ./proc -o -path ./sys -o -path ./run -o -path ./tmp \) -prune -o \
-    -type f -print0 \
-  | sort -z \
-  | while IFS= read -r -d '' rel
-    do
-      rel=${rel#./}
-      local abs_path=""
-      abs_path=/$rel
-      for ignore in "${IGNORE_RELS[@]}"
-      do
-        case "$rel" in
-          "$ignore"|"$ignore"*)
-            continue 2
-          ;;
-        esac
-      done
-      for ignore_glob in "${IGNORE_GLOBS[@]}"
-      do
-        # shellcheck disable=SC2254 # IGNORE_GLOBS are patterns on purpose
-        case "$abs_path" in
-          $ignore_glob)
-            continue 2
-          ;;
-        esac
-      done
-      local fs_path="" hash_line="" hash=""
-      fs_path="$root/$rel"
-
-      if hash_line=$(sha256sum "$fs_path" 2>/dev/null)
-      then
-        hash=${hash_line%% *}
-        printf '%s  %s\n' "$hash" "$abs_path"
-      else
-        log_err "failed to hash $abs_path (need root?)"
-        exit 1
-      fi
-    done | sort -k 2
-}
-
-require_root() {
-  if [[ $(id -u) -ne 0 ]]
-  then
-    log_err "live root measurement needs root privileges (rerun with sudo?)"
-    exit 1
-  fi
-}
-
-measure_live_root() {
-  log_info "mode=live-root hashing / (excluding dev/proc/sys/run/tmp)"
-  require_root
-  hash_tree /
-}
-
-# Upload a file to a remote host via SSH and verify its integrity using SHA256 checksums.
-#
-# Parameters:
-#   local_path   - Path to the local file to upload.
-#   host         - Hostname or IP address of the remote machine.
-#   ssh_user     - SSH username for the remote connection.
-#   remote_path  - Destination path on the remote host.
-#   remote_mode  - (Optional) File mode (permissions) to set on the remote file (e.g., 0644).
-#
-# Behavior:
-#   - Exits with an error if the local file does not exist, upload fails, or checksums do not match.
-#   - After upload, computes and compares SHA256 checksums of the local and remote files.
-#   - If remote_mode is provided, sets the file permissions on the remote file.
-scpio() {
-  local local_path=$1
-  local host=$2
-  local ssh_user=$3
-  local remote_path=$4
-  local remote_mode=$5
-
-  if [[ ! -f "$local_path" ]]
-  then
-    log_err "local file not found: $local_path"
-    exit 1
-  fi
-
-  local remote_cmd="cat > '$remote_path'"
-
-  if [[ -n "$remote_mode" ]]
-  then
-    remote_cmd="${remote_cmd} && chmod $remote_mode '$remote_path'"
-  fi
-
-  if ! ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "$remote_cmd" < "$local_path"
-  then
-    log_err "failed to upload $local_path to $host:$remote_path"
-    exit 1
-  fi
-
-  local local_checksum_line
-  if ! local_checksum_line=$(sha256sum "$local_path" 2>/dev/null)
-  then
-    log_err "failed to calculate local checksum for $local_path"
-    exit 1
-  fi
-
-  local local_checksum
-  local_checksum=${local_checksum_line%% *}
-
-  local remote_checksum_line
-  if ! remote_checksum_line=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "sha256sum '$remote_path'")
-  then
-    log_err "failed to calculate remote checksum for $host:$remote_path"
-    exit 1
-  fi
-
-  local remote_checksum
-  remote_checksum=${remote_checksum_line%% *}
-
-  if [[ "$local_checksum" != "$remote_checksum" ]]
-  then
-    log_err "checksum mismatch for uploaded $local_path (local $local_checksum remote $remote_checksum)"
-    exit 1
-  fi
-
-  log_info "successfully uploaded $local_path to $host:$remote_path (checksum verified)"
-}
-
-ensure_remote_script() {
-  local host=$1 ssh_user=$2
-
-  if [[ -n "$REMOTE_SCRIPT_PATH" ]]
-  then
-    return
-  fi
-
-  local remote_path
-  if ! remote_path=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "mktemp /tmp/initrd-checksum.sh.XXXXXX")
-  then
-    log_err "failed to allocate remote temp path"
-    exit 1
-  fi
-
-  # Callers run this copy as `bash <script>`: under Nix its shebang points
-  # at the controller's bash store path, which doesn't exist on the target
-  # (e.g. an aarch64 initrd checked from an x86_64 controller).
-  scpio "$SCRIPT_PATH" "$host" "$ssh_user" "$remote_path" "+x"
-
-  REMOTE_SCRIPT_PATH=$remote_path
-  add_exit_trap "ssh ${SSH_OPTS[*]} -l '$ssh_user' '$host' \"rm -f '$remote_path'\""
-}
-
-measure_initrd_image() {
-  local initrd_path="$1" initrd_src="" tmpdir="" initrd_tail="" tail_offset="" tail_stream="" magic_offset="" tail_stream_tmp=""
-
-  initrd_src=$(resolve_initrd_path "$initrd_path")
-  if [[ ! -f "$initrd_src" && "$initrd_path" == "/run/current-system/initrd" && -f /run/booted-system/initrd ]]
-  then
-    log_warn "initrd not found at $initrd_src, falling back to /run/booted-system/initrd"
-    initrd_src=/run/booted-system/initrd
-  fi
-  if [[ ! -f "$initrd_src" ]]
-  then
-    log_err "initrd not found: $initrd_src"
-    return 1
-  fi
-
-  tmpdir=$(mktemp -d)
-  add_exit_trap "rm -rf '$tmpdir'"
-
-  log_info "mode=initrd-image source=$initrd_src unpack_dir=$tmpdir"
-
-  cd "$tmpdir"
-  extract_cpio "$initrd_src" || return 1
-
-  initrd_tail=$(mktemp)
-  add_exit_trap "rm -f '$initrd_tail'"
-  if tail_offset=$(write_initrd_tail "$initrd_src" "$initrd_tail")
-  then
-    log_info "detected concatenated initrd payload at offset=$tail_offset; unpacking tail"
-    tail_stream=$initrd_tail
-    if [[ $(detect_decompress_cmd "$tail_stream") == "cat" ]]
-    then
-      # The tail is usually padding followed by a compressed archive. Without
-      # a compression magic it must itself be an uncompressed newc archive;
-      # anything else would make cpio parse garbage.
-      if magic_offset=$(find_compressed_magic_offset "$tail_stream")
-      then
-        tail_stream_tmp=$(mktemp)
-        add_exit_trap "rm -f '$tail_stream_tmp'"
-        if ! dd if="$tail_stream" of="$tail_stream_tmp" bs=4M skip="$magic_offset" iflag=skip_bytes status=none
-        then
-          log_err "failed to cut the initrd tail at offset=$magic_offset"
-          return 1
-        fi
-        tail_stream=$tail_stream_tmp
-      elif [[ $(head -c 6 "$tail_stream" | LC_ALL=C tr -d '\0') != "070701" ]]
-      then
-        log_err "initrd tail at offset=$tail_offset is neither compressed (gzip, zstd) nor a newc cpio archive"
-        return 1
-      fi
-    fi
-
-    extract_cpio "$tail_stream" || return 1
-  fi
-
-  hash_tree "$tmpdir"
-  rm -rf "$tmpdir"
-}
-
-measure_remote_live_root() {
-  local host=$1 ssh_user=$2
-  local remote_env=() remote_script=""
-  if [[ -n "$REMOTE_PATH_PREFIX" ]]
-  then
-    remote_env=(env "PATH=${REMOTE_PATH_PREFIX}:\$PATH")
-  fi
-
-  log_info "remote host=$host user=$ssh_user mode=live-root"
-  ensure_remote_script "$host" "$ssh_user"
-  remote_script=$REMOTE_SCRIPT_PATH
-
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
-    "${remote_env[@]}" bash "$remote_script" __internal-remote-live-root
-}
-
-measure_remote_initrd_image() {
-  local host=$1 initrd_path=$2 ssh_user=$3
-
-  local remote_env=() remote_script=""
-  if [[ -n "$REMOTE_PATH_PREFIX" ]]
-  then
-    remote_env=(env "PATH=${REMOTE_PATH_PREFIX}:\$PATH")
-  fi
-
-  log_info "remote host=$host user=$ssh_user mode=initrd-image path=$initrd_path"
-  ensure_remote_script "$host" "$ssh_user"
-  remote_script=$REMOTE_SCRIPT_PATH
-
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
-    "${remote_env[@]}" bash "$remote_script" __internal-remote-initrd-image "$initrd_path"
+  log_info "remote host=$host user=$ssh_user mode=${MEASURE_ARGS[2]} format=$format measurer=$bin"
+  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" -- "$remote_cmd" < "$bin"
 }
 
 diff_hashes() {
@@ -658,167 +331,28 @@ diff_hashes() {
   return 1
 }
 
-detect_remote_initrd() {
-  local host=$1 ssh_user=$2
-
-  local remote_env=()
-  if [[ -n "$REMOTE_PATH_PREFIX" ]]
-  then
-    remote_env=(env "PATH=${REMOTE_PATH_PREFIX}:\$PATH")
-  fi
-
-  if ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" -- 'test -e /etc/initrd-release'
-  then
-    log_info "remote host=$host appears to be in initrd"
-    printf 'initrd\n'
-  else
-    log_info "remote host=$host appears to be in stage-1+rootfs"
-    printf 'root\n'
-  fi
-}
-
-detect_local_initrd() {
-  if [[ -e /etc/initrd-release ]]
-  then
-    log_info "local system appears to be in initrd"
-    printf 'initrd\n'
-  else
-    log_info "local system appears to be in stage-1+rootfs"
-    printf 'root\n'
-  fi
-}
-
-deploy_paranoid_bundle() {
-  local host=$1 ssh_user=$2
-
-  local remote_uname
-  remote_uname=$(ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "uname -m")
-
-  log_info "remote arch detected: $remote_uname"
-
-  local nix_attr="nixpkgs#pkgsStatic.busybox"
-  case "$remote_uname" in
-    aarch64)
-      nix_attr="nixpkgs#legacyPackages.aarch64-linux.pkgsStatic.busybox"
-    ;;
-    x86_64)
-      nix_attr="nixpkgs#legacyPackages.x86_64-linux.pkgsStatic.busybox"
-    ;;
-  esac
-
-  local remote_root="/run/initrd-checksum/bin"
-
-  log_info "deploying busybox bundle to $host:$remote_root"
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" "rm -rf '$remote_root' && mkdir -p '$remote_root'"
-
-  local busybox_src=""
-  case "$remote_uname" in
-    aarch64)
-      if [[ -x "${LOCAL_BUSYBOX_DIR}/busybox-arm64" ]]
-      then
-        busybox_src="${LOCAL_BUSYBOX_DIR}/busybox-arm64"
-      fi
-      ;;
-    x86_64)
-      if [[ -x "${LOCAL_BUSYBOX_DIR}/busybox-amd64" ]]
-      then
-        busybox_src="${LOCAL_BUSYBOX_DIR}/busybox-amd64"
-      fi
-      ;;
-  esac
-
-  if [[ -z "$busybox_src" ]] && command -v nix &>/dev/null
-  then
-    log_debug "building '$nix_attr' via nix (with --fallback)"
-    local build_out
-    if build_out=$(nix build "$nix_attr" --fallback --print-out-paths 2>/dev/null | tail -n1)
-    then
-      busybox_src="$build_out/bin/busybox"
-    fi
-  fi
-
-  if [[ -z "$busybox_src" || ! -x "$busybox_src" ]]
-  then
-    log_err "busybox nix build failed? cannot proceed"
-    exit 1
-  fi
-
-  log_info "uploading busybox from $busybox_src"
-  scpio "$busybox_src" "$host" "$ssh_user" "$remote_root/busybox" "+x"
-
-  # Symlink required applets to busybox (single ssh)
-  local applets=(
-    cat
-    cpio
-    cut
-    date
-    dd
-    find
-    grep
-    gzip
-    id
-    mkdir
-    mktemp
-    readlink
-    realpath
-    rm
-    sha256sum
-    sort
-    tail
-    tar
-    test
-    tr
-  )
-  log_info "linking applets: ${applets[*]}"
-  ssh "${SSH_OPTS[@]}" -l "$ssh_user" "$host" \
-    "cd '$remote_root' && for a in ${applets[*]}; do ln -vsf busybox \"\$a\"; done"
-
-  REMOTE_PATH_PREFIX="$remote_root"
-
-  local cleanup_cmd="ssh ${SSH_OPTS[*]} -l '$ssh_user' '$host' \"rm -rf '$remote_root'\""
-  add_exit_trap "$cleanup_cmd"
-}
-
 run_checksum() {
   local host=$1 initrd_path=$2 initrd_mode=$3 ssh_user=$4
-  local diff_target=$5 quiet=$6 paranoid=$7
-  local tmpfile="" mode=""
+  local diff_target=$5 quiet=$6 format=$7
+  local tmpfile=""
+
+  if [[ -z "$format" ]]
+  then
+    format=2
+    if [[ -n "$diff_target" ]]
+    then
+      format=$(file_format "$diff_target")
+    fi
+  fi
 
   tmpfile=$(mktemp)
   add_exit_trap "rm -f '$tmpfile'"
 
   if [[ -n "$host" ]]
   then
-    if [[ -n "$paranoid" ]]
-    then
-      deploy_paranoid_bundle "$host" "$ssh_user"
-    fi
-
-    if [[ "$initrd_mode" == "1" ]]
-    then
-      measure_remote_initrd_image "$host" "$initrd_path" "$ssh_user" > "$tmpfile"
-    else
-      mode=$(detect_remote_initrd "$host" "$ssh_user")
-      if [[ "$mode" == "initrd" ]]
-      then
-        measure_remote_live_root "$host" "$ssh_user" > "$tmpfile"
-      else
-        measure_remote_initrd_image "$host" "$initrd_path" "$ssh_user" > "$tmpfile"
-      fi
-    fi
+    measure_remote "$host" "$ssh_user" "$format" "$initrd_mode" "$initrd_path" > "$tmpfile" || return 1
   else
-    if [[ "$initrd_mode" == "1" ]]
-    then
-      measure_initrd_image "$initrd_path" > "$tmpfile"
-    else
-      mode=$(detect_local_initrd)
-      if [[ "$mode" == "initrd" ]]
-      then
-        measure_live_root > "$tmpfile"
-      else
-        measure_initrd_image "$initrd_path" > "$tmpfile"
-      fi
-    fi
+    measure_local "$format" "$initrd_mode" "$initrd_path" > "$tmpfile" || return 1
   fi
 
   if [[ -n "$quiet" ]]
@@ -840,7 +374,7 @@ main() {
 
   local action="" host="" initrd_mode="" initrd_path=""
   local diff_file1="" diff_file2="" checksum_diff="" quiet=""
-  local known_hosts_file="" identity_file="" ssh_user="root" paranoid=""
+  local known_hosts_file="" identity_file="" ssh_user="root" format=""
   DEBUG="${DEBUG:-}"
   LOG_QUIET="${LOG_QUIET:-}"
 
@@ -859,22 +393,6 @@ main() {
   then
     shift
   fi
-
-  case "$action" in
-    __internal-remote-live-root)
-      measure_live_root
-      exit "$?"
-    ;;
-    __internal-remote-initrd-image)
-      if [[ $# -lt 1 ]]
-      then
-        log_err "missing initrd path for internal remote invocation"
-        exit 2
-      fi
-      measure_initrd_image "$1"
-      exit "$?"
-    ;;
-  esac
 
   while [[ $# -gt 0 ]]
   do
@@ -967,7 +485,20 @@ main() {
         shift
       ;;
       --paranoid)
-        paranoid=1
+        log_debug "--paranoid is the default now: the measurer is always uploaded"
+        shift
+      ;;
+      --format)
+        if [[ $# -lt 2 ]]
+        then
+          log_err "missing argument for $1"
+          exit 2
+        fi
+        format=$2
+        shift 2
+      ;;
+      --format=*)
+        format=${1#--format=}
         shift
       ;;
       --insecure*)
@@ -1027,10 +558,15 @@ main() {
     esac
   done
 
-  if [[ -z "${initrd_path:-}" ]]
-  then
-    initrd_path=/run/current-system/initrd
-  fi
+  case "$format" in
+    ""|1|2)
+      :
+    ;;
+    *)
+      log_err "--format takes 1 or 2"
+      exit 2
+    ;;
+  esac
 
   case "$action" in
     checksum|check)
@@ -1040,7 +576,7 @@ main() {
         exit 2
       fi
 
-      run_checksum "$host" "$initrd_path" "$initrd_mode" "$ssh_user" "$checksum_diff" "$quiet" "$paranoid"
+      run_checksum "$host" "$initrd_path" "$initrd_mode" "$ssh_user" "$checksum_diff" "$quiet" "$format"
     ;;
     diff)
       if [[ -z "$diff_file1" || -z "$diff_file2" ]]
@@ -1063,3 +599,5 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
   main "$@"
 fi
+
+# vim: set ft=sh et ts=2 sw=2 :

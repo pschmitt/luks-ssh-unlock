@@ -43,9 +43,35 @@ it with its SSH host key (`ssh-keygen -Y sign -n initrd-checksum`). The NixOS
 module does this on activation (`activationScript.enable`). The unlocker
 copies the baseline while the host is up and uses it at the next boot.
 
-`initrd-checksum` copies itself to the target and runs there. In paranoid
-mode it first uploads a static BusyBox bundle to `/run/initrd-checksum/bin`
-and uses only those tools.
+The measuring is done by `initrd-measure`, a static binary (x86_64 or
+aarch64, picked by the target's `uname -m`). For a remote check,
+`initrd-checksum` sends it over the SSH connection's stdin to a private
+directory in `/run` and runs it there. It then removes it. Nothing else of the
+target's userland measures: only its shell, `mkdir`, `cat` and `chmod` put
+the binary in place.
+
+- In the initrd (`/etc/initrd-release` exists) it hashes the live `/`: every
+  regular file, plus (format 2) every symlink target and every directory on
+  another file system. It skips `/dev`, `/proc`, `/sys`, `/run` and `/tmp`.
+- On a booted host it hashes the initrd image: it unpacks the image in
+  memory the way the kernel does (uncompressed, gzip and zstd segments in
+  any order, hard links, later entries replacing earlier ones), so the
+  image's measurement is what the initrd that boots from it shows.
+- A short ignore list leaves out what differs at every boot: the machine ID,
+  the initrd SSH host keys, initrd secrets, the early microcode,
+  `/etc/resolv.conf`, and what the systemd initrd adds once the root file
+  system is mounted (`/sysroot`, `/nixos-closure`, `/etc/switch-root.conf`).
+
+A baseline in format 2 starts with `# initrd-measure format 2`; the checker
+measures in the format of the baseline it compares against. Format 1 lists
+regular files only and is what versions before the static measurer wrote.
+
+What this does not protect against: the measurer runs on the system it
+measures, so a target whose kernel or SSH server was replaced can show it a
+clean initrd, for example by running it against a pristine copy. The kernel
+and its command line are not measured either. The check makes tampering with
+the initrd's files visible; it is not an attestation. Measured boot with a
+TPM is the tool for that.
 
 ## What is logged and sent
 

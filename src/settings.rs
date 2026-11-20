@@ -221,8 +221,8 @@ pub struct GlobalOpts {
     )]
     pub initrd_checksum_script: Option<String>,
 
-    /// Run the checksum with a minimal BusyBox bundle uploaded to the target [env: PARANOID]
-    #[arg(long, global = true, help_heading = "Initrd validation")]
+    /// No effect, kept for old configurations: the measurer is always uploaded [env: PARANOID]
+    #[arg(long, global = true, hide = true)]
     pub paranoid: bool,
 
     /// Refuse to unlock unless the baseline carries a valid signature [env: INITRD_CHECKSUM_REQUIRE_SIGNATURE]
@@ -394,8 +394,8 @@ pub struct InitrdCheck {
     pub file: Option<PathBuf>,
     pub dir: Option<PathBuf>,
     pub script: PathBuf,
-    pub busybox_dir: Option<String>,
-    pub paranoid: bool,
+    /// The static measurers initrd-checksum uploads (initrd-measure-ARCH).
+    pub measure_dir: Option<String>,
     pub require_signature: bool,
 }
 
@@ -619,8 +619,7 @@ impl Settings {
                 script: val(&opts.initrd_checksum_script, "INITRD_CHECKSUM_SCRIPT")
                     .map(PathBuf::from)
                     .unwrap_or_else(default_checksum_script),
-                busybox_dir: env("INITRD_CHECKSUM_BUSYBOX_DIR").filter(|v| !v.is_empty()),
-                paranoid: flag(opts.paranoid, "PARANOID"),
+                measure_dir: env("INITRD_CHECKSUM_MEASURE_DIR").filter(|v| !v.is_empty()),
                 require_signature: flag(
                     opts.require_signature,
                     "INITRD_CHECKSUM_REQUIRE_SIGNATURE",

@@ -8,6 +8,12 @@ license = "GPL-3.0-only"
 repository = "https://github.com/pschmitt/luks-ssh-unlock"
 readme = "README.md"
 
+[workspace]
+# The static initrd measurer that initrd-checksum uploads to targets.
+members = ["initrd-measure"]
+# Plain cargo commands (test, clippy, check) cover both.
+default-members = [".", "initrd-measure"]
+
 [dependencies]
 anyhow = "1"
 jiff = "1.0"

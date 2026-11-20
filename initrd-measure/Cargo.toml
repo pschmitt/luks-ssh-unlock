@@ -1,0 +1,20 @@
+[package]
+name = "initrd-measure"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Hash the files of an initrd image or of a running initrd, with no help from the system it measures"
+license = "GPL-3.0-only"
+repository = "https://github.com/pschmitt/luks-ssh-unlock"
+publish = false
+
+# Kept small on purpose: it is uploaded to the target on every check, and
+# everything here is pure Rust so it links statically for any musl target.
+[dependencies]
+flate2 = "1.1"
+libc = "0.2"
+ruzstd = "0.8"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

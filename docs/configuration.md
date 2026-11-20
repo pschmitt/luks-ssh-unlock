@@ -60,8 +60,8 @@ The jumphost's host key is checked against both known_hosts sets.
 | `INITRD_CHECKSUM_FILE` | `--initrd-checksum-file` | | Baseline the running initrd must match. |
 | `INITRD_CHECKSUM_DIR` | `--initrd-checksum-dir` | | Where baselines fetched from the booted host are stored. |
 | `INITRD_CHECKSUM_SCRIPT` | `--initrd-checksum-script` | `initrd-checksum` next to the binary | The checksum helper. |
-| `INITRD_CHECKSUM_BUSYBOX_DIR` | | the packaged bundle | BusyBox bundle for paranoid mode. |
-| `PARANOID` | `--paranoid` | off | Run the checksum with the uploaded BusyBox bundle. |
+| `INITRD_CHECKSUM_MEASURE_DIR` | | the packaged measurers | Directory of the static `initrd-measure-ARCH` binaries uploaded to the target. |
+| `PARANOID` | `--paranoid` | | No effect; kept for old configurations. The measurer is always uploaded. |
 | `INITRD_CHECKSUM_REQUIRE_SIGNATURE` | `--require-signature` | off | Refuse unless the baseline has a valid signature. |
 
 ## Healthcheck

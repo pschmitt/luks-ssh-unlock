@@ -134,7 +134,7 @@ pub fn format_uptime(secs: u64) -> String {
 
 impl Ctx {
     /// Probe the target. With VERIFY, a target in its initrd also gets its
-    /// checksum verified (slow in paranoid mode, so the TUI skips it).
+    /// checksum verified (it uploads and runs the measurer, so the TUI skips it).
     pub fn status(&mut self, verify: bool) -> Result<Report> {
         let started = Instant::now();
         self.start_check();

@@ -17,7 +17,7 @@ jobs:
     uses: pschmitt/ci-workflows/.github/workflows/rust-lint.yaml@main
     with:
       deny: true
-  # initrd-checksum runs on the target hosts, so it stays a shell script.
+  # initrd-checksum orchestrates the measurer, so it stays a shell script.
   shellcheck:
     runs-on: ubuntu-latest
     steps:
