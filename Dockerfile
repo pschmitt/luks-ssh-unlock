@@ -2,7 +2,7 @@
 
 # The static initrd measurers (x86_64 + aarch64) that initrd checks upload to
 # the target.
-ARG NIX_VERSION=2.35.6
+ARG NIX_VERSION=2.36.0
 FROM docker.io/nixos/nix:${NIX_VERSION} AS measure
 ENV NIX_CONFIG="experimental-features = nix-command flakes"
 WORKDIR /src
