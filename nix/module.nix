@@ -557,43 +557,48 @@ in
       luksInitrdChecksum = {
         deps = [ "etc" ];
         text = ''
-          set -euo pipefail
+          # Activation snippets share one shell, and a failure here would abort
+          # every snippet after it (the setuid wrappers, for one). The body is
+          # its own script, so `set -e` applies to it alone; warn on failure.
+          ${pkgs.writeShellScript "luks-ssh-unlock-initrd-checksum" ''
+            set -euo pipefail
 
-          CHECKSUM_DIR="${cfg.activationScript.dir}"
-          CHECKSUM_FILE="''${CHECKSUM_DIR}/checksum"
-          META_FILE="''${CHECKSUM_DIR}/meta.json"
+            CHECKSUM_DIR="${cfg.activationScript.dir}"
+            CHECKSUM_FILE="''${CHECKSUM_DIR}/checksum"
+            META_FILE="''${CHECKSUM_DIR}/meta.json"
 
-          mkdir -p "$CHECKSUM_DIR"
+            mkdir -p "$CHECKSUM_DIR"
 
-          # Generate checksum file
-          ${package}/bin/initrd-checksum check --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE"
+            # Generate checksum file
+            ${package}/bin/initrd-checksum check --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE"
 
-          # Sign the checksum baseline with this host's regular SSH host key, so
-          # the operator (whose known_hosts already pins that key) can detect a
-          # baseline that was tampered with after being fetched off-host.
-          rm -f "''${CHECKSUM_FILE}.sig"
-          SSH_HOST_KEY="/etc/ssh/ssh_host_ed25519_key"
-          if [ -r "$SSH_HOST_KEY" ]
-          then
-            ${pkgs.openssh}/bin/ssh-keygen -Y sign \
-              -f "$SSH_HOST_KEY" \
-              -n initrd-checksum \
-              "$CHECKSUM_FILE"
-          else
-            echo "luks-ssh-unlock: warning: $SSH_HOST_KEY not readable, skipping initrd checksum signature" >&2
-          fi
+            # Sign the checksum baseline with this host's regular SSH host key, so
+            # the operator (whose known_hosts already pins that key) can detect a
+            # baseline that was tampered with after being fetched off-host.
+            rm -f "''${CHECKSUM_FILE}.sig"
+            SSH_HOST_KEY="/etc/ssh/ssh_host_ed25519_key"
+            if [ -r "$SSH_HOST_KEY" ]
+            then
+              ${pkgs.openssh}/bin/ssh-keygen -Y sign \
+                -f "$SSH_HOST_KEY" \
+                -n initrd-checksum \
+                "$CHECKSUM_FILE"
+            else
+              echo "luks-ssh-unlock: warning: $SSH_HOST_KEY not readable, skipping initrd checksum signature" >&2
+            fi
 
-          # Build metadata
-          GENERATION=$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system)" | \
-            ${pkgs.gnused}/bin/sed 's/^system-\([0-9]\+\)-link$/\1/')
-          DATE_STR=$(${pkgs.coreutils}/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
-          CHECKSUM=$(${pkgs.coreutils}/bin/sha256sum "$CHECKSUM_FILE" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
+            # Build metadata
+            GENERATION=$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system)" | \
+              ${pkgs.gnused}/bin/sed 's/^system-\([0-9]\+\)-link$/\1/')
+            DATE_STR=$(${pkgs.coreutils}/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
+            CHECKSUM=$(${pkgs.coreutils}/bin/sha256sum "$CHECKSUM_FILE" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
 
-          ${pkgs.jq}/bin/jq -n \
-            --argjson generation "$GENERATION" \
-            --arg date "$DATE_STR" \
-            --arg checksum "$CHECKSUM" \
-            '{generation: $generation, date: $date, checksum: $checksum}' > "$META_FILE"
+            ${pkgs.jq}/bin/jq -n \
+              --argjson generation "$GENERATION" \
+              --arg date "$DATE_STR" \
+              --arg checksum "$CHECKSUM" \
+              '{generation: $generation, date: $date, checksum: $checksum}' > "$META_FILE"
+          ''} || echo "luks-ssh-unlock: warning: could not compute the initrd checksum baseline" >&2
         '';
       };
     };

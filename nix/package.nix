@@ -102,8 +102,14 @@ craneLib.buildPackage (
     nativeCheckInputs = [ coreutils ];
 
     postInstall = ''
-      install -Dm755 ${../initrd-checksum.sh} $out/bin/initrd-checksum
-      patchShebangs $out/bin/initrd-checksum
+      # Not patchShebangs: with strictDeps it silently leaves the
+      # `#!/usr/bin/env bash` shebang in place (no bash on its search path),
+      # and /usr/bin/env does not exist in every environment the module's
+      # activation script runs in (nixos-enter, for example). --replace-fail
+      # breaks the build if the shebang ever changes.
+      substitute ${../initrd-checksum.sh} $out/bin/initrd-checksum \
+        --replace-fail '#!/usr/bin/env bash' '#!${bash}/bin/bash'
+      chmod 755 $out/bin/initrd-checksum
       wrapProgram $out/bin/initrd-checksum --prefix PATH : ${checksumPath}
 
       wrapProgram $out/bin/luks-ssh-unlock \

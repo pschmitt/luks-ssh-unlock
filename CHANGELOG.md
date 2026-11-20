@@ -201,6 +201,15 @@ options and the container interface are compatible.
   it is imported once.
 - The module's `status` looked for a log message that was never written, so
   the last successful unlock was always "none recorded".
+- `initrd-checksum` kept its `#!/usr/bin/env bash` shebang in the Nix package
+  (`patchShebangs` does nothing under `strictDeps`), so it failed wherever
+  `/usr/bin/env` does not exist yet, such as the `nixos-enter` activation of a
+  nixos-anywhere install. The shebang is now substituted and the build fails if
+  it cannot be.
+- The `activationScript` no longer aborts the rest of the system activation
+  when computing the baseline fails (the setuid wrappers were skipped, and
+  `nixos-install` then failed on UEFI systems with `mount: command not found`).
+  It prints a warning instead.
 
 ### Changed
 
