@@ -13,7 +13,7 @@ publish = false
 [dependencies]
 flate2 = "1.1"
 libc = "0.2"
-ruzstd = "0.8"
+ruzstd = "0.9"
 sha2 = "0.10"
 
 [dev-dependencies]
