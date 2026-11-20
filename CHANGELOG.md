@@ -214,7 +214,8 @@ options and the container interface are compatible.
 - The `activationScript` writes the new baseline to a temporary directory and
   renames it into place, so a failure keeps the previous `checksum`,
   `checksum.sig` and `meta.json` intact instead of leaving an empty checksum
-  next to a stale signature. It no longer depends on the activation's `PATH`,
+  next to a stale signature. It no longer depends on the activation's `PATH`
+  or on a usable `TMPDIR` (it falls back to `/tmp` and creates it),
   and `meta.json` records `"generation": null` when the system profile does not
   exist yet (`nixos-install`) instead of failing.
 

@@ -579,7 +579,14 @@ in
             META_FILE="''${CHECKSUM_DIR}/meta.json"
             SSH_HOST_KEY="/etc/ssh/ssh_host_ed25519_key"
 
-            mkdir -p "$CHECKSUM_DIR"
+            # initrd-checksum unpacks the initrd with mktemp. Inside nixos-enter
+            # TMPDIR may be unset or name a directory that does not exist, and
+            # /tmp may not exist yet either.
+            if [ -z "''${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]
+            then
+              export TMPDIR=/tmp
+            fi
+            mkdir -p "$TMPDIR" "$CHECKSUM_DIR"
 
             # Build the new baseline next to the old one (same file system, so
             # mv is an atomic rename) and keep the old one intact until the new
