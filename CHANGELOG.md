@@ -209,7 +209,14 @@ options and the container interface are compatible.
 - The `activationScript` no longer aborts the rest of the system activation
   when computing the baseline fails (the setuid wrappers were skipped, and
   `nixos-install` then failed on UEFI systems with `mount: command not found`).
-  It prints a warning instead.
+  It prints a warning instead. Its `set -euo pipefail` also no longer leaks
+  into the activation snippets that run after it.
+- The `activationScript` writes the new baseline to a temporary directory and
+  renames it into place, so a failure keeps the previous `checksum`,
+  `checksum.sig` and `meta.json` intact instead of leaving an empty checksum
+  next to a stale signature. It no longer depends on the activation's `PATH`,
+  and `meta.json` records `"generation": null` when the system profile does not
+  exist yet (`nixos-install`) instead of failing.
 
 ### Changed
 

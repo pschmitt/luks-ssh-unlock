@@ -562,42 +562,83 @@ in
           # its own script, so `set -e` applies to it alone; warn on failure.
           ${pkgs.writeShellScript "luks-ssh-unlock-initrd-checksum" ''
             set -euo pipefail
+            # Nothing from the activation's PATH: it differs between a switch,
+            # a boot and a nixos-enter.
+            export PATH=${
+              makeBinPath [
+                pkgs.coreutils
+                pkgs.gnused
+                pkgs.jq
+                pkgs.openssh
+              ]
+            }
 
             CHECKSUM_DIR="${cfg.activationScript.dir}"
             CHECKSUM_FILE="''${CHECKSUM_DIR}/checksum"
+            SIG_FILE="''${CHECKSUM_FILE}.sig"
             META_FILE="''${CHECKSUM_DIR}/meta.json"
+            SSH_HOST_KEY="/etc/ssh/ssh_host_ed25519_key"
 
             mkdir -p "$CHECKSUM_DIR"
 
-            # Generate checksum file
-            ${package}/bin/initrd-checksum check --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" > "$CHECKSUM_FILE"
+            # Build the new baseline next to the old one (same file system, so
+            # mv is an atomic rename) and keep the old one intact until the new
+            # one is complete: a failure leaves the previous baseline as it was.
+            TMP_DIR=$(mktemp -d "''${CHECKSUM_DIR}/.tmp.XXXXXX")
+            trap 'rm -rf "$TMP_DIR"' EXIT
+
+            ${package}/bin/initrd-checksum check \
+              --initrd="${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}" \
+              > "''${TMP_DIR}/checksum"
+            if [ ! -s "''${TMP_DIR}/checksum" ]
+            then
+              echo "luks-ssh-unlock: initrd-checksum produced no output" >&2
+              exit 1
+            fi
 
             # Sign the checksum baseline with this host's regular SSH host key, so
             # the operator (whose known_hosts already pins that key) can detect a
             # baseline that was tampered with after being fetched off-host.
-            rm -f "''${CHECKSUM_FILE}.sig"
-            SSH_HOST_KEY="/etc/ssh/ssh_host_ed25519_key"
+            SIGNED=0
             if [ -r "$SSH_HOST_KEY" ]
             then
-              ${pkgs.openssh}/bin/ssh-keygen -Y sign \
+              ssh-keygen -q -Y sign \
                 -f "$SSH_HOST_KEY" \
                 -n initrd-checksum \
-                "$CHECKSUM_FILE"
+                "''${TMP_DIR}/checksum"
+              SIGNED=1
             else
               echo "luks-ssh-unlock: warning: $SSH_HOST_KEY not readable, skipping initrd checksum signature" >&2
             fi
 
-            # Build metadata
-            GENERATION=$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink /nix/var/nix/profiles/system)" | \
-              ${pkgs.gnused}/bin/sed 's/^system-\([0-9]\+\)-link$/\1/')
-            DATE_STR=$(${pkgs.coreutils}/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
-            CHECKSUM=$(${pkgs.coreutils}/bin/sha256sum "$CHECKSUM_FILE" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
+            # The generation is null when the system profile does not exist yet
+            # (nixos-install) or does not have the usual system-N-link form.
+            GENERATION=null
+            if PROFILE_LINK=$(readlink /nix/var/nix/profiles/system 2>/dev/null)
+            then
+              GENERATION=$(basename "$PROFILE_LINK" | sed -n 's/^system-\([0-9]\+\)-link$/\1/p')
+              GENERATION=''${GENERATION:-null}
+            fi
+            DATE_STR=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            CHECKSUM=$(sha256sum "''${TMP_DIR}/checksum" | cut -d' ' -f1)
 
-            ${pkgs.jq}/bin/jq -n \
+            jq -n \
               --argjson generation "$GENERATION" \
               --arg date "$DATE_STR" \
               --arg checksum "$CHECKSUM" \
-              '{generation: $generation, date: $date, checksum: $checksum}' > "$META_FILE"
+              '{generation: $generation, date: $date, checksum: $checksum}' \
+              > "''${TMP_DIR}/meta.json"
+
+            # Swap the files in. The old signature goes first, so no reader ever
+            # sees an old signature next to a new checksum that it does not cover
+            # (a missing or mismatched signature fails closed either way).
+            rm -f "$SIG_FILE"
+            mv -f "''${TMP_DIR}/checksum" "$CHECKSUM_FILE"
+            if [ "$SIGNED" = 1 ]
+            then
+              mv -f "''${TMP_DIR}/checksum.sig" "$SIG_FILE"
+            fi
+            mv -f "''${TMP_DIR}/meta.json" "$META_FILE"
           ''} || echo "luks-ssh-unlock: warning: could not compute the initrd checksum baseline" >&2
         '';
       };
