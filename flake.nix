@@ -180,10 +180,8 @@
     in
     eachSystem
     // {
-      # Linux package builds and checks run on the self-hosted nixbot.
-      # aarch64-linux builds natively on GitHub's arm runners (the nix-aarch64
-      # job of .github/workflows/build.yaml).
-      hydraJobs = nixpkgs.lib.genAttrs [ "x86_64-linux" ] (system: {
+      # Expose both Linux architectures to Circus.
+      hydraJobs = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (system: {
         packages = self.packages.${system};
         checks = self.checks.${system};
       });
