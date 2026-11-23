@@ -180,6 +180,19 @@
     in
     eachSystem
     // {
+      circus.consumerBuilds.nixos-config = {
+        repository = "pschmitt/nixos-config";
+        ref = "main";
+        input = "luks-ssh-unlock";
+        follows = [
+          "nixpkgs"
+          "flake-utils"
+        ];
+        packages.aarch64-linux = [
+          "luks-ssh-unlock"
+        ];
+      };
+
       # Expose both Linux architectures to Circus.
       hydraJobs = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (system: {
         packages = self.packages.${system};
