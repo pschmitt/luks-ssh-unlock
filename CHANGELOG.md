@@ -9,6 +9,9 @@ options and the container interface are compatible.
 
 ### New
 
+- Checksum push accounts default to a hostname-derived username on both sides;
+  receiver public keys can also be supplied through a runtime file.
+
 - The NixOS module can provision a dedicated restricted SSH receiver per target
   for checksum pushes, with separate authorized client keys and no shell access.
 

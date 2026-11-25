@@ -17,6 +17,12 @@ let
   nullPathOrStr = types.nullOr pathOrStr;
   inherit (cfg) package;
   receivers = filterAttrs (_: instance: instance.initrdCheck.pushReceiver.enable) cfg.instances;
+  receiverUser =
+    instance:
+    if instance.initrdCheck.pushReceiver.user == null then
+      "luks-push-${head (splitString "." instance.hostname)}"
+    else
+      instance.initrdCheck.pushReceiver.user;
   receiverProgram = pkgs.replaceVars ./checksum-receiver.py {
     logger = "${pkgs.util-linux}/bin/logger";
   };
@@ -191,34 +197,34 @@ in
   config = mkIf cfg.enable {
     environment.systemPackages = [ package ] ++ adHocUnlockers;
 
-    users.users =
-      mapAttrs
-        (_: instance: {
-          name = instance.initrdCheck.pushReceiver.user;
-          isSystemUser = true;
-          group = instance.initrdCheck.pushReceiver.user;
-          home = "/var/empty";
-          createHome = false;
-          shell = pkgs.bashInteractive;
-          openssh.authorizedKeys.keys = instance.initrdCheck.pushReceiver.authorizedKeys;
-        })
-        (mapAttrs' (_: instance: nameValuePair instance.initrdCheck.pushReceiver.user instance) receivers);
-    users.groups = mapAttrs' (
-      _: instance: nameValuePair instance.initrdCheck.pushReceiver.user { }
-    ) receivers;
-    services.openssh.enable = mkIf (receivers != { }) (mkDefault true);
-    services.openssh.extraConfig = concatStringsSep "\n" (
-      mapAttrsToList (name: instance: ''
-        Match User ${instance.initrdCheck.pushReceiver.user}
-          ForceCommand ${receiverCommand name instance}
-          DisableForwarding yes
-          PermitTTY no
-          PermitUserRC no
-          PasswordAuthentication no
-          KbdInteractiveAuthentication no
-        Match all
-      '') receivers
-    );
+    users.users = mapAttrs (_: instance: {
+      name = receiverUser instance;
+      isSystemUser = true;
+      group = receiverUser instance;
+      home = "/var/empty";
+      createHome = false;
+      shell = pkgs.bashInteractive;
+      openssh.authorizedKeys.keys = instance.initrdCheck.pushReceiver.authorizedKeys;
+    }) (mapAttrs' (_: instance: nameValuePair (receiverUser instance) instance) receivers);
+    users.groups = mapAttrs' (_: instance: nameValuePair (receiverUser instance) { }) receivers;
+    services = {
+      openssh.enable = mkIf (receivers != { }) (mkDefault true);
+      openssh.extraConfig = concatStringsSep "\n" (
+        mapAttrsToList (name: instance: ''
+          Match User ${receiverUser instance}
+            ForceCommand ${receiverCommand name instance}
+            ${optionalString (
+              instance.initrdCheck.pushReceiver.authorizedKeysFile != null
+            ) "AuthorizedKeysFile ${instance.initrdCheck.pushReceiver.authorizedKeysFile}"}
+            DisableForwarding yes
+            PermitTTY no
+            PermitUserRC no
+            PasswordAuthentication no
+            KbdInteractiveAuthentication no
+          Match all
+        '') receivers
+      );
+    };
     systemd.tmpfiles.rules = concatLists (
       mapAttrsToList (
         _: instance:
@@ -227,7 +233,7 @@ in
         in
         [
           "d ${hostDir} 0755 root root - -"
-          "d ${hostDir}/initrd-checksum 0755 ${instance.initrdCheck.pushReceiver.user} ${instance.initrdCheck.pushReceiver.user} - -"
+          "d ${hostDir}/initrd-checksum 0755 ${receiverUser instance} ${receiverUser instance} - -"
         ]
       ) receivers
     );
@@ -441,8 +447,19 @@ in
       (mapAttrsToList (name: instance: {
         assertion =
           instance.initrdCheck.dir != null
-          && instance.initrdCheck.pushReceiver.authorizedKeys != [ ]
-          && builtins.match "luks-push-[a-z0-9_-]{1,22}" instance.initrdCheck.pushReceiver.user != null
+          && (
+            instance.initrdCheck.pushReceiver.authorizedKeys != [ ]
+            || instance.initrdCheck.pushReceiver.authorizedKeysFile != null
+          )
+          && !(
+            instance.initrdCheck.pushReceiver.authorizedKeys != [ ]
+            && instance.initrdCheck.pushReceiver.authorizedKeysFile != null
+          )
+          && (
+            instance.initrdCheck.pushReceiver.authorizedKeysFile == null
+            || builtins.match "/[^[:space:]#%]+" instance.initrdCheck.pushReceiver.authorizedKeysFile != null
+          )
+          && builtins.match "luks-push-[a-z0-9_-]{1,22}" (receiverUser instance) != null
           && builtins.match "[A-Za-z0-9][A-Za-z0-9._-]*" instance.hostname != null
           && instance.hostname != "."
           && instance.hostname != "..";
@@ -451,8 +468,14 @@ in
       ++ [
         {
           assertion =
-            length (unique (mapAttrsToList (_: instance: instance.initrdCheck.pushReceiver.user) receivers))
-            == length (attrNames receivers);
+            !cfg.activationScript.push.enable
+            || cfg.activationScript.push.controllers != [ ]
+            || cfg.activationScript.push.host != "";
+          message = "Checksum push requires a controller host";
+        }
+        {
+          assertion =
+            length (unique (mapAttrsToList (_: receiverUser) receivers)) == length (attrNames receivers);
           message = "Each initrd checksum push receiver needs a distinct user";
         }
         {
@@ -733,6 +756,15 @@ in
               # before replacing its existing baseline.
               if [ "$SIGNED" = 1 ]
               then
+                for PUSH_HOST in ${
+                  escapeShellArgs (
+                    if cfg.activationScript.push.controllers != [ ] then
+                      cfg.activationScript.push.controllers
+                    else
+                      [ cfg.activationScript.push.host ]
+                  )
+                }
+                do
                 if ! tar -C "$CHECKSUM_DIR" -cf - checksum checksum.sig meta.json | \
                   timeout -k 5s ${toString cfg.activationScript.push.timeout}s ssh \
                     -o BatchMode=yes -o StrictHostKeyChecking=yes -o ControlPath=none \
@@ -741,7 +773,7 @@ in
                     -i ${escapeShellArg (toString cfg.activationScript.push.identityFile)} \
                     -p ${toString cfg.activationScript.push.port} \
                     -l ${escapeShellArg cfg.activationScript.push.user} \
-                    ${escapeShellArg cfg.activationScript.push.host} \
+                    "$PUSH_HOST" \
                     ${escapeShellArg ''
                       set -eu
                       dest=${escapeShellArg cfg.activationScript.push.destination}
@@ -761,8 +793,9 @@ in
                       logger -t ${escapeShellArg "luks-ssh-unlock-push-${cfg.activationScript.push.instance}"} "Received signed initrd baseline" || :
                     ''}
                 then
-                  echo "luks-ssh-unlock: warning: could not push the initrd checksum baseline" >&2
+                  echo "luks-ssh-unlock: warning: could not push the initrd checksum baseline to $PUSH_HOST" >&2
                 fi
+                done
               else
                 echo "luks-ssh-unlock: warning: not pushing an unsigned initrd checksum baseline" >&2
               fi
@@ -816,11 +849,17 @@ in
         enable = mkEnableOption "best-effort SSH push of the signed initrd baseline to a controller";
         host = mkOption {
           type = types.str;
+          default = "";
           description = "Controller SSH host.";
+        };
+        controllers = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          description = "Controller SSH hosts; overrides host when nonempty.";
         };
         user = mkOption {
           type = types.str;
-          default = "root";
+          default = "luks-push-${config.networking.hostName}";
           description = "Controller SSH user.";
         };
         port = mkOption {
@@ -830,18 +869,22 @@ in
         };
         identityFile = mkOption {
           type = pathOrStr;
+          default = "/etc/ssh/ssh_host_ed25519_key";
           description = "Runtime path to the client SSH private key.";
         };
         knownHostsFile = mkOption {
           type = pathOrStr;
+          default = "/etc/ssh/ssh_known_hosts";
           description = "Runtime path to pinned controller SSH host keys.";
         };
         destination = mkOption {
           type = types.str;
+          default = "/var/lib/luks-ssh-unlock/initrd-checksum/${config.networking.hostName}/initrd-checksum";
           description = "Controller baseline directory, including the target hostname and initrd-checksum components.";
         };
         instance = mkOption {
           type = types.str;
+          default = config.networking.hostName;
           description = "Controller instance name, used to show push events in its dashboard activity.";
         };
         timeout = mkOption {
@@ -953,14 +996,19 @@ in
                   pushReceiver = {
                     enable = mkEnableOption "a restricted SSH account for this target's checksum pushes";
                     user = mkOption {
-                      type = types.str;
-                      default = "luks-push-default";
-                      description = "Dedicated controller SSH account for this target.";
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "Controller SSH account; null derives it from the target hostname.";
                     };
                     authorizedKeys = mkOption {
                       type = types.listOf types.str;
                       default = [ ];
                       description = "Client public keys authorized to send this target's baseline.";
+                    };
+                    authorizedKeysFile = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "Runtime path to this client's authorized public key file; mutually exclusive with authorizedKeys.";
                     };
                   };
                   file = mkOption {

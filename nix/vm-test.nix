@@ -27,8 +27,10 @@ pkgs.testers.runNixOSTest {
           activationScript.enable = true;
           activationScript.push = {
             enable = true;
-            host = "controller";
-            user = "luks-push-target";
+            controllers = [
+              "127.0.0.1"
+              "controller"
+            ];
             identityFile = "/etc/push-key";
             knownHostsFile = "/etc/controller-known-hosts";
             destination = "/tmp/baselines/target/initrd-checksum";
@@ -66,8 +68,7 @@ pkgs.testers.runNixOSTest {
             dir = "/tmp/baselines";
             pushReceiver = {
               enable = true;
-              user = "luks-push-target";
-              authorizedKeys = [ (lib.readFile "${keys}/id_ed25519.pub") ];
+              authorizedKeysFile = "/etc/target-push-key.pub";
             };
           };
         };
@@ -75,13 +76,19 @@ pkgs.testers.runNixOSTest {
       systemd.services.luks-ssh-unlock-target.wantedBy = lib.mkForce [ ];
       environment = {
         systemPackages = [ package ];
-        etc."ssh/test_host_key" = {
-          source = "${keys}/ssh_host_ed25519_key";
-          mode = "0600";
-        };
-        etc.sshKey = {
-          source = "${keys}/id_ed25519";
-          mode = "0600";
+        etc = {
+          "ssh/test_host_key" = {
+            source = "${keys}/ssh_host_ed25519_key";
+            mode = "0600";
+          };
+          sshKey = {
+            source = "${keys}/id_ed25519";
+            mode = "0600";
+          };
+          "target-push-key.pub" = {
+            source = "${keys}/id_ed25519.pub";
+            mode = "0644";
+          };
         };
       };
       services.openssh = {

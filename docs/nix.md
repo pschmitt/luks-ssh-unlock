@@ -73,7 +73,6 @@ bumps reuse them from the cache.
     initrdCheck.enable = true;
     initrdCheck.pushReceiver = {
       enable = true;
-      user = "luks-push-target";
       authorizedKeys = [ "ssh-ed25519 AAAA..." ];
     };
   };
@@ -83,9 +82,10 @@ bumps reuse them from the cache.
   and an SSH forced command. Each target needs its own account and keys; the
   account cannot open a shell, allocate a TTY, or forward connections. It can
   submit only a bounded archive for that target's configured baseline path.
-  The username must start with `luks-push-` and defaults to
-  `luks-push-default`. Set a distinct name for each target. On the client, use
-  the same username:
+  The default username is `luks-push-` followed by the target's hostname
+  without its domain. The client uses its own hostname by default. Set
+  `user` on both sides if those hostnames differ. Use `authorizedKeysFile`
+  instead of `authorizedKeys` for a runtime public-key file.
 
   ```nix
   services.luks-ssh-unlock.activationScript = {
@@ -93,11 +93,8 @@ bumps reuse them from the cache.
     push = {
       enable = true;
       host = "controller.example.com";
-      user = "baseline-writer";
       identityFile = "/run/secrets/baseline-push-key";
       knownHostsFile = "/etc/ssh/controller-known-hosts";
-      destination = "/var/lib/luks-ssh-unlock/initrd-checksum/target.example.com/initrd-checksum";
-      instance = "target"; # the controller's instance name
       timeout = 15;
     };
   };
