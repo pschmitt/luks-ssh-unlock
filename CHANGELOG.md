@@ -173,6 +173,8 @@ options and the container interface are compatible.
 
 ### Fixed
 
+- Update `url` to 2.5.9 to address RUSTSEC-2026-0592.
+
 - Receiver accounts can traverse existing private baseline parent directories
   without granting them permission to list those directories.
 - A busy receiver refuses a push immediately, preventing an SSH session that
