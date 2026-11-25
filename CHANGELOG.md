@@ -166,6 +166,11 @@ options and the container interface are compatible.
 
 ### Fixed
 
+- Receiver accounts can traverse existing private baseline parent directories
+  without granting them permission to list those directories.
+- A busy receiver refuses a push immediately, preventing an SSH session that
+  timed out from later installing an outdated baseline.
+
 - `tui`: VNC uses explicit Kitty placements in tmux, including normal panes,
   avoiding blank frames from rapidly changing virtual placeholders. Placements
   remain pane-sized and are redrawn when the tmux layout changes. On pane resize,

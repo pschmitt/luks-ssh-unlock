@@ -33,7 +33,7 @@ pkgs.testers.runNixOSTest {
             ];
             identityFile = "/etc/push-key";
             knownHostsFile = "/etc/controller-known-hosts";
-            destination = "/tmp/baselines/target/initrd-checksum";
+            destination = "/tmp/private/baselines/target/initrd-checksum";
             instance = "target";
             timeout = 20;
           };
@@ -65,7 +65,7 @@ pkgs.testers.runNixOSTest {
         instances.target = {
           hostname = "target";
           initrdCheck = {
-            dir = "/tmp/baselines";
+            dir = "/tmp/private/baselines";
             pushReceiver = {
               enable = true;
               authorizedKeysFile = "/etc/target-push-key.pub";
@@ -147,6 +147,13 @@ pkgs.testers.runNixOSTest {
           target.succeed(f"ln -sfn {old} {path}")
           controller.succeed(f"{check} --diff /tmp/v2")
 
+      with subtest("the receiver can traverse private parent directories"):
+          controller.succeed("${pkgs.acl}/bin/setfacl -b /tmp/private /tmp/private/baselines")
+          controller.succeed("chmod 700 /tmp/private /tmp/private/baselines")
+          controller.succeed("systemd-tmpfiles --create")
+          controller.succeed("runuser -u luks-push-target -- test -x /tmp/private/baselines")
+          controller.fail("runuser -u luks-push-target -- test -r /tmp/private/baselines")
+
       with subtest("the activation baseline is the image's"):
           target.switch_root()
           target.wait_for_unit("multi-user.target")
@@ -164,8 +171,8 @@ pkgs.testers.runNixOSTest {
               "ssh-keygen -Y verify -f /tmp/signers -I target -n initrd-checksum"
               + " -s /etc/initrd-checksum/checksum.sig < /etc/initrd-checksum/checksum",
           )
-          controller.succeed("cmp /tmp/baselines/target/initrd-checksum/checksum /tmp/v2")
-          controller.succeed("test -s /tmp/baselines/target/initrd-checksum/checksum.sig")
+          controller.succeed("cmp /tmp/private/baselines/target/initrd-checksum/checksum /tmp/v2")
+          controller.succeed("test -s /tmp/private/baselines/target/initrd-checksum/checksum.sig")
           controller.succeed("journalctl --no-pager _SYSTEMD_UNIT=luks-ssh-unlock-target.service + SYSLOG_IDENTIFIER=luks-ssh-unlock-push-target | grep 'Received signed initrd baseline'")
 
       with subtest("the receiver rejects shell commands and symlink archives"):
@@ -176,10 +183,12 @@ pkgs.testers.runNixOSTest {
           controller.fail("test -e /tmp/escaped")
 
       with subtest("a busy controller cannot hold up activation"):
-          controller.succeed("systemd-run --unit=hold-baseline-lock ${pkgs.util-linux}/bin/flock /tmp/baselines/target ${pkgs.coreutils}/bin/sleep 60")
-          retry(lambda _: controller.execute("flock -n /tmp/baselines/target true")[0] != 0)
+          before = controller.succeed("stat -c %i /tmp/private/baselines/target/initrd-checksum/checksum").strip()
+          controller.succeed("systemd-run --unit=hold-baseline-lock ${pkgs.util-linux}/bin/flock /tmp/private/baselines/target ${pkgs.coreutils}/bin/sleep 60")
+          retry(lambda _: controller.execute("flock -n /tmp/private/baselines/target true")[0] != 0)
           target.succeed("timeout 120 /run/current-system/activate")
           controller.succeed("systemctl stop hold-baseline-lock.service")
+          controller.succeed(f"test $(stat -c %i /tmp/private/baselines/target/initrd-checksum/checksum) = {before}")
 
       with subtest("an unreachable controller does not fail activation"):
           controller.succeed("systemctl stop sshd.service")

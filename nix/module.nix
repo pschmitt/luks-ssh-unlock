@@ -229,11 +229,17 @@ in
       mapAttrsToList (
         _: instance:
         let
-          hostDir = "${toString instance.initrdCheck.dir}/${instance.hostname}";
+          baseDir = toString instance.initrdCheck.dir;
+          parentDir = dirOf baseDir;
+          hostDir = "${baseDir}/${instance.hostname}";
+          user = receiverUser instance;
         in
-        [
+        [ "d ${baseDir} :0700 :root :root - -" ]
+        ++ optional (parentDir != "/") "a+ ${parentDir} - - - - u:${user}:--x"
+        ++ [
+          "a+ ${baseDir} - - - - u:${user}:--x"
           "d ${hostDir} 0755 root root - -"
-          "d ${hostDir}/initrd-checksum 0755 ${receiverUser instance} ${receiverUser instance} - -"
+          "d ${hostDir}/initrd-checksum 0755 ${user} ${user} - -"
         ]
       ) receivers
     );

@@ -86,6 +86,9 @@ bumps reuse them from the cache.
   without its domain. The client uses its own hostname by default. Set
   `user` on both sides if those hostnames differ. Use `authorizedKeysFile`
   instead of `authorizedKeys` for a runtime public-key file.
+  The module grants the receiver traversal access to the baseline directory
+  and its parent. Any more distant private ancestors of a custom directory
+  must also allow traversal.
 
   ```nix
   services.luks-ssh-unlock.activationScript = {
@@ -93,9 +96,6 @@ bumps reuse them from the cache.
     push = {
       enable = true;
       host = "controller.example.com";
-      identityFile = "/run/secrets/baseline-push-key";
-      knownHostsFile = "/etc/ssh/controller-known-hosts";
-      timeout = 15;
     };
   };
   ```
@@ -103,12 +103,15 @@ bumps reuse them from the cache.
   With the module receiver, its configured target determines the destination
   and instance; the client-side values should match for compatibility with
   other controllers. Successful pushes are logged on the controller and appear
-  in the corresponding instance's dashboard activity. Pin its host key in
-  `knownHostsFile` and provision the private key outside the Nix store. A missing
-  signing key skips the push. A failed
-  or timed-out push only logs a warning; it does not fail activation. Polling
+  in the corresponding instance's dashboard activity. By default the client
+  authenticates with `/etc/ssh/ssh_host_ed25519_key` and checks the controller
+  against `/etc/ssh/ssh_known_hosts`. Both paths and the 15-second timeout are
+  configurable. Use `controllers` instead of `host` to push to multiple hosts.
+  A missing signing key skips the push. A failed or timed-out push only logs a
+  warning; it does not fail activation. Polling
   remains enabled as a fallback. Check the warning and ensure the controller
   has the new baseline before rebooting when the push fails.
+  A receiver that is busy fetching a baseline refuses the push immediately.
   Update the controller first: current versions serialize polling and pushes
   so a fetch already in progress cannot overwrite a newer pushed baseline.
 - `initrdCheck.requireSignature` refuses unsigned baselines; enable it once

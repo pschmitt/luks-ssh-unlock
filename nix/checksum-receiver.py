@@ -41,7 +41,9 @@ def main():
             # The controller's polling fetch locks the same parent directory.
             lock = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+                # Do not leave a disconnected SSH session queued behind a
+                # fetch: it could otherwise publish an old baseline later.
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 (destination / "checksum.sig").unlink(missing_ok=True)
                 for name in FILES:
                     os.replace(temp / name, destination / name)
