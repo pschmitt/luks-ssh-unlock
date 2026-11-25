@@ -28,6 +28,7 @@ pkgs.testers.runNixOSTest {
           activationScript.push = {
             enable = true;
             host = "controller";
+            user = "luks-push-target";
             identityFile = "/etc/push-key";
             knownHostsFile = "/etc/controller-known-hosts";
             destination = "/tmp/baselines/target/initrd-checksum";
@@ -55,6 +56,23 @@ pkgs.testers.runNixOSTest {
       };
 
     controller = { lib, ... }: {
+      imports = [ nixosModule ];
+      services.luks-ssh-unlock = {
+        enable = true;
+        inherit package;
+        instances.target = {
+          hostname = "target";
+          initrdCheck = {
+            dir = "/tmp/baselines";
+            pushReceiver = {
+              enable = true;
+              user = "luks-push-target";
+              authorizedKeys = [ (lib.readFile "${keys}/id_ed25519.pub") ];
+            };
+          };
+        };
+      };
+      systemd.services.luks-ssh-unlock-target.wantedBy = lib.mkForce [ ];
       environment = {
         systemPackages = [ package ];
         etc."ssh/test_host_key" = {
@@ -76,7 +94,6 @@ pkgs.testers.runNixOSTest {
           }
         ];
       };
-      users.users.root.openssh.authorizedKeys.keys = [ (lib.readFile "${keys}/id_ed25519.pub") ];
     };
   };
 
@@ -143,6 +160,13 @@ pkgs.testers.runNixOSTest {
           controller.succeed("cmp /tmp/baselines/target/initrd-checksum/checksum /tmp/v2")
           controller.succeed("test -s /tmp/baselines/target/initrd-checksum/checksum.sig")
           controller.succeed("journalctl --no-pager _SYSTEMD_UNIT=luks-ssh-unlock-target.service + SYSLOG_IDENTIFIER=luks-ssh-unlock-push-target | grep 'Received signed initrd baseline'")
+
+      with subtest("the receiver rejects shell commands and symlink archives"):
+          target.fail("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/controller-known-hosts -i /etc/push-key luks-push-target@controller 'touch /tmp/escaped' </dev/null")
+          controller.fail("test -e /tmp/escaped")
+          target.succeed("mkdir -p /tmp/evil-archive; ln -s /tmp/escaped /tmp/evil-archive/checksum; echo x > /tmp/evil-archive/checksum.sig; echo x > /tmp/evil-archive/meta.json; tar -C /tmp/evil-archive -cf /tmp/evil.tar checksum checksum.sig meta.json")
+          target.fail("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/controller-known-hosts -i /etc/push-key luks-push-target@controller ignored </tmp/evil.tar")
+          controller.fail("test -e /tmp/escaped")
 
       with subtest("a busy controller cannot hold up activation"):
           controller.succeed("systemd-run --unit=hold-baseline-lock ${pkgs.util-linux}/bin/flock /tmp/baselines/target ${pkgs.coreutils}/bin/sleep 60")

@@ -9,6 +9,9 @@ options and the container interface are compatible.
 
 ### New
 
+- The NixOS module can provision a dedicated restricted SSH receiver per target
+  for checksum pushes, with separate authorized client keys and no shell access.
+
 - The NixOS activation hook can optionally push its signed initrd baseline to
   the controller over SSH immediately. Successful pushes appear in the
   controller's dashboard activity; failures and timeouts only warn.

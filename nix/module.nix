@@ -16,6 +16,20 @@ let
   pathOrStr = types.either types.path types.str;
   nullPathOrStr = types.nullOr pathOrStr;
   inherit (cfg) package;
+  receivers = filterAttrs (_: instance: instance.initrdCheck.pushReceiver.enable) cfg.instances;
+  receiverProgram = pkgs.replaceVars ./checksum-receiver.py {
+    logger = "${pkgs.util-linux}/bin/logger";
+  };
+  receiverCommand =
+    name: instance:
+    pkgs.writeShellScript "luks-checksum-receiver-${name}" ''
+      exec ${pkgs.python3}/bin/python3 ${receiverProgram} ${
+        escapeShellArgs [
+          "${toString instance.initrdCheck.dir}/${instance.hostname}/initrd-checksum"
+          name
+        ]
+      }
+    '';
   # Settings of one graphical source that the others' files must not carry
   # (the file rejects settings it does not know).
   openstackOnly = [
@@ -176,6 +190,47 @@ in
 {
   config = mkIf cfg.enable {
     environment.systemPackages = [ package ] ++ adHocUnlockers;
+
+    users.users =
+      mapAttrs
+        (_: instance: {
+          name = instance.initrdCheck.pushReceiver.user;
+          isSystemUser = true;
+          group = instance.initrdCheck.pushReceiver.user;
+          home = "/var/empty";
+          createHome = false;
+          shell = pkgs.bashInteractive;
+          openssh.authorizedKeys.keys = instance.initrdCheck.pushReceiver.authorizedKeys;
+        })
+        (mapAttrs' (_: instance: nameValuePair instance.initrdCheck.pushReceiver.user instance) receivers);
+    users.groups = mapAttrs' (
+      _: instance: nameValuePair instance.initrdCheck.pushReceiver.user { }
+    ) receivers;
+    services.openssh.enable = mkIf (receivers != { }) (mkDefault true);
+    services.openssh.extraConfig = concatStringsSep "\n" (
+      mapAttrsToList (name: instance: ''
+        Match User ${instance.initrdCheck.pushReceiver.user}
+          ForceCommand ${receiverCommand name instance}
+          DisableForwarding yes
+          PermitTTY no
+          PermitUserRC no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+        Match all
+      '') receivers
+    );
+    systemd.tmpfiles.rules = concatLists (
+      mapAttrsToList (
+        _: instance:
+        let
+          hostDir = "${toString instance.initrdCheck.dir}/${instance.hostname}";
+        in
+        [
+          "d ${hostDir} 0755 root root - -"
+          "d ${hostDir}/initrd-checksum 0755 ${instance.initrdCheck.pushReceiver.user} ${instance.initrdCheck.pushReceiver.user} - -"
+        ]
+      ) receivers
+    );
 
     # Define environment files
     environment.etc =
@@ -384,6 +439,33 @@ in
 
     assertions =
       (mapAttrsToList (name: instance: {
+        assertion =
+          instance.initrdCheck.dir != null
+          && instance.initrdCheck.pushReceiver.authorizedKeys != [ ]
+          && builtins.match "luks-push-[a-z0-9_-]{1,22}" instance.initrdCheck.pushReceiver.user != null
+          && builtins.match "[A-Za-z0-9][A-Za-z0-9._-]*" instance.hostname != null
+          && instance.hostname != "."
+          && instance.hostname != "..";
+        message = "services.luks-ssh-unlock.instances.${name}.initrdCheck.pushReceiver needs a safe username, hostname, checksum directory and at least one authorized key";
+      }) receivers)
+      ++ [
+        {
+          assertion =
+            length (unique (mapAttrsToList (_: instance: instance.initrdCheck.pushReceiver.user) receivers))
+            == length (attrNames receivers);
+          message = "Each initrd checksum push receiver needs a distinct user";
+        }
+        {
+          assertion =
+            length (
+              unique (
+                mapAttrsToList (_: instance: "${toString instance.initrdCheck.dir}/${instance.hostname}") receivers
+              )
+            ) == length (attrNames receivers);
+          message = "Each initrd checksum push receiver needs a distinct baseline directory";
+        }
+      ]
+      ++ (mapAttrsToList (name: instance: {
         assertion = !(instance.sshKnownHosts != "" && instance.sshKnownHostsFile != null);
         message = "services.luks-ssh-unlocker.instances.${name} cannot set both sshKnownHosts and sshKnownHostsFile";
       }) cfg.instances)
@@ -868,6 +950,19 @@ in
               type = types.submodule {
                 options = {
                   enable = mkEnableOption "Enable initrd integrity validation and snapshot collection.";
+                  pushReceiver = {
+                    enable = mkEnableOption "a restricted SSH account for this target's checksum pushes";
+                    user = mkOption {
+                      type = types.str;
+                      default = "luks-push-default";
+                      description = "Dedicated controller SSH account for this target.";
+                    };
+                    authorizedKeys = mkOption {
+                      type = types.listOf types.str;
+                      default = [ ];
+                      description = "Client public keys authorized to send this target's baseline.";
+                    };
+                  };
                   file = mkOption {
                     type = nullPathOrStr;
                     default = null;
