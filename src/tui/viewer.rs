@@ -407,7 +407,7 @@ impl App {
         }
         if running && self.vnc_ready(idx, c).is_some() && self.vnc.renderer.is_some() {
             // Under a dialog the picture goes away; the cells stay empty.
-            if self.confirm.is_none() && !self.help && !self.info {
+            if !self.vnc_obscured() {
                 let pane = PaneRect::new(inner.x, inner.y, inner.width, inner.height);
                 self.vnc.area = Some(inner);
                 self.vnc.placeholders = self.paint_placeholders(f.buffer_mut(), pane);
@@ -453,6 +453,11 @@ impl App {
             lines.push(Line::from("starting…".dim()));
         }
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+
+    /// Kitty placements can cover terminal text, so hide them under dialogs.
+    pub(super) fn vnc_obscured(&self) -> bool {
+        self.confirm.is_some() || self.help || self.info || self.filtering
     }
 
     /// Put the picture on the screen (or take it off), after the frame's

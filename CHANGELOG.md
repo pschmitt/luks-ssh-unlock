@@ -9,7 +9,8 @@ options and the container interface are compatible.
 
 ### New
 
-- `tui`: the host switcher has an opaque background over graphical consoles.
+- `tui`: the host switcher hides the graphical console while it is open, so
+  Kitty graphics cannot cover the dialog.
 
 - `tui`: embedded VNC console support uses an in-process RFB client and Kitty
   graphics renderer, including tmux passthrough support.

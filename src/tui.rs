@@ -3722,6 +3722,16 @@ mod tests {
     }
 
     #[test]
+    fn switcher_hides_the_vnc_image_until_closed() {
+        let mut a = app(3);
+        assert!(!a.vnc_obscured());
+        a.open_switcher();
+        assert!(a.vnc_obscured());
+        a.close_switcher(None);
+        assert!(!a.vnc_obscured());
+    }
+
+    #[test]
     fn host_switcher_has_an_opaque_background() {
         let mut a = app(3);
         a.open_switcher();
