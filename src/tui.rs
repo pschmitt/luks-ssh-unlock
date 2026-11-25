@@ -1305,8 +1305,22 @@ fn worker(
 /// service logs something: it only logs on state changes and unlocks, so
 /// this catches them without waiting for the next periodic check.
 fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>) {
+    let instance = unit
+        .strip_prefix("luks-ssh-unlock-")
+        .and_then(|s| s.strip_suffix(".service"))
+        .unwrap_or(&unit);
+    let push_identifier = format!("SYSLOG_IDENTIFIER=luks-ssh-unlock-push-{instance}");
+    let service_unit = format!("_SYSTEMD_UNIT={unit}");
     let history = Command::new("journalctl")
-        .args(["--no-pager", "--output=json", "-n", "200", "-u", &unit])
+        .args([
+            "--no-pager",
+            "--output=json",
+            "-n",
+            "200",
+            &service_unit,
+            "+",
+            &push_identifier,
+        ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -1320,10 +1334,19 @@ fn follow_journal(idx: usize, unit: String, probe: Sender<Cmd>, tx: Sender<Msg>)
     let _ = tx.send(Msg::History(idx, history));
 
     let mut cmd = Command::new("journalctl");
-    cmd.args(["--no-pager", "--output=json", "-n", "0", "-f", "-u", &unit])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    cmd.args([
+        "--no-pager",
+        "--output=json",
+        "-n",
+        "0",
+        "-f",
+        &service_unit,
+        "+",
+        &push_identifier,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
     // Do not leave journalctl running when the dashboard exits.
     unsafe {
         cmd.pre_exec(|| {

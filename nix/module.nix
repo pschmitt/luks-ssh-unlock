@@ -567,6 +567,7 @@ in
                 pkgs.gnused
                 pkgs.jq
                 pkgs.openssh
+                pkgs.gnutar
               ]
             }
 
@@ -644,6 +645,46 @@ in
               mv -f "''${TMP_DIR}/checksum.sig" "$SIG_FILE"
             fi
             mv -f "''${TMP_DIR}/meta.json" "$META_FILE"
+            ${optionalString cfg.activationScript.push.enable ''
+              # Never publish an unsigned baseline or hold up activation when
+              # the controller is unreachable. The controller stages the files
+              # before replacing its existing baseline.
+              if [ "$SIGNED" = 1 ]
+              then
+                if ! tar -C "$CHECKSUM_DIR" -cf - checksum checksum.sig meta.json | \
+                  timeout -k 5s ${toString cfg.activationScript.push.timeout}s ssh \
+                    -o BatchMode=yes -o StrictHostKeyChecking=yes -o ControlPath=none \
+                    -o UserKnownHostsFile=${escapeShellArg (toString cfg.activationScript.push.knownHostsFile)} \
+                    -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes \
+                    -i ${escapeShellArg (toString cfg.activationScript.push.identityFile)} \
+                    -p ${toString cfg.activationScript.push.port} \
+                    -l ${escapeShellArg cfg.activationScript.push.user} \
+                    ${escapeShellArg cfg.activationScript.push.host} \
+                    ${escapeShellArg ''
+                      set -eu
+                      dest=${escapeShellArg cfg.activationScript.push.destination}
+                      mkdir -p "$dest"
+                      # Serialize with the controller's polling fetch, which
+                      # locks the per-host parent directory before copying.
+                      exec 9<"$dest/.."
+                      flock -x 9
+                      tmp=$(mktemp -d "$dest/.push.XXXXXX")
+                      trap 'rm -rf "$tmp"' EXIT
+                      tar -xf - -C "$tmp"
+                      test -s "$tmp/checksum" && test -s "$tmp/checksum.sig" && test -s "$tmp/meta.json"
+                      rm -f "$dest/checksum.sig"
+                      mv -f "$tmp/checksum" "$dest/checksum"
+                      mv -f "$tmp/checksum.sig" "$dest/checksum.sig"
+                      mv -f "$tmp/meta.json" "$dest/meta.json"
+                      logger -t ${escapeShellArg "luks-ssh-unlock-push-${cfg.activationScript.push.instance}"} "Received signed initrd baseline" || :
+                    ''}
+                then
+                  echo "luks-ssh-unlock: warning: could not push the initrd checksum baseline" >&2
+                fi
+              else
+                echo "luks-ssh-unlock: warning: not pushing an unsigned initrd checksum baseline" >&2
+              fi
+            ''}
           ''} || echo "luks-ssh-unlock: warning: could not compute the initrd checksum baseline" >&2
         '';
       };
@@ -689,6 +730,44 @@ in
     };
     activationScript = {
       enable = mkEnableOption "Generate initrd checksum and metadata during activation";
+      push = {
+        enable = mkEnableOption "best-effort SSH push of the signed initrd baseline to a controller";
+        host = mkOption {
+          type = types.str;
+          description = "Controller SSH host.";
+        };
+        user = mkOption {
+          type = types.str;
+          default = "root";
+          description = "Controller SSH user.";
+        };
+        port = mkOption {
+          type = types.port;
+          default = 22;
+          description = "Controller SSH port.";
+        };
+        identityFile = mkOption {
+          type = pathOrStr;
+          description = "Runtime path to the client SSH private key.";
+        };
+        knownHostsFile = mkOption {
+          type = pathOrStr;
+          description = "Runtime path to pinned controller SSH host keys.";
+        };
+        destination = mkOption {
+          type = types.str;
+          description = "Controller baseline directory, including the target hostname and initrd-checksum components.";
+        };
+        instance = mkOption {
+          type = types.str;
+          description = "Controller instance name, used to show push events in its dashboard activity.";
+        };
+        timeout = mkOption {
+          type = types.ints.positive;
+          default = 15;
+          description = "Maximum SSH push duration in seconds, plus up to five seconds for forced termination.";
+        };
+      };
       dir = mkOption {
         type = pathOrStr;
         default = "/etc/initrd-checksum";

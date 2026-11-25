@@ -25,7 +25,21 @@ pkgs.testers.runNixOSTest {
           enable = true;
           inherit package;
           activationScript.enable = true;
+          activationScript.push = {
+            enable = true;
+            host = "controller";
+            identityFile = "/etc/push-key";
+            knownHostsFile = "/etc/controller-known-hosts";
+            destination = "/tmp/baselines/target/initrd-checksum";
+            instance = "target";
+            timeout = 20;
+          };
         };
+        environment.etc.push-key = {
+          source = "${keys}/id_ed25519";
+          mode = "0600";
+        };
+        environment.etc.controller-known-hosts.text = "controller ${lib.readFile "${keys}/ssh_host_ed25519_key.pub"}";
         services.openssh.enable = true;
         testing.initrdBackdoor = true;
         boot.initrd.network = {
@@ -40,12 +54,29 @@ pkgs.testers.runNixOSTest {
         boot.initrd.secrets.${hostKey} = lib.mkForce "${keys}/ssh_host_ed25519_key";
       };
 
-    controller = {
-      environment.systemPackages = [ package ];
-      environment.etc.sshKey = {
-        source = "${keys}/id_ed25519";
-        mode = "0600";
+    controller = { lib, ... }: {
+      environment = {
+        systemPackages = [ package ];
+        etc."ssh/test_host_key" = {
+          source = "${keys}/ssh_host_ed25519_key";
+          mode = "0600";
+        };
+        etc.sshKey = {
+          source = "${keys}/id_ed25519";
+          mode = "0600";
+        };
       };
+      services.openssh = {
+        enable = true;
+        settings.PermitRootLogin = "yes";
+        hostKeys = [
+          {
+            path = "/etc/ssh/test_host_key";
+            type = "ed25519";
+          }
+        ];
+      };
+      users.users.root.openssh.authorizedKeys.keys = [ (lib.readFile "${keys}/id_ed25519.pub") ];
     };
   };
 
@@ -59,6 +90,7 @@ pkgs.testers.runNixOSTest {
 
       start_all()
       controller.wait_for_unit("network.target")
+      controller.wait_for_unit("sshd.service")
       with controller.nested("waiting for the initrd's SSH server"):
           retry(lambda _: controller.execute("nc -z target 22")[0] == 0)
 
@@ -108,5 +140,18 @@ pkgs.testers.runNixOSTest {
               "ssh-keygen -Y verify -f /tmp/signers -I target -n initrd-checksum"
               + " -s /etc/initrd-checksum/checksum.sig < /etc/initrd-checksum/checksum",
           )
+          controller.succeed("cmp /tmp/baselines/target/initrd-checksum/checksum /tmp/v2")
+          controller.succeed("test -s /tmp/baselines/target/initrd-checksum/checksum.sig")
+          controller.succeed("journalctl --no-pager _SYSTEMD_UNIT=luks-ssh-unlock-target.service + SYSLOG_IDENTIFIER=luks-ssh-unlock-push-target | grep 'Received signed initrd baseline'")
+
+      with subtest("a busy controller cannot hold up activation"):
+          controller.succeed("systemd-run --unit=hold-baseline-lock ${pkgs.util-linux}/bin/flock /tmp/baselines/target ${pkgs.coreutils}/bin/sleep 60")
+          retry(lambda _: controller.execute("flock -n /tmp/baselines/target true")[0] != 0)
+          target.succeed("timeout 120 /run/current-system/activate")
+          controller.succeed("systemctl stop hold-baseline-lock.service")
+
+      with subtest("an unreachable controller does not fail activation"):
+          controller.succeed("systemctl stop sshd.service")
+          target.succeed("timeout 120 /run/current-system/activate")
     '';
 }

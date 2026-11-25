@@ -61,6 +61,38 @@ bumps reuse them from the cache.
   unit gets `CAP_NET_RAW`.
 - `activationScript.enable` computes the host's own initrd baseline on
   activation and signs it with `/etc/ssh/ssh_host_ed25519_key`.
+- `activationScript.push` can send that signed baseline to the controller
+  immediately, without waiting for its next polling tick:
+
+  ```nix
+  services.luks-ssh-unlock.activationScript = {
+    enable = true;
+    push = {
+      enable = true;
+      host = "controller.example.com";
+      user = "baseline-writer";
+      identityFile = "/run/secrets/baseline-push-key";
+      knownHostsFile = "/etc/ssh/controller-known-hosts";
+      destination = "/var/lib/luks-ssh-unlock/initrd-checksum/target.example.com/initrd-checksum";
+      instance = "target"; # the controller's instance name
+      timeout = 15;
+    };
+  };
+  ```
+
+  The destination must match the controller's `initrdCheck.dir` and target
+  hostname, and be writable by the SSH account. The controller needs `sh`,
+  `tar`, `mktemp`, `flock`, `logger` and coreutils, and the SSH account must
+  be able to open the destination's parent directory. Successful pushes are logged on
+  the controller and appear in the corresponding instance's dashboard activity.
+  Pin its host key in `knownHostsFile` and
+  provision the private key outside the Nix store. Restrict the account and
+  key to the baseline directory. A missing signing key skips the push. A failed
+  or timed-out push only logs a warning; it does not fail activation. Polling
+  remains enabled as a fallback. Check the warning and ensure the controller
+  has the new baseline before rebooting when the push fails.
+  Update the controller first: current versions serialize polling and pushes
+  so a fetch already in progress cannot overwrite a newer pushed baseline.
 - `initrdCheck.requireSignature` refuses unsigned baselines; enable it once
   every target has a signed one, and set `initrdCheck.dir` so baselines are
   fetched.

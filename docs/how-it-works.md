@@ -42,6 +42,9 @@ The host computes its baseline itself with `initrd-checksum check` and signs
 it with its SSH host key (`ssh-keygen -Y sign -n initrd-checksum`). The NixOS
 module does this on activation (`activationScript.enable`). The unlocker
 copies the baseline while the host is up and uses it at the next boot.
+Optionally, the host also pushes its signed baseline to the controller during
+activation. The push has a deadline and failure does not block activation;
+the normal polling fetch remains the fallback.
 
 The measuring is done by `initrd-measure`, a static binary (x86_64 or
 aarch64, picked by the target's `uname -m`). For a remote check,

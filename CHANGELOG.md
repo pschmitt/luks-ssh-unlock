@@ -9,6 +9,10 @@ options and the container interface are compatible.
 
 ### New
 
+- The NixOS activation hook can optionally push its signed initrd baseline to
+  the controller over SSH immediately. Successful pushes appear in the
+  controller's dashboard activity; failures and timeouts only warn.
+
 - `tui`: the host switcher hides the graphical console while it is open, so
   Kitty graphics cannot cover the dialog.
 

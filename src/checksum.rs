@@ -3,6 +3,7 @@
 //! target.
 
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -168,6 +169,17 @@ impl Ctx {
             return Ok(());
         };
         let host_dir = dir.join(&self.s.hostname);
+        if let Err(e) = fs::create_dir_all(&host_dir) {
+            self.log
+                .warn(format!("Cannot create {}: {e}", host_dir.display()));
+            return Ok(());
+        }
+        let lock = fs::File::open(&host_dir)?;
+        // SAFETY: the descriptor belongs to `lock`, which remains open until
+        // this function returns. flock does not access Rust memory.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
         let checksum = host_dir.join("initrd-checksum").join("checksum");
         let stamp = host_dir.join(".fingerprint");
         let fingerprint = self.remote_baseline_fingerprint()?;
@@ -182,11 +194,6 @@ impl Ctx {
             return Ok(());
         }
         let before = fs::read(&checksum).ok();
-        if let Err(e) = fs::create_dir_all(&host_dir) {
-            self.log
-                .warn(format!("Cannot create {}: {e}", host_dir.display()));
-            return Ok(());
-        }
         let out = self.exec(
             self.scp_from(KnownHostsKind::Default, "/etc/initrd-checksum/", &host_dir),
             None,
