@@ -2983,6 +2983,7 @@ impl App {
         let list = List::new(items)
             .block(
                 Block::bordered()
+                    .style(Style::new().bg(Color::Black))
                     .title(format!(" switch host · {}▏ ", self.filter))
                     .border_style(Style::new().cyan()),
             )
@@ -3718,6 +3719,25 @@ mod tests {
         a.key(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(a.log_scroll, 1);
         assert_eq!(a.selected(), 1);
+    }
+
+    #[test]
+    fn host_switcher_has_an_opaque_background() {
+        let mut a = app(3);
+        a.open_switcher();
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        let area = a.hit.switcher;
+        let buffer = term.backend().buffer();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let bg = buffer[(x, y)].bg;
+                assert!(
+                    bg == Color::Black || bg == Color::DarkGray,
+                    "({x}, {y}): {bg:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -9,6 +9,8 @@ options and the container interface are compatible.
 
 ### New
 
+- `tui`: the host switcher has an opaque background over graphical consoles.
+
 - `tui`: embedded VNC console support uses an in-process RFB client and Kitty
   graphics renderer, including tmux passthrough support.
 - `tui`: typed per-target console settings support OCI and OpenStack serial
