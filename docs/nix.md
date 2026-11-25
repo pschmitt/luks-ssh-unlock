@@ -82,9 +82,10 @@ bumps reuse them from the cache.
   and an SSH forced command. Each target needs its own account and keys; the
   account cannot open a shell, allocate a TTY, or forward connections. It can
   submit only a bounded archive for that target's configured baseline path.
-  The default username is `luks-push-` followed by the target's hostname
+  The default username is `luks-ssh-unlock-push-` followed by the target's hostname
   without its domain. The client uses its own hostname by default. Set
-  `user` on both sides if those hostnames differ. Use `authorizedKeysFile`
+  `user` on both sides if those hostnames differ or exceed 11 characters
+  (the account name must fit in 32 characters). Use `authorizedKeysFile`
   instead of `authorizedKeys` for a runtime public-key file.
   The module grants the receiver traversal access to the baseline directory
   and its parent. Any more distant private ancestors of a custom directory

@@ -9,6 +9,10 @@ options and the container interface are compatible.
 
 ### New
 
+- Default checksum push account names now use `luks-ssh-unlock-push-<hostname>`.
+  Legacy default accounts' traversal ACLs are removed before their users are
+  replaced, while explicitly configured legacy names remain supported.
+
 - Checksum push accounts default to a hostname-derived username on both sides;
   receiver public keys can also be supplied through a runtime file.
 

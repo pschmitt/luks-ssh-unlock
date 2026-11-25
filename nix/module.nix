@@ -20,7 +20,7 @@ let
   receiverUser =
     instance:
     if instance.initrdCheck.pushReceiver.user == null then
-      "luks-push-${head (splitString "." instance.hostname)}"
+      "luks-ssh-unlock-push-${head (splitString "." instance.hostname)}"
     else
       instance.initrdCheck.pushReceiver.user;
   receiverProgram = pkgs.replaceVars ./checksum-receiver.py {
@@ -465,7 +465,10 @@ in
             instance.initrdCheck.pushReceiver.authorizedKeysFile == null
             || builtins.match "/[^[:space:]#%]+" instance.initrdCheck.pushReceiver.authorizedKeysFile != null
           )
-          && builtins.match "luks-push-[a-z0-9_-]{1,22}" (receiverUser instance) != null
+          &&
+            builtins.match "(luks-ssh-unlock-push-[a-z0-9_-]{1,11}|luks-push-[a-z0-9_-]{1,22})" (
+              receiverUser instance
+            ) != null
           && builtins.match "[A-Za-z0-9][A-Za-z0-9._-]*" instance.hostname != null
           && instance.hostname != "."
           && instance.hostname != "..";
@@ -661,8 +664,41 @@ in
           }
         ) (filterAttrs (_: instance: instance.dhcpListener.enable) cfg.instances);
 
-    system.activationScripts = mkIf cfg.activationScript.enable {
-      luksInitrdChecksum = {
+    system.activationScripts = {
+      # Remove ACLs for the former default accounts before NixOS removes
+      # those users; otherwise a subsequently reused UID could inherit them.
+      luksPushLegacyAcl = mkIf (receivers != { }) {
+        text = concatStringsSep "\n" (
+          mapAttrsToList (
+            _: instance:
+            let
+              legacy = "luks-push-${head (splitString "." instance.hostname)}";
+              activeUsers = mapAttrsToList (_: receiverUser) receivers;
+              baseDir = toString instance.initrdCheck.dir;
+            in
+            optionalString (!(elem legacy activeUsers)) ''
+              if ${pkgs.coreutils}/bin/id -u ${escapeShellArg legacy} >/dev/null 2>&1
+              then
+                for dir in ${
+                  escapeShellArgs [
+                    (dirOf baseDir)
+                    baseDir
+                  ]
+                }
+                do
+                  if [ -d "$dir" ]
+                  then
+                    ${pkgs.acl}/bin/setfacl -n -x ${escapeShellArg "u:${legacy}"} "$dir" || \
+                      echo "luks-ssh-unlock: warning: could not remove legacy receiver ACL" >&2
+                  fi
+                done
+              fi
+            ''
+          ) receivers
+        );
+      };
+      users.deps = mkIf (receivers != { }) [ "luksPushLegacyAcl" ];
+      luksInitrdChecksum = mkIf cfg.activationScript.enable {
         deps = [ "etc" ];
         text = ''
           # Activation snippets share one shell, and a failure here would abort
@@ -865,7 +901,7 @@ in
         };
         user = mkOption {
           type = types.str;
-          default = "luks-push-${config.networking.hostName}";
+          default = "luks-ssh-unlock-push-${config.networking.hostName}";
           description = "Controller SSH user.";
         };
         port = mkOption {

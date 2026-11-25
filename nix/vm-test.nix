@@ -74,6 +74,11 @@ pkgs.testers.runNixOSTest {
         };
       };
       systemd.services.luks-ssh-unlock-target.wantedBy = lib.mkForce [ ];
+      users.groups.luks-push-target = { };
+      users.users.luks-push-target = {
+        isSystemUser = true;
+        group = "luks-push-target";
+      };
       environment = {
         systemPackages = [ package ];
         etc = {
@@ -151,8 +156,14 @@ pkgs.testers.runNixOSTest {
           controller.succeed("${pkgs.acl}/bin/setfacl -b /tmp/private /tmp/private/baselines")
           controller.succeed("chmod 700 /tmp/private /tmp/private/baselines")
           controller.succeed("systemd-tmpfiles --create")
-          controller.succeed("runuser -u luks-push-target -- test -x /tmp/private/baselines")
-          controller.fail("runuser -u luks-push-target -- test -r /tmp/private/baselines")
+          controller.succeed("runuser -u luks-ssh-unlock-push-target -- test -x /tmp/private/baselines")
+          controller.fail("runuser -u luks-ssh-unlock-push-target -- test -r /tmp/private/baselines")
+
+      with subtest("legacy receiver ACLs are removed before users change"):
+          controller.succeed("${pkgs.acl}/bin/setfacl -m u:luks-push-target:--x /tmp/private /tmp/private/baselines")
+          controller.succeed("/run/current-system/activate")
+          controller.fail("${pkgs.acl}/bin/getfacl -cp /tmp/private/baselines | grep '^user:luks-push-target:'")
+          controller.succeed("runuser -u luks-ssh-unlock-push-target -- test -x /tmp/private/baselines")
 
       with subtest("the activation baseline is the image's"):
           target.switch_root()
@@ -176,10 +187,10 @@ pkgs.testers.runNixOSTest {
           controller.succeed("journalctl --no-pager _SYSTEMD_UNIT=luks-ssh-unlock-target.service + SYSLOG_IDENTIFIER=luks-ssh-unlock-push-target | grep 'Received signed initrd baseline'")
 
       with subtest("the receiver rejects shell commands and symlink archives"):
-          target.fail("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/controller-known-hosts -i /etc/push-key luks-push-target@controller 'touch /tmp/escaped' </dev/null")
+          target.fail("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/controller-known-hosts -i /etc/push-key luks-ssh-unlock-push-target@controller 'touch /tmp/escaped' </dev/null")
           controller.fail("test -e /tmp/escaped")
           target.succeed("mkdir -p /tmp/evil-archive; ln -s /tmp/escaped /tmp/evil-archive/checksum; echo x > /tmp/evil-archive/checksum.sig; echo x > /tmp/evil-archive/meta.json; tar -C /tmp/evil-archive -cf /tmp/evil.tar checksum checksum.sig meta.json")
-          target.fail("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/controller-known-hosts -i /etc/push-key luks-push-target@controller ignored </tmp/evil.tar")
+          target.fail("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/controller-known-hosts -i /etc/push-key luks-ssh-unlock-push-target@controller ignored </tmp/evil.tar")
           controller.fail("test -e /tmp/escaped")
 
       with subtest("a busy controller cannot hold up activation"):
