@@ -193,6 +193,12 @@ pkgs.testers.runNixOSTest {
           target.fail("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/controller-known-hosts -i /etc/push-key luks-ssh-unlock-push-target@controller ignored </tmp/evil.tar")
           controller.fail("test -e /tmp/escaped")
 
+      with subtest("receiver logins do not start a systemd user manager"):
+          target.succeed("systemd-run --unit=hold-push-session /bin/sh -c '${pkgs.coreutils}/bin/sleep 120 | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/controller-known-hosts -i /etc/push-key luks-ssh-unlock-push-target@controller ignored'")
+          retry(lambda _: controller.execute("${pkgs.procps}/bin/pgrep -u $(id -u luks-ssh-unlock-push-target) -f checksum-receiver.py")[0] == 0)
+          controller.fail("systemctl is-active user@$(id -u luks-ssh-unlock-push-target).service")
+          target.succeed("systemctl stop hold-push-session.service")
+
       with subtest("a busy controller cannot hold up activation"):
           before = controller.succeed("stat -c %i /tmp/private/baselines/target/initrd-checksum/checksum").strip()
           controller.succeed("systemd-run --unit=hold-baseline-lock ${pkgs.util-linux}/bin/flock /tmp/private/baselines/target ${pkgs.coreutils}/bin/sleep 60")

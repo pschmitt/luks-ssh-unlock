@@ -9,6 +9,9 @@ options and the container interface are compatible.
 
 ### New
 
+- Checksum receiver logins avoid creating transient user sessions that can
+  interfere with a NixOS switch.
+
 - Default checksum push account names now use `luks-ssh-unlock-push-<hostname>`.
   Legacy default accounts' traversal ACLs are removed before their users are
   replaced, while explicitly configured legacy names remain supported.

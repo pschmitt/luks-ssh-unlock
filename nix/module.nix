@@ -213,6 +213,7 @@ in
         mapAttrsToList (name: instance: ''
           Match User ${receiverUser instance}
             ForceCommand ${receiverCommand name instance}
+            PAMServiceName luks-ssh-unlock-push
             ${optionalString (
               instance.initrdCheck.pushReceiver.authorizedKeysFile != null
             ) "AuthorizedKeysFile ${instance.initrdCheck.pushReceiver.authorizedKeysFile}"}
@@ -224,6 +225,11 @@ in
           Match all
         '') receivers
       );
+    };
+    # A checksum-only SSH login needs no logind user session. Avoid creating
+    # transient user managers that can race a NixOS switch's user activation.
+    security.pam.services.luks-ssh-unlock-push = mkIf (receivers != { }) {
+      startSession = false;
     };
     systemd.tmpfiles.rules = concatLists (
       mapAttrsToList (
